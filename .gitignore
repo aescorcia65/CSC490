@@ -36,6 +36,7 @@ __pycache__/
 .eggs/
 dist/
 *.egg
+/firebase_secret.json
 
 # === Node / WebUI ===
 node_modules/

@@ -9,7 +9,8 @@ This file creates the FastAPI app and mounts all routers.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import health, items
+from app.database import init_db
+from app.routers import auth, health, items
 
 app = FastAPI(
     title="CSC490 Backend API",
@@ -26,8 +27,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Create DB tables on startup
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
 # Include routers (each router = a group of related endpoints)
 app.include_router(health.router, prefix="/health", tags=["health"])
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(items.router, prefix="/api/items", tags=["items"])
 
 

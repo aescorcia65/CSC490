@@ -17,8 +17,11 @@ class Settings(BaseSettings):
     app_name: str = "CSC490 Backend"
     debug: bool = False
 
-    # Example: add when you have a database
-    # database_url: str = "sqlite:///./app.db"
+    # PostgreSQL
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/csc490"
+
+    # Firebase Admin SDK: path to service account JSON, or leave empty to use GOOGLE_APPLICATION_CREDENTIALS
+    firebase_credentials_path: str | None = None
 
     class Config:
         env_file = ".env"
