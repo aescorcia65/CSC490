@@ -17,11 +17,12 @@ class Settings(BaseSettings):
     app_name: str = "CSC490 Backend"
     debug: bool = False
 
-    # PostgreSQL
+    # PostgreSQL (point this to your Supabase Postgres connection string in .env)
     database_url: str = "postgresql://postgres:postgres@localhost:5432/csc490"
 
-    # Firebase Admin SDK: path to service account JSON, or leave empty to use GOOGLE_APPLICATION_CREDENTIALS
-    firebase_credentials_path: str | None = None
+    # Supabase Auth: JWT secret used to verify access tokens issued by Supabase.
+    # In Supabase dashboard, this is the JWT secret under Authentication settings.
+    supabase_jwt_secret: str | None = None
 
     class Config:
         env_file = ".env"

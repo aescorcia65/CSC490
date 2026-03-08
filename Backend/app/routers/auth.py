@@ -1,13 +1,14 @@
 """
-Auth endpoints: verify Firebase token, get current user.
+Auth endpoints: verify Supabase token, get current user.
 
-Frontend sends Firebase ID token; backend verifies with Firebase Admin and optionally stores user in Postgres.
+Frontend sends a Supabase access token; backend verifies it and optionally stores
+the user in Postgres.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth.deps import get_current_user
-from app.auth.firebase import verify_id_token
+from app.auth.supabase_jwt import SupabaseJWTError, verify_supabase_token
 from app.models.auth_schemas import TokenVerifyRequest, UserResponse
 from app.models.db_user import User
 from app.database import get_db
@@ -22,12 +23,12 @@ def verify_token(
     db: Session = Depends(get_db),
 ):
     """
-    Verify a Firebase ID token and return user info.
+    Verify a Supabase access token and return user info.
     Creates or updates the user in the database.
     """
     try:
-        claims = verify_id_token(body.id_token)
-    except Exception as e:
+        claims = verify_supabase_token(body.id_token)
+    except SupabaseJWTError as e:
         raise HTTPException(status_code=401, detail="Invalid or expired token") from e
 
     uid = claims.get("uid")

@@ -1,45 +1,53 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AuthProvider, useAuth } from './context/AuthContext'
-import Login from './pages/Login'
-import Home from './pages/Home'
-import './App.css'
+import { HomePage } from './pages/HomePage.jsx'
+import { AuthPage } from './pages/AuthPage.jsx'
+import { PatientDashboard } from './pages/PatientDashboard.jsx'
+import { DoctorDashboard } from './pages/DoctorDashboard.jsx'
+import { PharmacistDashboard } from './pages/PharmacistDashboard.jsx'
+import { ProtectedRoute } from './components/ProtectedRoute.jsx'
+import { RoleRoute } from './components/RoleRoute.jsx'
+import { ROLES } from './lib/roles.js'
 
-function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading } = useAuth()
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white">
-        Loading…
-      </div>
-    )
-  }
-  if (!isAuthenticated) return <Navigate to="/login" replace />
-  return children
-}
-
-function AppRoutes() {
-  return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <Home />
-          </ProtectedRoute>
-        }
-      />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
-  )
-}
-
-export default function App() {
+function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/auth" element={<AuthPage />} />
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute>
+              <RoleRoute role={ROLES.patient}>
+                <PatientDashboard />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/doctor"
+          element={
+            <ProtectedRoute>
+              <RoleRoute role={ROLES.doctor}>
+                <DoctorDashboard />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/pharmacist"
+          element={
+            <ProtectedRoute>
+              <RoleRoute role={ROLES.pharmacist}>
+                <PharmacistDashboard />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </BrowserRouter>
   )
 }
+
+export default App

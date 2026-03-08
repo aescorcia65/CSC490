@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from app.auth.firebase import verify_id_token
+from app.auth.supabase_jwt import SupabaseJWTError, verify_supabase_token
 from app.database import get_db
 from app.models.db_user import User
 
@@ -16,7 +16,7 @@ security = HTTPBearer(auto_error=False)
 def get_current_user_claims(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict:
-    """Verify Firebase ID token and return decoded claims. Use for protected routes."""
+    """Verify Supabase access token and return decoded claims. Use for protected routes."""
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -24,8 +24,8 @@ def get_current_user_claims(
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        return verify_id_token(credentials.credentials)
-    except Exception as e:
+        return verify_supabase_token(credentials.credentials)
+    except SupabaseJWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

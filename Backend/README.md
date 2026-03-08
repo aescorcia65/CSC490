@@ -15,19 +15,19 @@ uvicorn main:app --reload
 - API: http://127.0.0.1:8000  
 - Interactive docs: http://127.0.0.1:8000/docs  
 
-### PostgreSQL and Firebase (auth)
+### PostgreSQL and Supabase (auth)
 
-1. **PostgreSQL**: Create a database (e.g. `csc490`) and set in `.env`:
+1. **PostgreSQL (Supabase)**: In Supabase, get your Postgres connection string and set in `.env`:
    ```bash
    DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/csc490
    ```
    Tables (e.g. `users`) are created on startup.
 
-2. **Firebase Admin**: Download a service account JSON from [Firebase Console](https://console.firebase.google.com) → Project settings → Service accounts. Set in `.env`:
+2. **Supabase Auth**: In Supabase Auth settings, copy the JWT secret and set in `.env`:
    ```bash
-   FIREBASE_CREDENTIALS_PATH=./path-to-serviceAccountKey.json
+   SUPABASE_JWT_SECRET=your_supabase_jwt_secret_here
    ```
-   The backend verifies Firebase ID tokens from the frontend and stores/updates users in Postgres.
+   The backend verifies Supabase access tokens from the frontend and stores/updates users in Postgres.
 
 ---
 

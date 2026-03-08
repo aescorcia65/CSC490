@@ -10,8 +10,8 @@ pydantic-settings>=2.0.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.9
 
-# Auth
-firebase-admin>=6.6.0
+# Auth / JWT
+python-jose[cryptography]>=3.3.0
 
 # Env
 python-dotenv>=1.0.0
