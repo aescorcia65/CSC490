@@ -1,23 +1,113 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="24dp"
-    tools:context=".MainActivity">
+    android:background="#EAF4FF">
 
-    <TextView
-        android:id="@+id/welcomeText"
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/welcome_message"
-        android:textSize="18sp"
-        android:textColor="?attr/colorOnSurface"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        android:orientation="vertical"
+        android:padding="24dp">
 
-</androidx.constraintlayout.widget.ConstraintLayout>
+        <TextView
+            android:id="@+id/tvAppName"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="MedTrack"
+            android:textSize="30sp"
+            android:textStyle="bold"
+            android:textColor="#0F172A"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="20dp" />
+
+        <TextView
+            android:id="@+id/tvHeadline"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Keep track of your medications"
+            android:textSize="34sp"
+            android:textStyle="bold"
+            android:textColor="#0F172A"
+            android:gravity="center"
+            android:layout_marginTop="42dp" />
+
+        <TextView
+            android:id="@+id/tvSubtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="A simple way to manage refills, schedules, and reminders so you never miss a dose."
+            android:textSize="17sp"
+            android:textColor="#475569"
+            android:gravity="center"
+            android:lineSpacingExtra="3dp"
+            android:layout_marginTop="16dp" />
+
+        <Button
+            android:id="@+id/getStartedBtn"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="Get Started"
+            android:textAllCaps="false"
+            android:textStyle="bold"
+            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#60A5FA"
+            android:layout_marginTop="32dp" />
+
+        <Button
+            android:id="@+id/signInBtn"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="Sign In"
+            android:textAllCaps="false"
+            android:textStyle="bold"
+            android:textSize="16sp"
+            android:textColor="#0F172A"
+            android:backgroundTint="#BFDBFE"
+            android:layout_marginTop="14dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#FFFFFF"
+            android:padding="20dp"
+            android:layout_marginTop="40dp"
+            android:layout_marginBottom="24dp">
+
+            <TextView
+                android:id="@+id/tvWhyTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Why MedTrack?"
+                android:textSize="24sp"
+                android:textStyle="bold"
+                android:textColor="#0F172A" />
+
+            <TextView
+                android:id="@+id/tvWhyText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Managing multiple medications can be overwhelming. MedTrack helps you stay on top of refills, track what you take and when, and keep your routine organized in one place."
+                android:textSize="16sp"
+                android:textColor="#475569"
+                android:lineSpacingExtra="3dp"
+                android:layout_marginTop="12dp" />
+
+            <TextView
+                android:id="@+id/tvWhyText2"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Built for patients who want a simple, clean, and reliable way to manage medications every day."
+                android:textSize="16sp"
+                android:textColor="#475569"
+                android:lineSpacingExtra="3dp"
+                android:layout_marginTop="12dp" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</ScrollView>
+

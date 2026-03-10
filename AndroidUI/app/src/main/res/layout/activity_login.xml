@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:background="#EAF4FF">
+
+    <Button
+        android:id="@+id/btnBackLogin"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:text="← Back"
+        android:textAllCaps="false"
+        android:backgroundTint="#BFDBFE"
+        android:textColor="#0F172A"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Sign In"
+        android:textSize="28sp"
+        android:textStyle="bold"
+        android:textColor="#0F172A"/>
+
+    <EditText
+        android:id="@+id/emailInput"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:hint="Email"
+        android:layout_marginTop="24dp"
+        android:background="#FFFFFF"
+        android:padding="12dp"/>
+
+    <EditText
+        android:id="@+id/passwordInput"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:hint="Password"
+        android:inputType="textPassword"
+        android:layout_marginTop="16dp"
+        android:background="#FFFFFF"
+        android:padding="12dp"/>
+
+
+
+
+    <Button
+        android:id="@+id/loginButton"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="Login"
+        android:textAllCaps="false"
+        android:textStyle="bold"
+        android:backgroundTint="#60A5FA"
+        android:textColor="#FFFFFF"
+        android:layout_marginTop="24dp"/>
+
+</LinearLayout>

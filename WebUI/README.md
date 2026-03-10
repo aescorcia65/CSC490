@@ -1,62 +1,16 @@
-# CSC490 WebUI
+# React + Vite
 
-React + Vite + Tailwind frontend for the project.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Getting started
+Currently, two official plugins are available:
 
-**1. Go into the WebUI folder**
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-```bash
-cd WebUI
-```
+## React Compiler
 
-(From the project root `CSC490`, that’s `cd WebUI`.)
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-**2. Install dependencies**
+## Expanding the ESLint configuration
 
-```bash
-npm install
-```
-
-**3. Run the dev server**
-
-```bash
-npm run dev
-```
-
-Then open **http://localhost:5173** in your browser. The app will reload when you edit files.
-
-### Firebase login
-
-The app uses Firebase Authentication (email/password and Google). To enable it:
-
-1. Create a project at [Firebase Console](https://console.firebase.google.com) and enable **Authentication** → Sign-in method → Email/Password and Google.
-2. Copy `WebUI/.env.example` to `WebUI/.env` and fill in your Firebase config (Project settings → General → Your apps → Web app).
-3. Set `VITE_API_URL=http://localhost:8000` so the frontend can call the backend to verify the token and sync the user to PostgreSQL.
-
-Without a valid `.env`, the login page will load but sign-in will fail until the config is set.
-
----
-
-## Other commands
-
-| Command           | What it does                    |
-|-------------------|---------------------------------|
-| `npm run dev`     | Start dev server (Vite)         |
-| `npm run build`   | Build for production            |
-| `npm run preview` | Serve the production build      |
-| `npm run lint`    | Run ESLint                      |
-
----
-
-## Requirements
-
-- **Node.js** (v18 or newer recommended)
-- **npm** (comes with Node)
-
-Check versions:
-
-```bash
-node -v
-npm -v
-```
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Base.Theme.MedTrack" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Dark mode colors -->
+        <item name="colorPrimary">#3B82F6</item>
+        <item name="colorPrimaryContainer">#1E3A5F</item>
+        <item name="colorSecondary">#3B82F6</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSurface">#0F172A</item>
+        <item name="colorOnSurface">#E2E8F0</item>
+    </style>
+
+    <style name="Theme.MedTrack" parent="Base.Theme.MedTrack" />
+</resources>

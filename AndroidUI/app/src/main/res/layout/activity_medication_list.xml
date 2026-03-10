@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#EAF4FF">
+
+    <LinearLayout
+
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Your Medications"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:textColor="#0F172A"
+            android:layout_marginTop="20dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Track and manage your current medications."
+            android:textSize="16sp"
+            android:textColor="#475569"
+            android:layout_marginTop="8dp" />
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:text="← Back"
+            android:textAllCaps="false"
+            android:backgroundTint="#BFDBFE"
+            android:textColor="#0F172A"/>
+
+        <Button
+            android:id="@+id/btnAddMedication"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="Add Medication"
+            android:textAllCaps="false"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#60A5FA"
+            android:layout_marginTop="24dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#FFFFFF"
+            android:padding="16dp"
+            android:layout_marginTop="24dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Ibuprofen - 2x daily"
+                android:textSize="16sp"
+                android:textColor="#0F172A"
+                android:paddingBottom="12dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Vitamin D - 1x daily"
+                android:textSize="16sp"
+                android:textColor="#0F172A"
+                android:paddingBottom="12dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Metformin - Morning"
+                android:textSize="16sp"
+                android:textColor="#0F172A" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+</ScrollView>
