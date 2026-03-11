@@ -6,7 +6,8 @@ const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(undefined);
-  const [userRole, setUserRole] = useState("client");
+  /** "client" | "doctor" | "pharmacist" once profile loaded; null while loading or when no user */
+  const [userRole, setUserRole] = useState(null);
   const [onboardingComplete, setOnboardingComplete] = useState(true);
   const [profileData, setProfileData] = useState(null);
   const [meds, setMeds] = useState([]);
@@ -21,6 +22,7 @@ export function AuthProvider({ children }) {
   const loadSession = useCallback(async (u) => {
     if (!u) {
       setUser(null);
+      setUserRole(null);
       setMeds([]);
       setMedsLoaded(false);
       setOnboardingComplete(true);
@@ -28,6 +30,7 @@ export function AuthProvider({ children }) {
       return;
     }
     setUser(u);
+    setUserRole(null); // unknown until profile loads — prevents redirecting to patient dashboard too early
     const name = u.user_metadata?.full_name || u.email?.split("@")[0];
     if (name && !localStorage.getItem("medtrack_name")) {
       setDisplayNameState(name);
@@ -47,6 +50,8 @@ export function AuthProvider({ children }) {
       }
       if (profile?.role) {
         setUserRole(profile.role === "patient" ? "client" : profile.role);
+      } else {
+        setUserRole("client"); // fallback if profile has no role
       }
       if (profile?.first_name && !localStorage.getItem("medtrack_name")) {
         setDisplayNameState(profile.first_name);
@@ -54,6 +59,7 @@ export function AuthProvider({ children }) {
       }
     } catch (e) {
       console.warn("Could not load profile:", e);
+      setUserRole("client"); // fallback so user can still reach a dashboard
     }
     const loaded = await loadMedications(u.id);
     setMeds(loaded ?? []);
