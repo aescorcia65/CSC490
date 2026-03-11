@@ -12,6 +12,7 @@ import {
 import { supabase } from "./supabase";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { ProtectedRoute } from "./routes/ProtectedRoute";
+import { RoleProtectedRoute } from "./routes/RoleProtectedRoute";
 import LoginPage from "./pages/LoginPage";
 import OnboardingPage from "./pages/OnboardingPage";
 import { COLS, TIPS, PRESCRIPTION_STATUS_LABELS } from "./lib/constants";
@@ -2809,9 +2810,9 @@ export default function App() {
           <Route path="/" element={<RootRedirect />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/onboarding" element={<ProtectedRoute requireOnboarding={false}><OnboardingPage /></ProtectedRoute>} />
-          <Route path="/dashboard" element={<ProtectedRoute><PatientDashboardContent /></ProtectedRoute>} />
-          <Route path="/doctor" element={<ProtectedRoute><DoctorDashboardContent /></ProtectedRoute>} />
-          <Route path="/pharmacist" element={<ProtectedRoute><PharmacistDashboardContent /></ProtectedRoute>} />
+          <Route path="/dashboard" element={<ProtectedRoute><RoleProtectedRoute requiredRole="client"><PatientDashboardContent /></RoleProtectedRoute></ProtectedRoute>} />
+          <Route path="/doctor" element={<ProtectedRoute><RoleProtectedRoute requiredRole="doctor"><DoctorDashboardContent /></RoleProtectedRoute></ProtectedRoute>} />
+          <Route path="/pharmacist" element={<ProtectedRoute><RoleProtectedRoute requiredRole="pharmacist"><PharmacistDashboardContent /></RoleProtectedRoute></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AuthProvider>
