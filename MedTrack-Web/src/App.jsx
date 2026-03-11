@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, Calendar, BarChart3, LogOut, Moon, Sun, Menu, X, Plus, Send,
@@ -8,124 +9,17 @@ import {
   UserCircle2, Siren, SlidersHorizontal, Sparkles, MessageSquare, Trash2,
   KeyRound, RotateCcw, Search
 } from "lucide-react";
-import {
-  createUserWithEmailAndPassword, signInWithEmailAndPassword,
-  sendEmailVerification, sendPasswordResetEmail, reload, signOut,
-  onAuthStateChanged, updateProfile, deleteUser,
-  EmailAuthProvider, reauthenticateWithCredential
-} from "firebase/auth";
-import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc,
-         query, where, serverTimestamp, setDoc, getDoc, updateDoc } from "firebase/firestore";
-import { auth } from "./firebase";
+import { supabase } from "./supabase";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { ProtectedRoute } from "./routes/ProtectedRoute";
+import LoginPage from "./pages/LoginPage";
+import OnboardingPage from "./pages/OnboardingPage";
+import { COLS, TIPS, PRESCRIPTION_STATUS_LABELS } from "./lib/constants";
+import { to12h, to24h } from "./lib/utils";
+import { addMedication, deleteMedication, loadMedications } from "./lib/medications";
+import { useIsMobile } from "./hooks/useIsMobile";
+import { useClock } from "./hooks/useClock";
 import "./index.css";
-
-const db = getFirestore();
-
-async function addMedication({ name, dosage, freq, time, color, userEmail }) {
-  try {
-    await addDoc(collection(db, "Medications"), {
-      medicationName: name,
-      dosage,
-      freq,
-      reminderTime:   time,
-      color,
-      userEmail,
-      active:         true,
-      createdAt:      serverTimestamp(),
-    });
-  } catch (e) {
-    console.error("Firestore addMedication error:", e);
-    throw e;
-  }
-}
-
-async function deleteMedication(firestoreId) {
-  if (!firestoreId) return;
-  try { await deleteDoc(doc(db, "Medications", firestoreId)); }
-  catch (e) { console.error("Firestore deleteMedication error:", e); }
-}
-
-async function loadMedications(userEmail) {
-  try {
-    const q = query(collection(db, "Medications"), where("userEmail","==",userEmail));
-    const snap = await getDocs(q);
-    return snap.docs.map(d => ({
-      id:           d.id,
-      firestoreId:  d.id,
-      name:         d.data().medicationName,
-      dosage:       d.data().dosage       || "",
-      freq:         d.data().freq         || "Once daily",
-      time:         d.data().reminderTime || "08:00",
-      color:        d.data().color        || "blue",
-      taken:        false,
-      active:       d.data().active       ?? true,
-    }));
-  } catch (e) {
-    console.error("Firestore loadMedications error:", e);
-    return [];
-  }
-}
-
-const PILLS_BG = "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=1600&q=90&auto=format&fit=crop";
-
-const COLS = {
-  blue:   { a:"#2563eb", d:"rgba(37,99,235,.12)",  b:"rgba(37,99,235,.26)"  },
-  cyan:   { a:"#06b6d4", d:"rgba(6,182,212,.10)",   b:"rgba(6,182,212,.22)"  },
-  rose:   { a:"#f43f5e", d:"rgba(244,63,94,.10)",   b:"rgba(244,63,94,.22)"  },
-  amber:  { a:"#f59e0b", d:"rgba(245,158,11,.10)",  b:"rgba(245,158,11,.22)" },
-  emerald:{ a:"#10b981", d:"rgba(16,185,129,.10)",  b:"rgba(16,185,129,.22)" },
-};
-
-const SEED = [
-  { id:"s1", firestoreId:null, name:"Amoxicillin", dosage:"500mg",   freq:"Twice daily",  time:"08:00", color:"blue",    taken:false },
-  { id:"s2", firestoreId:null, name:"Vitamin D3",  dosage:"2000 IU", freq:"Once daily",   time:"09:00", color:"cyan",    taken:false },
-  { id:"s3", firestoreId:null, name:"Metformin",   dosage:"1000mg",  freq:"Twice daily",  time:"13:00", color:"rose",    taken:false },
-  { id:"s4", firestoreId:null, name:"Lisinopril",  dosage:"10mg",    freq:"Once daily",   time:"20:00", color:"amber",   taken:false },
-  { id:"s5", firestoreId:null, name:"Omega-3",     dosage:"1000mg",  freq:"Once daily",   time:"21:00", color:"emerald", taken:false },
-];
-
-const TIPS = [
-  "Taking medications with a full glass of water significantly improves absorption.",
-  "Consistency matters — taking medication at the same time each day keeps blood levels stable.",
-  "Avoid storing medications in bathrooms. Heat and humidity reduce potency over time.",
-  "Check expiry dates monthly and return out-of-date medications to a pharmacy.",
-  "Some medications are best taken with food — ask your pharmacist for guidance.",
-];
-
-function to12h(t24) {
-  if (!t24 || !t24.includes(":")) return t24;
-  const [h, m] = t24.split(":").map(Number);
-  const ampm = h < 12 ? "AM" : "PM";
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${h12}:${String(m).padStart(2,"0")} ${ampm}`;
-}
-
-function to24h(t12) {
-  if (!t12) return "08:00";
-  const m = t12.match(/(\d+):(\d+)\s*(AM|PM)/i);
-  if (!m) return t12;
-  let h = parseInt(m[1]);
-  const min = m[2];
-  const ap = m[3].toUpperCase();
-  if (ap === "AM" && h === 12) h = 0;
-  if (ap === "PM" && h !== 12) h += 12;
-  return `${String(h).padStart(2,"0")}:${min}`;
-}
-
-function useIsMobile() {
-  const [mob, setMob] = useState(() => window.innerWidth < 820);
-  useEffect(() => {
-    const fn = () => setMob(window.innerWidth < 820);
-    window.addEventListener("resize", fn);
-    return () => window.removeEventListener("resize", fn);
-  }, []);
-  return mob;
-}
-function useClock() {
-  const [now, setNow] = useState(new Date());
-  useEffect(() => { const id = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(id); }, []);
-  return now;
-}
 
 function Ring({ pct, size=80, sw=6, color="var(--p)", children }) {
   const r = (size-sw)/2, circ = 2*Math.PI*r;
@@ -140,549 +34,6 @@ function Ring({ pct, size=80, sw=6, color="var(--p)", children }) {
           style={{ filter:`drop-shadow(0 0 6px ${color}55)` }}/>
       </svg>
       <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center" }}>{children}</div>
-    </div>
-  );
-}
-
-function Auth({ onVerifiedLogin }) {
-  const [tab,        setTab]        = useState("login");
-  const [step,       setStep]       = useState("form");
-  const [name,       setName]       = useState("");
-  const [email,      setEmail]      = useState(() => localStorage.getItem("mt_rem_email") || "");
-  const [pw,         setPw]         = useState(() => localStorage.getItem("mt_rem_pw") || "");
-  const [role,       setRole]       = useState("client");
-  const [vis,        setVis]        = useState(false);
-  const [busy,       setBusy]       = useState(false);
-  const [err,        setErr]        = useState("");
-  const [info,       setInfo]       = useState("");
-  const [resent,     setResent]     = useState(false);
-  const [elapsed,    setElapsed]    = useState(0);
-  const [remember,   setRemember]   = useState(() => !!localStorage.getItem("mt_rem_email"));
-  const [resetEmail, setResetEmail] = useState("");
-  const [loginLight, setLoginLight] = useState(() => localStorage.getItem("mt_login_light") === "1");
-
-  function toggleLoginTheme() {
-    const next = !loginLight;
-    setLoginLight(next);
-    localStorage.setItem("mt_login_light", next ? "1" : "0");
-  }
-
-  const pendingRef = useRef({ email:"", pw:"" });
-  const pollRef    = useRef(null);
-  const tickRef    = useRef(null);
-
-  
-  function friendlyError(code, msg) {
-    if (code === "auth/wrong-password"    || code === "auth/invalid-credential") return "Incorrect password. Please try again or reset your password below.";
-    if (code === "auth/user-not-found"    || code === "auth/invalid-email")      return "No account found for that email address.";
-    if (code === "auth/email-already-in-use")  return "An account with this email already exists. Try signing in instead.";
-    if (code === "auth/weak-password")    return "Password must be at least 6 characters.";
-    if (code === "auth/too-many-requests") return "Too many attempts. Please wait a few minutes and try again.";
-    if (code === "auth/network-request-failed") return "Network error. Check your connection and try again.";
-    return msg.replace("Firebase: ","").replace(/\(auth\/.*?\)\.?/g,"").replace(/^Error\s*/,"").trim() || "Something went wrong. Please try again.";
-  }
-
-  function startPolling(em, password) {
-    pendingRef.current = { email:em, pw:password };
-    setElapsed(0);
-    clearInterval(tickRef.current);
-    tickRef.current = setInterval(() => setElapsed(s => s+1), 1000);
-    clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
-      try {
-        const cred = await signInWithEmailAndPassword(auth, pendingRef.current.email, pendingRef.current.pw);
-        await reload(cred.user);
-        if (cred.user.emailVerified) {
-          clearInterval(pollRef.current); clearInterval(tickRef.current);
-          onVerifiedLogin(cred.user);
-        } else { await signOut(auth); }
-      } catch {}
-    }, 5000);
-  }
-  function stopPolling() { clearInterval(pollRef.current); clearInterval(tickRef.current); }
-  useEffect(() => () => stopPolling(), []);
-
-  async function submit() {
-    const em = email.trim();
-    if (!em || !pw) return;
-    if (tab === "signup" && !name.trim()) return;
-    setBusy(true); setErr(""); setInfo(""); setResent(false);
-    try {
-      if (tab === "signup") {
-        const cred = await createUserWithEmailAndPassword(auth, em, pw);
-        await updateProfile(cred.user, { displayName: name.trim() });
-        await sendEmailVerification(cred.user);
-        try {
-          await setDoc(doc(db, "users", cred.user.uid), {
-            fullName: name.trim(), email: em, role,
-            createdAt: serverTimestamp(),
-          });
-        } catch(e) { console.warn("Could not save user role:", e); }
-        await signOut(auth);
-        setStep("verify");
-        startPolling(em, pw);
-      } else {
-        const cred = await signInWithEmailAndPassword(auth, em, pw);
-        if (!cred.user.emailVerified) {
-          await signOut(auth);
-          setErr("Your email hasn't been verified yet. Check your inbox for the confirmation link.");
-        } else {
-          if (remember) { localStorage.setItem("mt_rem_email", em); localStorage.setItem("mt_rem_pw", pw); }
-          else { localStorage.removeItem("mt_rem_email"); localStorage.removeItem("mt_rem_pw"); }
-        }
-      }
-    } catch(e) {
-      const code = e.code || "";
-      setErr(friendlyError(code, e.message || ""));
-    } finally { setBusy(false); }
-  }
-
-  async function resendVerification() {
-    setBusy(true); setErr(""); setResent(false);
-    try {
-      const cred = await signInWithEmailAndPassword(auth, pendingRef.current.email, pendingRef.current.pw);
-      await sendEmailVerification(cred.user);
-      await signOut(auth);
-      setResent(true);
-      stopPolling(); startPolling(pendingRef.current.email, pendingRef.current.pw);
-    } catch { setErr("Couldn't resend. Please wait a moment."); }
-    finally { setBusy(false); }
-  }
-
-  async function sendReset() {
-    const em = (resetEmail || email).trim();
-    if (!em) { setErr("Enter your email address above first."); return; }
-    setBusy(true); setErr("");
-    try {
-      await sendPasswordResetEmail(auth, em);
-      setInfo(`✓ Reset link sent to ${em} — check your inbox (and spam folder).`);
-    } catch(e) {
-      const code = e.code || "";
-      setErr(friendlyError(code, e.message));
-    } finally { setBusy(false); }
-  }
-
-  function backToForm() { stopPolling(); setStep("form"); setErr(""); setInfo(""); setResent(false); setElapsed(0); }
-  const mm = String(Math.floor(elapsed/60)).padStart(2,"0");
-  const ss = String(elapsed%60).padStart(2,"0");
-
-  const L = loginLight;
-
-  const rBg    = L ? "#ffffff"           : "#0d1117";
-  const panelBorder = L ? "rgba(0,0,0,.08)"   : "rgba(255,255,255,.07)";
-  const rT1    = L ? "#0a0e1a"           : "#ffffff";
-  const rT2    = L ? "#1a2d5a"           : "#d4e4ff";
-  const rT3    = L ? "#3d5490"           : "#7a9acc";
-  const rSub   = L ? "rgba(37,99,235,.07)" : "rgba(255,255,255,.06)";
-  const rSubBr = L ? "rgba(37,99,235,.18)" : "rgba(255,255,255,.10)";
-  const rInpBg = L ? "#f4f7ff"           : "rgba(255,255,255,.08)";
-  const rInpBr = L ? "rgba(37,99,235,.25)": "rgba(255,255,255,.18)";
-  const rInpC  = L ? "#0a0e1a"           : "#ffffff";
-  const rGlowA = L ? "rgba(37,99,235,.06)" : "rgba(37,99,235,.14)";
-  const rGlowB = L ? "rgba(6,182,212,.04)" : "rgba(6,182,212,.08)";
-
-  const INP = {
-    width:"100%", padding:"13px 16px",
-    background: rInpBg,
-    border: `1.5px solid ${rInpBr}`,
-    borderRadius:12, color: rInpC,
-    fontFamily:"'DM Sans',sans-serif", fontSize:14.5,
-    outline:"none", transition:"all .2s",
-    caretColor: "#3b82f6", fontWeight:400,
-  };
-  const LBL = {
-    display:"block", fontSize:11, fontWeight:700,
-    color: L ? "#1a2d5a" : "#d4e4ff",
-    letterSpacing:".07em", textTransform:"uppercase", marginBottom:8,
-  };
-
-  return (
-    <div style={{ minHeight:"100vh", display:"flex", fontFamily:"'DM Sans',sans-serif",
-                  background: L ? "#eff2fc" : "#080b14", transition:"background .3s" }}>
-      <style>{`
-        .auth-inp::placeholder { color:${L ? "rgba(26,45,90,.45)" : "rgba(180,210,255,.55)"} !important }
-        .auth-inp:focus { border-color:#3b82f6 !important; box-shadow:0 0 0 3.5px rgba(37,99,235,.2) !important; background:${L ? "#fff" : "rgba(255,255,255,.12)"} !important }
-        .auth-tab { color:${L ? "#3d5490" : "#7a9acc"} }
-        .auth-tab:hover:not(.auth-tab-on) { background:${L ? "rgba(37,99,235,.08)" : "rgba(255,255,255,.09)"} !important; color:${L ? "#0a0e1a" : "#d4e4ff"} !important }
-        .auth-ghost:hover:not(:disabled) { background:${L ? "rgba(0,0,0,.06)" : "rgba(255,255,255,.12)"} !important; color:${L ? "#0a0e1a" : "#d4e4ff"} !important }
-        .left-feat { display:flex; align-items:center; gap:14px; padding:14px 16px; border-radius:14px; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.12); transition:background .2s }
-        .left-feat:hover { background:rgba(255,255,255,.13) }
-      `}</style>
-
-      {}
-      <div style={{ flex:1, position:"relative", overflow:"hidden" }} id="auth-left-panel">
-        <style>{`#auth-left-panel{display:none}@media(min-width:900px){#auth-left-panel{display:block}}`}</style>
-
-        {}
-        <img src={PILLS_BG} alt="medications"
-          style={{ position:"absolute", inset:0, width:"100%", height:"100%",
-                   objectFit:"cover", objectPosition:"center 35%",
-                   filter:"saturate(.9) brightness(.68)" }}/>
-
-        {}
-        <div style={{ position:"absolute", inset:0,
-          background:"linear-gradient(to top, rgba(6,7,14,.95) 0%, rgba(6,7,14,.3) 45%, transparent 100%)" }}/>
-        <div style={{ position:"absolute", inset:0,
-          background:"linear-gradient(135deg, rgba(14,18,52,.35) 0%, transparent 55%)" }}/>
-
-        {}
-        <div style={{ position:"absolute", bottom:0, left:0, right:0, padding:"48px 52px 56px", zIndex:2 }}>
-          {}
-          <motion.div initial={{ opacity:0, y:-12 }} animate={{ opacity:1, y:0 }} transition={{ duration:.6 }}
-            style={{ display:"flex", alignItems:"center", gap:11, marginBottom:52 }}>
-            <div style={{ width:40, height:40, borderRadius:12, background:"rgba(37,99,235,.25)",
-                          border:"1px solid rgba(37,99,235,.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-              <HeartPulse size={20} color="#93c5fd"/>
-            </div>
-            <span style={{ fontFamily:"'Playfair Display',Georgia,serif", fontSize:22, color:"#fff", fontStyle:"italic" }}>MedTrack</span>
-          </motion.div>
-
-          <motion.div initial={{ opacity:0, y:28 }} animate={{ opacity:1, y:0 }} transition={{ duration:.7, delay:.1 }}>
-            <p style={{ fontSize:10.5, fontWeight:700, letterSpacing:".14em", textTransform:"uppercase",
-                        color:"rgba(147,197,253,.9)", marginBottom:14 }}>Personal Health Management</p>
-            <h1 style={{ fontFamily:"'Playfair Display',Georgia,serif", fontSize:48, lineHeight:1.08, color:"#fff",
-                         letterSpacing:"-.5px", marginBottom:18, fontStyle:"italic", fontWeight:600 }}>
-              Your medications,<br/>
-              <span style={{ color:"#93c5fd" }}>always in order.</span>
-            </h1>
-            <p style={{ fontSize:14, color:"rgba(200,218,255,.8)", lineHeight:1.8, maxWidth:390, marginBottom:38 }}>
-              A personal health companion that keeps prescriptions organised, sends smart reminders, and answers your questions whenever you need them.
-            </p>
-            <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
-              {[
-                { I:BellRing,    t:"Email Reminders",   d:"Get notified at exactly the right time" },
-                { I:Stethoscope, t:"AI Health Advisor",  d:"Powered by real drug information" },
-                { I:TrendingUp,  t:"Adherence Tracking", d:"Weekly insights to help you stay consistent" },
-              ].map((f,i) => (
-                <motion.div key={f.t} className="left-feat"
-                  initial={{ opacity:0, x:-22 }} animate={{ opacity:1, x:0 }}
-                  transition={{ delay:.3+i*.1, duration:.5 }}>
-                  <div style={{ width:34, height:34, borderRadius:10, background:"rgba(37,99,235,.2)",
-                                border:"1px solid rgba(37,99,235,.35)", display:"flex",
-                                alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-                    <f.I size={15} color="rgba(147,197,253,.9)"/>
-                  </div>
-                  <div>
-                    <p style={{ color:"rgba(226,235,255,.92)", fontSize:13, fontWeight:600, marginBottom:2 }}>{f.t}</p>
-                    <p style={{ color:"rgba(180,200,240,.65)", fontSize:12 }}>{f.d}</p>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-          </motion.div>
-        </div>
-      </div>
-
-      {}
-      <div style={{ width:"100%", maxWidth:500, flexShrink:0, display:"flex", flexDirection:"column",
-                    justifyContent:"center", padding:"44px 48px", background: rBg,
-                    borderLeft:`1px solid ${panelBorder}`, minHeight:"100vh",
-                    position:"relative", overflow:"hidden", transition:"background .3s",
-                    fontFamily:"'DM Sans',sans-serif" }}>
-
-        {}
-        <div style={{ position:"absolute", width:420, height:420, top:"-120px", right:"-110px",
-                      borderRadius:"50%", pointerEvents:"none", background:`radial-gradient(circle,${rGlowA} 0%,transparent 70%)` }}/>
-        <div style={{ position:"absolute", width:300, height:300, bottom:"-80px", left:"-80px",
-                      borderRadius:"50%", pointerEvents:"none", background:`radial-gradient(circle,${rGlowB} 0%,transparent 70%)` }}/>
-
-        {}
-        <button onClick={toggleLoginTheme}
-          style={{ position:"absolute", top:20, right:20, zIndex:10,
-                   display:"flex", alignItems:"center", gap:7, padding:"8px 14px",
-                   borderRadius:99, border:`1px solid ${rInpBr}`,
-                   background: L ? "#f1f5ff" : "rgba(255,255,255,.07)",
-                   cursor:"pointer", fontFamily:"'DM Sans',sans-serif",
-                   fontSize:12, fontWeight:600, color: rT3, transition:"all .22s" }}>
-          {L ? <Moon size={13} color="#6366f1"/> : <Sun size={13} color="#f59e0b"/>}
-          {L ? "Dark mode" : "Light mode"}
-        </button>
-
-        <div style={{ position:"relative", zIndex:1, width:"100%", maxWidth:400, margin:"0 auto" }}>
-
-          {}
-          <div id="mob-logo" style={{ display:"flex", alignItems:"center", gap:10, marginBottom:40 }}>
-            <style>{`@media(min-width:900px){#mob-logo{display:none!important}}`}</style>
-            <div style={{ width:34, height:34, borderRadius:10,
-                          background: L ? "rgba(37,99,235,.12)" : "rgba(37,99,235,.2)",
-                          border:"1px solid rgba(37,99,235,.38)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-              <HeartPulse size={16} color="#3b82f6"/>
-            </div>
-            <span style={{ fontFamily:"'Playfair Display',Georgia,serif", fontSize:20, color: rT1, fontStyle:"italic" }}>MedTrack</span>
-          </div>
-
-          <AnimatePresence mode="wait">
-
-            {}
-            {step === "verify" && (
-              <motion.div key="verify" initial={{ opacity:0, y:14 }} animate={{ opacity:1, y:0 }}
-                exit={{ opacity:0, y:-8 }} transition={{ duration:.28 }}>
-                <div style={{ position:"relative", width:68, height:68, marginBottom:28 }}>
-                  <div className="auth-pulse" style={{ position:"absolute", inset:-12, borderRadius:26,
-                                                        background:"rgba(6,182,212,.1)" }}/>
-                  <div style={{ width:68, height:68, borderRadius:20, background:"rgba(6,182,212,.1)",
-                                border:"1.5px solid rgba(6,182,212,.28)", display:"flex",
-                                alignItems:"center", justifyContent:"center", position:"relative" }}>
-                    <Mail size={28} color="#22d3ee"/>
-                  </div>
-                </div>
-                <h2 style={{ fontFamily:"'Playfair Display',Georgia,serif", fontSize:28, fontStyle:"italic", color: rT1,
-                             fontWeight:600, lineHeight:1.1, marginBottom:8 }}>Verify your email</h2>
-                <p style={{ fontSize:14, color: rT2, lineHeight:1.7, marginBottom:20 }}>
-                  Confirmation link sent to{" "}
-                  <strong style={{ color: rT1 }}>{pendingRef.current.email}</strong>
-                </p>
-                <div style={{ display:"flex", alignItems:"center", gap:10, padding:"13px 16px", borderRadius:12,
-                              background:"rgba(6,182,212,.07)", border:"1px solid rgba(6,182,212,.2)", marginBottom:20 }}>
-                  <span className="auth-blink" style={{ width:7, height:7, borderRadius:"50%",
-                                                         background:"#22d3ee", flexShrink:0, display:"block" }}/>
-                  <div>
-                    <p style={{ color:"#22d3ee", fontSize:13, fontWeight:600 }}>Waiting for verification</p>
-                    <p style={{ color: rT2, fontSize:11, marginTop:2 }}>Checking every 5s · {mm}:{ss} elapsed</p>
-                  </div>
-                </div>
-                <AnimatePresence>
-                  {err    && <ErrBanner msg={err} loginLight={L}/>}
-                  {resent && <OkBanner  msg="Verification email resent successfully." loginLight={L}/>}
-                </AnimatePresence>
-                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                  <button className="auth-ghost" disabled={busy} onClick={resendVerification}
-                    style={{ width:"100%", padding:"12px", borderRadius:11,
-                             background: L ? "rgba(0,0,0,.04)" : "rgba(255,255,255,.06)",
-                             border:`1px solid ${rInpBr}`, color: rT3,
-                             fontFamily:"inherit", fontSize:13, fontWeight:600, cursor:"pointer",
-                             display:"flex", alignItems:"center", justifyContent:"center", gap:8, transition:"all .2s" }}>
-                    {busy ? <Loader2 size={14} className="auth-spin"/> : <><RefreshCw size={13}/> Resend email</>}
-                  </button>
-                  <button onClick={backToForm}
-                    style={{ width:"100%", padding:"12px", borderRadius:11, background:"transparent",
-                             border:`1px solid ${rInpBr}`, color: rT3,
-                             fontFamily:"inherit", fontSize:13, fontWeight:500, cursor:"pointer",
-                             display:"flex", alignItems:"center", justifyContent:"center", gap:7 }}>
-                    <ArrowRight size={13} style={{ transform:"rotate(180deg)" }}/> Back to sign in
-                  </button>
-                </div>
-              </motion.div>
-            )}
-
-            {}
-            {step === "reset" && (
-              <motion.div key="reset" initial={{ opacity:0, y:14 }} animate={{ opacity:1, y:0 }}
-                exit={{ opacity:0, y:-8 }} transition={{ duration:.28 }}>
-                <div style={{ width:60, height:60, borderRadius:18,
-                              background: L ? "rgba(37,99,235,.1)" : "rgba(37,99,235,.14)",
-                              border:"1.5px solid rgba(37,99,235,.3)", display:"flex", alignItems:"center",
-                              justifyContent:"center", marginBottom:24 }}>
-                  <KeyRound size={26} color="#3b82f6"/>
-                </div>
-                <h2 style={{ fontFamily:"'Playfair Display',Georgia,serif", fontSize:28, fontStyle:"italic", color: rT1,
-                             fontWeight:600, lineHeight:1.1, marginBottom:8 }}>Reset your password</h2>
-                <p style={{ fontSize:14, color: rT2, lineHeight:1.65, marginBottom:6 }}>
-                  Enter your email and we'll send you a link to create a new password.
-                </p>
-                <p style={{ fontSize:12, color: rT3, lineHeight:1.55, marginBottom:20,
-                             padding:"9px 13px", borderRadius:9,
-                             background: L ? "rgba(37,99,235,.06)" : "rgba(37,99,235,.08)",
-                             border:"1px solid rgba(37,99,235,.14)" }}>
-                  The link will open a secure Firebase page where you can set a new password. It expires in 1 hour.
-                </p>
-                <div style={{ marginBottom:18 }}>
-                  <label style={LBL}>Email address</label>
-                  <input className="auth-inp" style={INP} type="email"
-                    value={resetEmail || email} placeholder="you@example.com"
-                    onChange={e => setResetEmail(e.target.value)}
-                    onKeyDown={e => e.key==="Enter" && sendReset()}/>
-                </div>
-                <AnimatePresence>
-                  {err  && <ErrBanner msg={err}  loginLight={L}/>}
-                  {info && <OkBanner  msg={info}  loginLight={L}/>}
-                </AnimatePresence>
-                {}
-                {info ? (
-                  <button onClick={backToForm}
-                    style={{ width:"100%", padding:"14px", borderRadius:12,
-                             background:"linear-gradient(135deg,#2563eb,#1d4ed8)",
-                             border:"none", color:"#fff", fontFamily:"inherit", fontSize:14,
-                             fontWeight:700, cursor:"pointer", display:"flex", alignItems:"center",
-                             justifyContent:"center", gap:8, boxShadow:"0 4px 18px rgba(37,99,235,.3)" }}>
-                    <ArrowRight size={14} style={{ transform:"rotate(180deg)" }}/> Back to Sign In
-                  </button>
-                ) : (
-                  <button className="auth-btn" disabled={busy} onClick={sendReset}
-                    style={{ width:"100%", padding:"14px",
-                             background:"linear-gradient(135deg,#2563eb,#1d4ed8)",
-                             border:"none", borderRadius:12, color:"#fff", fontFamily:"inherit", fontSize:14,
-                             fontWeight:700, cursor:"pointer", display:"flex", alignItems:"center",
-                             justifyContent:"center", gap:8, boxShadow:"0 4px 18px rgba(37,99,235,.3)",
-                             transition:"all .2s", marginBottom:10 }}>
-                    {busy ? <Loader2 size={15} className="auth-spin"/> : <><Mail size={14}/> Send Reset Link</>}
-                  </button>
-                )}
-                {!info && (
-                  <button onClick={backToForm}
-                    style={{ marginTop:10, width:"100%", padding:"12px", borderRadius:11, background:"transparent",
-                             border:`1px solid ${rInpBr}`, color: rT3,
-                             fontFamily:"inherit", fontSize:13, fontWeight:500, cursor:"pointer",
-                             display:"flex", alignItems:"center", justifyContent:"center", gap:7 }}>
-                    <ArrowRight size={13} style={{ transform:"rotate(180deg)" }}/> Back to sign in
-                  </button>
-                )}
-              </motion.div>
-            )}
-
-            {}
-            {step === "form" && (
-              <motion.div key="form" initial={{ opacity:0, y:14 }} animate={{ opacity:1, y:0 }}
-                exit={{ opacity:0, y:-8 }} transition={{ duration:.26 }}>
-
-                <h2 style={{ fontFamily:"'Playfair Display',Georgia,serif", fontSize:40, fontStyle:"italic", fontWeight:600,
-                             lineHeight:1.06, color: rT1, letterSpacing:"-.4px", marginBottom:10 }}>
-                  {tab === "login"
-                    ? <>Welcome <span style={{ color:"#3b82f6" }}>back.</span></>
-                    : <>Get <span style={{ color:"#3b82f6" }}>started.</span></>}
-                </h2>
-                <p style={{ fontSize:15, color: rT2, lineHeight:1.65, marginBottom:28, fontWeight:400 }}>
-                  {tab === "login" ? "Sign in to your health dashboard." : "Create your free account today."}
-                </p>
-
-                <AnimatePresence>
-                  {info && <OkBanner msg={info} loginLight={L} onDismiss={() => setInfo("")}/>}
-                </AnimatePresence>
-
-                {}
-                <div style={{ display:"flex", gap:0, background: rSub,
-                              border:`1px solid ${rSubBr}`, borderRadius:12, padding:4, marginBottom:26 }}>
-                  {[["login","Sign In"],["signup","Sign Up"]].map(([v,l]) => (
-                    <button key={v} className={`auth-tab ${tab===v?"auth-tab-on":"auth-tab-off"}`}
-                      onClick={() => { setTab(v); setErr(""); setInfo(""); }}
-                      style={{ flex:1, padding:"10px", borderRadius:9, border:"none", cursor:"pointer",
-                               fontFamily:"inherit", fontSize:13, fontWeight:600, transition:"all .18s",
-                               background:"transparent" }}>
-                      {l}
-                    </button>
-                  ))}
-                </div>
-
-                <div style={{ display:"flex", flexDirection:"column", gap:17 }}>
-                  <AnimatePresence>
-                    {tab === "signup" && (
-                      <motion.div key="nf" initial={{ opacity:0, height:0 }} animate={{ opacity:1, height:"auto" }}
-                        exit={{ opacity:0, height:0 }} style={{ overflow:"hidden" }}>
-                        <div style={{marginBottom:14}}>
-                          <label style={LBL}>Your name</label>
-                          <input className="auth-inp" style={INP} type="text" value={name}
-                            placeholder="e.g. Jamie or Dr. Patel"
-                            onChange={e => setName(e.target.value)}
-                            onKeyDown={e => e.key==="Enter" && submit()}/>
-                        </div>
-                        <label style={LBL}>I am a</label>
-                        <div style={{display:"flex",gap:8}}>
-                          {[["client","Patient"],["doctor","Doctor"],["pharmacist","Pharmacist"]].map(([v,l]) => (
-                            <button key={v} type="button" onClick={() => setRole(v)}
-                              style={{flex:1,padding:"10px 8px",borderRadius:11,border:"1.5px solid",
-                                      fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:"pointer",
-                                      transition:"all .18s",
-                                      borderColor: role===v ? "#2563eb" : rInpBr,
-                                      background: role===v ? "rgba(37,99,235,.14)" : "transparent",
-                                      color: role===v ? "#3b82f6" : rT3}}>
-                              {l}
-                            </button>
-                          ))}
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  <div>
-                    <label style={LBL}>Email address</label>
-                    <input className="auth-inp" style={INP} type="email" value={email}
-                      placeholder="you@example.com"
-                      onChange={e => setEmail(e.target.value)}
-                      onKeyDown={e => e.key==="Enter" && submit()}/>
-                  </div>
-
-                  <div>
-                    <label style={LBL}>Password</label>
-                    <div style={{ position:"relative" }}>
-                      <input className="auth-inp" style={{ ...INP, paddingRight:46 }}
-                        type={vis?"text":"password"} value={pw} placeholder="••••••••"
-                        onChange={e => setPw(e.target.value)}
-                        onKeyDown={e => e.key==="Enter" && submit()}/>
-                      <button onClick={() => setVis(!vis)}
-                        style={{ position:"absolute", right:14, top:"50%", transform:"translateY(-50%)",
-                                 background:"none", border:"none", cursor:"pointer",
-                                 color: rT3, display:"flex", padding:0 }}>
-                        {vis ? <EyeOff size={16}/> : <Eye size={16}/>}
-                      </button>
-                    </div>
-                  </div>
-
-                  <AnimatePresence>
-                    {tab === "login" && (
-                      <motion.div key="rem" initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
-                        style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                        <label onClick={() => setRemember(!remember)}
-                          style={{ display:"flex", alignItems:"center", gap:9, cursor:"pointer", userSelect:"none" }}>
-                          <span style={{ width:17, height:17, borderRadius:5, flexShrink:0,
-                                         display:"flex", alignItems:"center", justifyContent:"center",
-                                         transition:"all .18s",
-                                         background: remember ? "#2563eb" : "transparent",
-                                         border: `2px solid ${remember ? "#2563eb" : rInpBr}`,
-                                         boxShadow: remember ? "0 0 10px rgba(37,99,235,.4)" : "none" }}>
-                            {remember && <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
-                              <path d="M1 4L3.5 6.5L9 1" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                            </svg>}
-                          </span>
-                          <span style={{ fontSize:13, fontWeight:500, color: rT2 }}>Remember me</span>
-                        </label>
-                        <button onClick={() => { setStep("reset"); setResetEmail(email); setErr(""); setInfo(""); }}
-                          style={{ fontSize:12, fontWeight:600, color:"#3b82f6", cursor:"pointer",
-                                   background:"none", border:"none", padding:0, fontFamily:"inherit" }}>
-                          Forgot password?
-                        </button>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  <AnimatePresence>
-                    {err && (
-                      <motion.div initial={{ opacity:0, y:-4 }} animate={{ opacity:1, y:0 }} exit={{ opacity:0 }}>
-                        <ErrBanner msg={err} loginLight={L}/>
-                        {err.includes("password") && tab === "login" && (
-                          <button onClick={() => { setStep("reset"); setResetEmail(email); setErr(""); }}
-                            style={{ marginTop:8, display:"flex", alignItems:"center", gap:6, fontSize:12,
-                                     fontWeight:600, color:"#3b82f6", cursor:"pointer", background:"none",
-                                     border:"none", padding:0, fontFamily:"inherit" }}>
-                            <RotateCcw size={12}/> Reset my password
-                          </button>
-                        )}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  <button className="auth-btn"
-                    disabled={busy || !email.trim() || !pw || (tab==="signup" && !name.trim())}
-                    onClick={submit}
-                    style={{ width:"100%", padding:"14px",
-                             background:"linear-gradient(135deg,#2563eb,#1d4ed8)",
-                             border:"none", borderRadius:12, color:"#fff", fontFamily:"inherit", fontSize:14,
-                             fontWeight:700, cursor:"pointer", display:"flex", alignItems:"center",
-                             justifyContent:"center", gap:8, boxShadow:"0 4px 20px rgba(37,99,235,.28)",
-                             letterSpacing:".01em", transition:"all .2s" }}>
-                    {busy ? <Loader2 size={15} className="auth-spin"/> : tab==="login" ? "Sign In" : "Create Account"}
-                  </button>
-
-                  {tab === "signup" && (
-                    <p style={{ fontSize:12, color: rT3, textAlign:"center", lineHeight:1.7 }}>
-                      A verification email will be sent to your address.
-                    </p>
-                  )}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      </div>
     </div>
   );
 }
@@ -795,7 +146,7 @@ function TimePicker({ value, onChange }) {
   );
 }
 
-function MedModal({ onClose, onSave, existing, userEmail }) {
+function MedModal({ onClose, onSave, existing, userId }) {
   const def = existing
     ? {...existing}
     : { name:"", dosage:"", freq:"Once daily", time:"08:00", color:"blue" };
@@ -810,27 +161,29 @@ function MedModal({ onClose, onSave, existing, userEmail }) {
     setBusy(true); setErr("");
     const med = { ...f, id: existing?.id || Date.now().toString(), taken: existing?.taken ?? false };
     try {
-      if (isEdit && existing?.firestoreId) {
-        await updateDoc(doc(db, "Medications", existing.firestoreId), {
-          medicationName: med.name,
-          dosage:         med.dosage,
-          freq:           med.freq,
-          reminderTime:   med.time,
-          color:          med.color,
-        });
-      } else if (!isEdit) {
-        const docRef = await addDoc(collection(db, "Medications"), {
-          medicationName: med.name,
-          dosage:         med.dosage,
-          freq:           med.freq,
-          reminderTime:   med.time,
-          color:          med.color,
-          userEmail:      userEmail || auth.currentUser?.email || "",
-          active:         true,
-          createdAt:      serverTimestamp(),
-        });
-        med.firestoreId = docRef.id;
-        med.id = docRef.id;
+      if (isEdit && existing?.id) {
+        await supabase.from("user_medications").update({
+          medication_name: med.name,
+          dosage: med.dosage,
+          freq: med.freq,
+          reminder_time: med.time,
+          color: med.color,
+        }).eq("id", existing.id);
+      } else if (!isEdit && userId) {
+        const { data, error } = await supabase.from("user_medications").insert({
+          user_id: userId,
+          medication_name: med.name,
+          dosage: med.dosage,
+          freq: med.freq,
+          reminder_time: med.time,
+          color: med.color,
+          active: true,
+        }).select("id").single();
+        if (error) throw error;
+        if (data?.id) {
+          med.firestoreId = data.id;
+          med.id = data.id;
+        }
       }
       onSave(med);
       onClose();
@@ -1000,12 +353,15 @@ function AIDrawer({ onClose, userName, meds }) {
       setMsgs(m => [...m, { role:"assistant", content:reply }]);
 
       try {
-        await addDoc(collection(db, "chats"), {
-          userId: auth.currentUser?.uid || "anon",
-          message: msgText, response: reply,
-          timestamp: serverTimestamp(),
-        });
-      } catch(e) { console.warn("Chat Firestore save:", e); }
+        const { data: { user: u } } = await supabase.auth.getUser();
+        if (u?.id) {
+          await supabase.from("chats").insert({
+            user_id: u.id,
+            message: msgText,
+            response: reply,
+          });
+        }
+      } catch(e) { console.warn("Chat save:", e); }
 
     } catch(e) {
       console.error("Health Advisor error:", e);
@@ -1198,10 +554,11 @@ function FeedbackModal({ onClose, userEmail }) {
     if (!body.trim()) { setErr("Please write something before sending."); return; }
     setBusy(true); setErr("");
     try {
-      await addDoc(collection(db, "Feedback"), {
+      const { data: { user: u } } = await supabase.auth.getUser();
+      await supabase.from("feedback").insert({
+        user_id: u?.id ?? null,
+        user_email: userEmail || u?.email || "anonymous",
         type, body, rating,
-        userEmail: userEmail || auth.currentUser?.email || "anonymous",
-        createdAt: serverTimestamp(),
       });
       setSent(true);
     } catch(e) {
@@ -1331,9 +688,9 @@ function NicknameModal({ currentName, onSave, onClose }) {
       </motion.div>
     </motion.div>
   );
-}
+  }
 
-function Dashboard({ user, meds, setMeds, onAdd, onEdit, onDelete, onChat, displayName, onEditName }) {
+  function Dashboard({ user, meds, setMeds, onAdd, onEdit, onDelete, onChat, displayName, onEditName }) {
   const now    = useClock();
   const taken  = meds.filter(m=>m.taken).length;
   const total  = meds.length;
@@ -1348,6 +705,20 @@ function Dashboard({ user, meds, setMeds, onAdd, onEdit, onDelete, onChat, displ
   const nextMed= [...meds].filter(m=>!m.taken&&toMins(m.time)>curMins)
                           .sort((a,b)=>toMins(a.time)-toMins(b.time))[0];
   const toggle = id => setMeds(ms=>ms.map(m=>m.id===id?{...m,taken:!m.taken}:m));
+
+  const [prescriptions, setPrescriptions] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  useEffect(() => {
+    if (!user?.id) return;
+    (async () => {
+      const [pRes, nRes] = await Promise.all([
+        supabase.from("prescriptions").select("id, status, created_at, notes").eq("patient_id", user.id).order("created_at", { ascending: false }).limit(10),
+        supabase.from("notifications").select("id, type, title, body, read_at, created_at").eq("user_id", user.id).order("created_at", { ascending: false }).limit(5),
+      ]);
+      setPrescriptions(pRes.data || []);
+      setNotifications(nRes.data || []);
+    })();
+  }, [user?.id]);
 
   return (
     <div style={{flex:1,overflowY:"auto"}}>
@@ -1532,6 +903,44 @@ function Dashboard({ user, meds, setMeds, onAdd, onEdit, onDelete, onChat, displ
             </div>
           )}
         </motion.div>
+
+        {}
+        {(prescriptions.length > 0 || notifications.length > 0) && (
+          <motion.div className="au d4" style={{ marginTop: 16 }}>
+            {prescriptions.length > 0 && (
+              <div className="card" style={{ padding: 18, marginBottom: 12 }}>
+                <h3 style={{ color: t1, fontSize: 14, fontWeight: 600, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Pill size={14} color="var(--p)"/> Prescriptions
+                </h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {prescriptions.map(pr => (
+                    <div key={pr.id} style={{ padding: "10px 12px", borderRadius: 10, background: "var(--s2)", border: "1px solid var(--b0)" }}>
+                      <span style={{ color: t2, fontSize: 12 }}>{new Date(pr.created_at).toLocaleDateString()}</span>
+                      <span style={{ marginLeft: 8, padding: "2px 8px", borderRadius: 99, fontSize: 11, fontWeight: 600, background: pr.status === "ready" ? "rgba(16,185,129,.15)" : (pr.status === "filled" || pr.status === "picked_up") ? "var(--pd)" : "rgba(245,158,11,.12)", color: pr.status === "ready" ? "var(--gr)" : (pr.status === "filled" || pr.status === "picked_up") ? "var(--p)" : "var(--am)" }}>
+                        {PRESCRIPTION_STATUS_LABELS[pr.status] || pr.status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {notifications.length > 0 && (
+              <div className="card" style={{ padding: 18, marginBottom: 12 }}>
+                <h3 style={{ color: t1, fontSize: 14, fontWeight: 600, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Bell size={14} color="var(--am)"/> Notifications
+                </h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {notifications.map(n => (
+                    <div key={n.id} style={{ padding: "10px 12px", borderRadius: 10, background: n.read_at ? "var(--s2)" : "rgba(37,99,235,.06)", border: "1px solid var(--b0)" }}>
+                      <p style={{ color: t1, fontSize: 12, fontWeight: 600, margin: 0 }}>{n.title}</p>
+                      {n.body && <p style={{ color: t3, fontSize: 11, marginTop: 4, marginBottom: 0 }}>{n.body}</p>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </motion.div>
+        )}
 
         {}
         <motion.div className="au d5" style={{marginTop:12,padding:"16px 18px",borderRadius:16,
@@ -1721,9 +1130,9 @@ function EmergencyContact({ userId, t1, t2, t3 }) {
     if (!userId) { setLoading(false); return; }
     (async () => {
       try {
-        const snap = await getDoc(doc(db, "profiles", userId));
-        if (snap.exists() && snap.data().emergencyContact) {
-          setF({ name:"", relationship:"", phone:"", email:"", ...snap.data().emergencyContact });
+        const { data } = await supabase.from("profiles").select("emergency_contact").eq("id", userId).single();
+        if (data?.emergency_contact) {
+          setF({ name:"", relationship:"", phone:"", email:"", ...data.emergency_contact });
         }
       } catch(e) { console.error("Load emergency contact:", e); }
       finally { setLoading(false); }
@@ -1734,10 +1143,10 @@ function EmergencyContact({ userId, t1, t2, t3 }) {
     if (!userId) return;
     setBusy(true); setSaved(false);
     try {
-      await setDoc(doc(db, "profiles", userId), {
-        emergencyContact: { name:f.name, relationship:f.relationship, phone:f.phone, email:f.email },
-        updatedAt: serverTimestamp(),
-      }, { merge:true });
+      await supabase.from("profiles").update({
+        emergency_contact: { name:f.name, relationship:f.relationship, phone:f.phone, email:f.email },
+        updated_at: new Date().toISOString(),
+      }).eq("id", userId);
       setSaved(true);
       setTimeout(() => setSaved(false), 2800);
     } catch(e) { console.error("Save emergency contact:", e); }
@@ -1838,15 +1247,14 @@ function HealthProfile({ userId, t1, t2, t3 }) {
     if (!userId) { setLoading(false); return; }
     (async () => {
       try {
-        const snap = await getDoc(doc(db, "profiles", userId));
-        if (snap.exists()) {
-          const d = snap.data();
+        const { data: d } = await supabase.from("profiles").select("dob,blood_type,weight,height,allergies,medical_conditions").eq("id", userId).single();
+        if (d) {
           setDob(d.dob || "");
-          setBloodType(d.bloodType || "");
+          setBloodType(d.blood_type || "");
           setWeight(d.weight || "");
           setHeight(d.height || "");
           setAllergies(d.allergies || []);
-          setConditions(d.medicalConditions || []);
+          setConditions(d.medical_conditions || []);
         }
       } catch(e) { console.error("Load profile error:", e); }
       finally { setLoading(false); }
@@ -1873,12 +1281,12 @@ function HealthProfile({ userId, t1, t2, t3 }) {
     if (!userId) return;
     setBusy(true); setSaved(false);
     try {
-      await setDoc(doc(db, "profiles", userId), {
-        dob, bloodType, weight, height,
+      await supabase.from("profiles").update({
+        dob, blood_type: bloodType, weight, height,
         allergies,
-        medicalConditions: conditions,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
+        medical_conditions: conditions,
+        updated_at: new Date().toISOString(),
+      }).eq("id", userId);
       setSaved(true);
       setTimeout(() => setSaved(false), 2800);
     } catch(e) { console.error("Save profile error:", e); }
@@ -1948,6 +1356,80 @@ function HealthProfile({ userId, t1, t2, t3 }) {
   );
 }
 
+function PrimaryCareSection({ userId, t1, t2, t3 }) {
+  const [doctors, setDoctors] = useState([]);
+  const [pharmacists, setPharmacists] = useState([]);
+  const [primaryDoctorId, setPrimaryDoctorId] = useState("");
+  const [primaryPharmacistId, setPrimaryPharmacistId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      try {
+        const [profRes, docsRes, pharmRes] = await Promise.all([
+          supabase.from("profiles").select("primary_doctor_id, primary_pharmacist_id").eq("id", userId).single(),
+          supabase.from("profiles").select("id, first_name, last_name, email").eq("role", "doctor").order("first_name"),
+          supabase.from("profiles").select("id, first_name, last_name, email").eq("role", "pharmacist").order("first_name"),
+        ]);
+        if (profRes.data) {
+          setPrimaryDoctorId(profRes.data.primary_doctor_id || "");
+          setPrimaryPharmacistId(profRes.data.primary_pharmacist_id || "");
+        }
+        setDoctors(docsRes.data || []);
+        setPharmacists(pharmRes.data || []);
+      } catch (e) { console.error("Primary care load:", e); }
+      finally { setLoading(false); }
+    })();
+  }, [userId]);
+
+  async function save() {
+    if (!userId) return;
+    setSaving(true); setSaved(false);
+    try {
+      await supabase.from("profiles").update({
+        primary_doctor_id: primaryDoctorId || null,
+        primary_pharmacist_id: primaryPharmacistId || null,
+        updated_at: new Date().toISOString(),
+      }).eq("id", userId);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) { console.error("Primary care save:", e); }
+    finally { setSaving(false); }
+  }
+
+  const label = (p) => [p.first_name, p.last_name].filter(Boolean).join(" ") || p.email || p.id?.slice(0, 8);
+
+  if (loading) return <div style={{ padding: "16px 18px", color: t3 }}><Loader2 size={16} className="auth-spin"/> Loading…</div>;
+  return (
+    <div style={{ padding: "16px 18px 20px", borderTop: "1px solid var(--b0)" }}>
+      <p style={{ color: t3, fontSize: 12, marginBottom: 14 }}>Assign your primary doctor and pharmacist. Prescriptions from your doctor will be sent to your primary pharmacist.</p>
+      <div style={{ marginBottom: 14 }}>
+        <label className="lbl" style={{ marginBottom: 6 }}>Primary doctor</label>
+        <select className="inp" value={primaryDoctorId} onChange={e => setPrimaryDoctorId(e.target.value)}
+          style={{ width: "100%", padding: "11px 14px", borderRadius: 10 }}>
+          <option value="">Select a doctor</option>
+          {doctors.map(d => <option key={d.id} value={d.id}>{label(d)}</option>)}
+        </select>
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <label className="lbl" style={{ marginBottom: 6 }}>Primary pharmacist</label>
+        <select className="inp" value={primaryPharmacistId} onChange={e => setPrimaryPharmacistId(e.target.value)}
+          style={{ width: "100%", padding: "11px 14px", borderRadius: 10 }}>
+          <option value="">Select a pharmacist</option>
+          {pharmacists.map(p => <option key={p.id} value={p.id}>{label(p)}</option>)}
+        </select>
+      </div>
+      {saved && <OkBanner msg="Primary care saved."/>}
+      <button className="btn" style={{ width: "100%", padding: 11 }} disabled={saving} onClick={save}>
+        {saving ? <Loader2 size={14} className="auth-spin"/> : "Save primary care"}
+      </button>
+    </div>
+  );
+}
+
 function SettingsPage({ light, setLight, user, displayName, onEditName, meds, onFeedback }) {
   const t1="var(--t1)", t2="var(--t2)", t3="var(--t3)";
   const name=displayName||user?.displayName||user?.email?.split("@")[0]||"User";
@@ -1962,15 +1444,16 @@ function SettingsPage({ light, setLight, user, displayName, onEditName, meds, on
 
   function toggleRow(key) { setOpenRow(o => o===key ? null : key); }
 
-  function saveNotifications() {
+  async function saveNotifications() {
     localStorage.setItem("mt_notif", notifOn ? "true" : "false");
     localStorage.setItem("mt_notif_email", notifEmail);
-    addDoc(collection(db, "ReminderPreferences"), {
-      userEmail:    user?.email || "",
-      notifEnabled: notifOn,
-      reminderEmail: notifEmail,
-      updatedAt:    serverTimestamp(),
-    }).catch(e => console.warn("Could not save notif prefs to Firestore:", e));
+    if (user?.id) {
+      await supabase.from("profiles").update({
+        notifications_enabled: notifOn,
+        reminder_email: notifEmail,
+        updated_at: new Date().toISOString(),
+      }).eq("id", user.id);
+    }
     setNotifSaved(true);
     setTimeout(() => setNotifSaved(false), 2500);
   }
@@ -1983,48 +1466,13 @@ function SettingsPage({ light, setLight, user, displayName, onEditName, meds, on
       if (!delPw.trim()) { setDelErr("Enter your password to continue."); return; }
       setDelBusy(true); setDelErr("");
       try {
-        const credential = EmailAuthProvider.credential(user.email, delPw);
-        await reauthenticateWithCredential(auth.currentUser, credential);
-        try {
-          await addDoc(collection(db, "mail"), {
-            to: user.email,
-            message: {
-              subject: "⚠️ MedTrack Account Deletion Confirmation",
-              html: `
-                <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;background:#f8faff;border-radius:16px">
-                  <div style="display:flex;align-items:center;gap:10px;margin-bottom:24px">
-                    <span style="font-size:22px">💊</span>
-                    <span style="font-size:20px;font-weight:700;color:#0c1433">MedTrack</span>
-                  </div>
-                  <h2 style="color:#b91c1c;font-size:20px;margin-bottom:12px">Account Deletion Requested</h2>
-                  <p style="color:#374369;font-size:15px;line-height:1.7;margin-bottom:16px">
-                    Hi there,<br/><br/>
-                    We received a request to permanently delete the MedTrack account associated with
-                    <strong>${user.email}</strong>.
-                  </p>
-                  <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:14px 18px;margin-bottom:20px">
-                    <p style="color:#991b1b;font-size:14px;margin:0;line-height:1.6">
-                      <strong>⚠️ This action is permanent.</strong> All your medication data, reminders, and account information will be deleted and cannot be recovered.
-                    </p>
-                  </div>
-                  <p style="color:#374369;font-size:14px;line-height:1.7">
-                    If you did not request this, please change your password immediately and contact support.
-                  </p>
-                  <p style="color:#6e7fa8;font-size:13px;margin-top:24px">
-                    — The MedTrack Team
-                  </p>
-                </div>
-              `,
-            },
-          });
-        } catch (mailErr) {
-          console.warn("Confirmation email could not be sent (Trigger Email extension may not be configured):", mailErr);
-        }
+        const { error } = await supabase.auth.signInWithPassword({ email: user.email, password: delPw });
+        if (error) throw error;
         setDelStep(2);
-        setDelErr("Password verified. A confirmation email has been sent to " + user.email + ". Click below to permanently delete your account.");
+        setDelErr("Password verified. Click below to delete all your data and sign out. To fully remove your auth account, use Supabase Dashboard → Authentication → Users.");
       } catch(e) {
         const code = e.code || "";
-        if (code === "auth/wrong-password" || code === "auth/invalid-credential")
+        if (code === "auth/wrong-password" || code === "auth/invalid-credential" || (e.message || "").toLowerCase().includes("invalid"))
           setDelErr("Incorrect password. Please try again.");
         else setDelErr(e.message || "Could not verify. Try again.");
       } finally { setDelBusy(false); }
@@ -2033,19 +1481,15 @@ function SettingsPage({ light, setLight, user, displayName, onEditName, meds, on
 
     setDelBusy(true); setDelErr("");
     try {
-      const medsQ = query(collection(db, "Medications"), where("userEmail","==",user.email));
-      const medsSnap = await getDocs(medsQ);
-      await Promise.all(medsSnap.docs.map(d => deleteDoc(doc(db, "Medications", d.id))));
-      const prefsQ = query(collection(db, "ReminderPreferences"), where("userEmail","==",user.email));
-      const prefsSnap = await getDocs(prefsQ);
-      await Promise.all(prefsSnap.docs.map(d => deleteDoc(doc(db, "ReminderPreferences", d.id))));
-      await deleteUser(auth.currentUser);
+      const uid = user.id;
+      await supabase.from("user_medications").delete().eq("user_id", uid);
+      await supabase.from("chats").delete().eq("user_id", uid);
+      await supabase.from("feedback").delete().eq("user_id", uid);
+      await supabase.auth.signOut();
       localStorage.clear();
+      setDelErr("All your data has been deleted. You have been signed out. To remove your auth account entirely, use Supabase Dashboard → Authentication → Users.");
     } catch(e) {
-      const code = e.code || "";
-      if (code === "auth/requires-recent-login")
-        setDelErr("Session expired. Please sign out and sign back in before deleting.");
-      else setDelErr(e.message || "Could not delete account. Try again.");
+      setDelErr(e.message || "Could not delete account. Try again.");
     } finally { setDelBusy(false); }
   }
 
@@ -2087,7 +1531,7 @@ function SettingsPage({ light, setLight, user, displayName, onEditName, meds, on
       content: (
         <div style={{padding:"16px 18px 20px",borderTop:"1px solid var(--b0)"}}>
           {[
-            {l:"End-to-end encryption",        d:"Medication data encrypted in Firestore"},
+            {l:"End-to-end encryption",        d:"Medication data encrypted in Supabase"},
             {l:"No data sold to third parties", d:"Your health info is never shared or monetised"},
             {l:"Anonymous analytics only",      d:"Usage data is anonymised and optional"},
           ].map((item,i) => (
@@ -2190,13 +1634,19 @@ function SettingsPage({ light, setLight, user, displayName, onEditName, meds, on
       key:"health",
       I: HeartPulse, label:"Health Profile", sub:"Personal health information and medical history",
       color:"rgba(239,68,68,.10)", iconColor:"var(--ro)",
-      content: <HealthProfile userId={user?.uid} t1={t1} t2={t2} t3={t3}/>,
+      content: <HealthProfile userId={user?.id} t1={t1} t2={t2} t3={t3}/>,
     },
     {
       key:"emergency",
       I: Siren, label:"Emergency Contact", sub:"Caregiver and emergency access",
       color:"rgba(245,158,11,.10)", iconColor:"var(--am)",
-      content: <EmergencyContact userId={user?.uid} t1={t1} t2={t2} t3={t3}/>,
+      content: <EmergencyContact userId={user?.id} t1={t1} t2={t2} t3={t3}/>,
+    },
+    {
+      key:"primarycare",
+      I: Stethoscope, label:"Primary care", sub:"Your primary doctor and pharmacist",
+      color:"rgba(37,99,235,.12)", iconColor:"var(--p)",
+      content: <PrimaryCareSection userId={user?.id} t1={t1} t2={t2} t3={t3}/>,
     },
   ];
 
@@ -2311,7 +1761,7 @@ function SettingsPage({ light, setLight, user, displayName, onEditName, meds, on
 
         {}
         <motion.div className="au d4">
-          <button onClick={()=>signOut(auth)}
+          <button onClick={()=>supabase.auth.signOut()}
             style={{width:"100%",padding:"13px",borderRadius:13,
               border:"1px solid rgba(239,68,68,.2)",background:"rgba(239,68,68,.07)",
               color:"var(--ro)",fontFamily:"inherit",fontWeight:600,fontSize:13,cursor:"pointer",
@@ -2321,6 +1771,93 @@ function SettingsPage({ light, setLight, user, displayName, onEditName, meds, on
         </motion.div>
       </div>
     </div>
+  );
+}
+
+function PrescribeModal({ patient, patientProfile, doctor, onClose, onSuccess }) {
+  const [meds, setMeds] = useState([{ medication_name: "", dosage: "", frequency: "", instructions: "" }]);
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const t1 = "var(--t1)", t3 = "var(--t3)";
+
+  function addRow() { setMeds(m => [...m, { medication_name: "", dosage: "", frequency: "", instructions: "" }]); }
+  function removeRow(i) { setMeds(m => m.length > 1 ? m.filter((_, j) => j !== i) : m); }
+
+  async function submit(e) {
+    e?.preventDefault();
+    const valid = meds.filter(m => m.medication_name?.trim());
+    if (!valid.length) { setErr("Add at least one medication."); return; }
+    setBusy(true); setErr("");
+    try {
+      const pharmacistId = patientProfile?.primary_pharmacist_id || null;
+      const { data: rx, error: rxErr } = await supabase.from("prescriptions").insert({
+        patient_id: patient.id,
+        doctor_id: doctor.id,
+        pharmacist_id: pharmacistId,
+        status: "pending_pharmacist",
+        notes: notes.trim() || null,
+      }).select("id").single();
+      if (rxErr) throw rxErr;
+      for (const m of valid) {
+        await supabase.from("prescription_medications").insert({
+          prescription_id: rx.id,
+          medication_name: m.medication_name.trim(),
+          dosage: m.dosage.trim() || null,
+          frequency: m.frequency.trim() || null,
+          instructions: m.instructions.trim() || null,
+        });
+      }
+      onSuccess?.();
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Could not create prescription.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <motion.div className="ov" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose}>
+      <motion.div className="mo" onClick={e => e.stopPropagation()}
+        initial={{ y: 28, opacity: 0, scale: 0.96 }} animate={{ y: 0, opacity: 1, scale: 1 }}
+        exit={{ y: 28, opacity: 0 }} transition={{ type: "spring", damping: 26, stiffness: 300 }}
+        style={{ maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <h2 style={{ color: t1, fontSize: 18, fontFamily: "'Playfair Display',serif", fontStyle: "italic", fontWeight: 600 }}>
+            New prescription — {patient?.fullName || "Patient"}
+          </h2>
+          <button onClick={onClose} type="button" style={{ width: 30, height: 30, borderRadius: 9, border: "1px solid var(--b1)", background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}><X size={13}/></button>
+        </div>
+        {!patientProfile?.primary_pharmacist_id && (
+          <p style={{ color: "var(--am)", fontSize: 12, marginBottom: 12, padding: "8px 12px", background: "rgba(245,158,11,.1)", borderRadius: 8 }}>Patient has no primary pharmacist. Prescription will be unassigned until a pharmacist claims it.</p>
+        )}
+        <form onSubmit={submit}>
+          {meds.map((m, i) => (
+            <div key={i} style={{ marginBottom: 14, padding: 12, background: "var(--s2)", borderRadius: 12, border: "1px solid var(--b0)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ color: t3, fontSize: 11, fontWeight: 600 }}>Medication {i + 1}</span>
+                <button type="button" onClick={() => removeRow(i)} style={{ background: "none", border: "none", color: "var(--ro)", cursor: "pointer", padding: 0 }}><Trash2 size={12}/></button>
+              </div>
+              <input className="inp" placeholder="Medication name" value={m.medication_name} onChange={e => setMeds(ms => ms.map((x, j) => j === i ? { ...x, medication_name: e.target.value } : x))} style={{ marginBottom: 8 }}/>
+              <input className="inp" placeholder="Dosage" value={m.dosage} onChange={e => setMeds(ms => ms.map((x, j) => j === i ? { ...x, dosage: e.target.value } : x))} style={{ marginBottom: 8 }}/>
+              <input className="inp" placeholder="Frequency" value={m.frequency} onChange={e => setMeds(ms => ms.map((x, j) => j === i ? { ...x, frequency: e.target.value } : x))} style={{ marginBottom: 8 }}/>
+              <input className="inp" placeholder="Instructions (optional)" value={m.instructions} onChange={e => setMeds(ms => ms.map((x, j) => j === i ? { ...x, instructions: e.target.value } : x))}/>
+            </div>
+          ))}
+          <button type="button" onClick={addRow} style={{ marginBottom: 14, padding: "8px 14px", borderRadius: 9, border: "1px dashed var(--b1)", background: "transparent", color: t3, fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}><Plus size={12}/> Add medication</button>
+          <div style={{ marginBottom: 14 }}>
+            <label className="lbl" style={{ marginBottom: 6 }}>Notes (optional)</label>
+            <textarea className="inp" rows={2} placeholder="Prescription notes" value={notes} onChange={e => setNotes(e.target.value)}/>
+          </div>
+          {err && <p style={{ color: "var(--ro)", fontSize: 12, marginBottom: 12 }}>{err}</p>}
+          <div style={{ display: "flex", gap: 9 }}>
+            <button type="button" className="bto" style={{ flex: 1 }} onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn-doc" style={{ flex: 1 }} disabled={busy}>{busy ? <Loader2 size={14} className="auth-spin"/> : "Send to pharmacist"}</button>
+          </div>
+        </form>
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -2336,6 +1873,7 @@ function DoctorPortal({ user, light, setLight, userName }) {
   const [noteBusy,  setNoteBusy] = useState(false);
   const [noteSaved, setNoteSaved] = useState(false);
   const [loading,   setLoading] = useState(false);
+  const [showPrescribe, setShowPrescribe] = useState(false);
   const isMob = useIsMobile();
   const t1="var(--t1)",t2="var(--t2)",t3="var(--t3)",b1="var(--b1)";
 
@@ -2348,9 +1886,13 @@ function DoctorPortal({ user, light, setLight, userName }) {
   useEffect(() => {
     (async () => {
       try {
-        const q = query(collection(db,"users"), where("role","==","client"));
-        const snap = await getDocs(q);
-        setPatients(snap.docs.map(d => ({ id:d.id, ...d.data() })));
+        const { data, error } = await supabase.from("profiles").select("id,first_name,last_name,email").eq("role", "patient");
+        if (error) throw error;
+        setPatients((data || []).map(p => ({
+          id: p.id,
+          fullName: [p.first_name, p.last_name].filter(Boolean).join(" ") || "Unknown",
+          email: p.email || "",
+        })));
       } catch(e) { console.error("Load patients:", e); }
     })();
   }, []);
@@ -2358,14 +1900,27 @@ function DoctorPortal({ user, light, setLight, userName }) {
   async function openPatient(pat) {
     setSelPat(pat); setLoading(true); setPatProfile(null); setPatMeds([]); setNotes([]);
     try {
-      const [profSnap, medsSnap, notesSnap] = await Promise.all([
-        getDoc(doc(db,"profiles",pat.id)),
-        getDocs(query(collection(db,"Medications"), where("userEmail","==",pat.email))),
-        getDocs(query(collection(db,"doctorNotes"), where("patientId","==",pat.id), where("doctorId","==",user.uid))),
+      const [profRes, medsRes, notesRes] = await Promise.all([
+        supabase.from("profiles").select("*").eq("id", pat.id).single(),
+        supabase.from("user_medications").select("*").eq("user_id", pat.id),
+        supabase.from("doctor_notes").select("*").eq("doctor_id", user.id).eq("patient_id", pat.id).order("created_at", { ascending: false }),
       ]);
-      setPatProfile(profSnap.exists() ? profSnap.data() : {});
-      setPatMeds(medsSnap.docs.map(d => ({ id:d.id,...d.data() })));
-      setNotes(notesSnap.docs.map(d => ({ id:d.id,...d.data() })).sort((a,b) => (b.createdAt?.seconds||0)-(a.createdAt?.seconds||0)));
+      setPatProfile(profRes.data || {});
+      setPatMeds((medsRes.data || []).map(d => ({
+        id: d.id,
+        medicationName: d.medication_name,
+        dosage: d.dosage,
+        freq: d.freq,
+        color: d.color,
+        reminderTime: d.reminder_time,
+      })));
+      setNotes((notesRes.data || []).map(d => ({
+        id: d.id,
+        doctorId: d.doctor_id,
+        patientId: d.patient_id,
+        note: d.note,
+        createdAt: d.created_at,
+      })));
     } catch(e) { console.error("Load patient detail:", e); }
     finally { setLoading(false); }
   }
@@ -2374,12 +1929,13 @@ function DoctorPortal({ user, light, setLight, userName }) {
     if (!note.trim() || !selPat) return;
     setNoteBusy(true);
     try {
-      const nd = await addDoc(collection(db,"doctorNotes"), {
-        doctorId: user.uid, patientId: selPat.id,
-        doctorEmail: user.email, patientEmail: selPat.email,
-        note: note.trim(), createdAt: serverTimestamp(),
-      });
-      setNotes(n => [{ id:nd.id, doctorId:user.uid, patientId:selPat.id, note:note.trim() }, ...n]);
+      const { data: nd, error } = await supabase.from("doctor_notes").insert({
+        doctor_id: user.id,
+        patient_id: selPat.id,
+        note: note.trim(),
+      }).select("id,created_at").single();
+      if (error) throw error;
+      setNotes(n => [{ id: nd.id, doctorId: user.id, patientId: selPat.id, note: note.trim(), createdAt: nd.created_at }, ...n]);
       setNote(""); setNoteSaved(true);
       setTimeout(() => setNoteSaved(false), 2500);
     } catch(e) { console.error("Add note:", e); }
@@ -2387,7 +1943,7 @@ function DoctorPortal({ user, light, setLight, userName }) {
   }
 
   const filtered = patients.filter(p =>
-    !search || p.fullName?.toLowerCase().includes(search.toLowerCase()) || p.email?.toLowerCase().includes(search.toLowerCase())
+    !search || (p.fullName || "").toLowerCase().includes(search.toLowerCase()) || (p.email || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const DocAC = "var(--doc-p)";
@@ -2425,7 +1981,7 @@ function DoctorPortal({ user, light, setLight, userName }) {
               </span>
               <div className={`sw ${!light?"on":""}`} onClick={()=>setLight(!light)}/>
             </div>
-            <button onClick={()=>signOut(auth)}
+            <button onClick={()=>supabase.auth.signOut()}
               style={{display:"flex",alignItems:"center",gap:7,padding:"7px 10px",borderRadius:10,
                       border:"none",background:"transparent",cursor:"pointer",color:"var(--ro)",
                       fontFamily:"inherit",fontSize:12,fontWeight:500,width:"100%",transition:"background .15s"}}
@@ -2553,17 +2109,21 @@ function DoctorPortal({ user, light, setLight, userName }) {
                   ) : (
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
                       {}
-                      <div style={{gridColumn:"1/-1"}}>
-                        <motion.div className="au card" style={{padding:20,display:"flex",alignItems:"center",gap:14,marginBottom:14}}>
+                      <div style={{gridColumn:"1/-1",display:"flex",alignItems:"center",justifyContent:"space-between",gap:14,flexWrap:"wrap"}}>
+                        <motion.div className="au card" style={{padding:20,display:"flex",alignItems:"center",gap:14,marginBottom:14,flex:1,minWidth:0}}>
                           <div style={{width:52,height:52,borderRadius:16,background:"var(--doc-pd)",
                                        border:"1px solid rgba(14,116,144,.25)",display:"flex",alignItems:"center",justifyContent:"center"}}>
                             <User size={24} color={DocAC}/>
                           </div>
-                          <div>
+                          <div style={{flex:1,minWidth:0}}>
                             <h3 style={{color:t1,fontSize:18,fontWeight:700}}>{selPat.fullName||"Unknown"}</h3>
                             <p style={{color:t3,fontSize:13,marginTop:2}}>{selPat.email}</p>
                           </div>
                         </motion.div>
+                        <button type="button" className="btn-doc" onClick={()=>setShowPrescribe(true)}
+                          style={{marginBottom:14,display:"flex",alignItems:"center",gap:8,padding:"12px 20px"}}>
+                          <Pill size={16}/> Prescribe
+                        </button>
                       </div>
 
                       {}
@@ -2571,9 +2131,9 @@ function DoctorPortal({ user, light, setLight, userName }) {
                         <h4 style={{color:t1,fontSize:13,fontWeight:600,marginBottom:12,display:"flex",alignItems:"center",gap:7}}>
                           <AlertCircle size={13} color="var(--ro)"/> Allergies
                         </h4>
-                        {patProfile?.allergies?.length > 0
+                        {(patProfile?.allergies?.length || 0) > 0
                           ? <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                              {patProfile.allergies.map(a => (
+                              {(patProfile.allergies || []).map(a => (
                                 <span key={a} style={{padding:"4px 11px",borderRadius:99,fontSize:12,fontWeight:600,
                                   background:"rgba(220,38,38,.08)",border:"1px solid rgba(220,38,38,.2)",color:"var(--ro)"}}>
                                   {a}
@@ -2584,9 +2144,9 @@ function DoctorPortal({ user, light, setLight, userName }) {
                         <h4 style={{color:t1,fontSize:13,fontWeight:600,margin:"16px 0 10px",display:"flex",alignItems:"center",gap:7}}>
                           <HeartPulse size={13} color="var(--am)"/> Conditions
                         </h4>
-                        {patProfile?.medicalConditions?.length > 0
+                        {(patProfile?.medical_conditions?.length || 0) > 0
                           ? <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                              {patProfile.medicalConditions.map(c => (
+                              {(patProfile.medical_conditions || []).map(c => (
                                 <span key={c} style={{padding:"4px 11px",borderRadius:99,fontSize:12,fontWeight:600,
                                   background:"rgba(217,119,6,.08)",border:"1px solid rgba(217,119,6,.2)",color:"var(--am)"}}>
                                   {c}
@@ -2653,76 +2213,92 @@ function DoctorPortal({ user, light, setLight, userName }) {
           )}
         </div>
       </div>
+      <AnimatePresence>
+        {showPrescribe && selPat && (
+          <PrescribeModal
+            patient={selPat}
+            patientProfile={patProfile}
+            doctor={user}
+            onClose={() => setShowPrescribe(false)}
+            onSuccess={() => setShowPrescribe(false)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
 function PharmacistPortal({ user, light, setLight, userName }) {
-  const [page,    setPage]    = useState("dashboard");
-  const [patients,setPatients] = useState([]);
-  const [search,  setSearch]  = useState("");
-  const [selPat,  setSelPat]  = useState(null);
-  const [patProfile,setPatProfile] = useState(null);
-  const [patMeds, setPatMeds] = useState([]);
-  const [notes,   setNotes]   = useState([]);
-  const [note,    setNote]    = useState("");
-  const [refill,  setRefill]  = useState("pending");
-  const [noteBusy,setNoteBusy] = useState(false);
-  const [noteSaved,setNoteSaved] = useState(false);
+  const [page, setPage] = useState("dashboard");
+  const [prescriptions, setPrescriptions] = useState([]);
+  const [patientNames, setPatientNames] = useState({});
+  const [search, setSearch] = useState("");
+  const [selRx, setSelRx] = useState(null);
+  const [rxMeds, setRxMeds] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
   const isMob = useIsMobile();
-  const t1="var(--t1)",t2="var(--t2)",t3="var(--t3)",b1="var(--b1)";
+  const t1="var(--t1)", t2="var(--t2)", t3="var(--t3)", b1="var(--b1)";
   const name = userName || user?.displayName || user?.email?.split("@")[0] || "Pharmacist";
 
   useEffect(() => { document.body.className = light ? "light" : ""; }, [light]);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const q = query(collection(db,"users"), where("role","==","client"));
-        const snap = await getDocs(q);
-        setPatients(snap.docs.map(d => ({ id:d.id, ...d.data() })));
-      } catch(e) { console.error("Load patients:", e); }
-    })();
-  }, []);
-
-  async function openPatient(pat) {
-    setSelPat(pat); setLoading(true); setPatProfile(null); setPatMeds([]); setNotes([]);
+  async function loadPrescriptions() {
     try {
-      const [profSnap, medsSnap, notesSnap] = await Promise.all([
-        getDoc(doc(db,"profiles",pat.id)),
-        getDocs(query(collection(db,"Medications"), where("userEmail","==",pat.email))),
-        getDocs(query(collection(db,"pharmacistNotes"), where("patientId","==",pat.id), where("pharmacistId","==",user.uid))),
-      ]);
-      setPatProfile(profSnap.exists() ? profSnap.data() : {});
-      setPatMeds(medsSnap.docs.map(d => ({ id:d.id,...d.data() })));
-      setNotes(notesSnap.docs.map(d => ({ id:d.id,...d.data() })).sort((a,b) => (b.createdAt?.seconds||0)-(a.createdAt?.seconds||0)));
-    } catch(e) { console.error("Load patient detail:", e); }
+      const { data: mine } = await supabase.from("prescriptions").select("id, patient_id, status, notes, created_at, pharmacist_id").eq("pharmacist_id", user.id).order("created_at", { ascending: false });
+      const { data: unassigned } = await supabase.from("prescriptions").select("id, patient_id, status, notes, created_at, pharmacist_id").is("pharmacist_id", null).eq("status", "pending_pharmacist").order("created_at", { ascending: false });
+      const combined = [...(mine || []), ...(unassigned || []).filter(u => !(mine || []).some(m => m.id === u.id))];
+      combined.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      setPrescriptions(combined);
+      const ids = [...new Set(combined.map(p => p.patient_id))];
+      if (ids.length) {
+        const { data: profs } = await supabase.from("profiles").select("id, first_name, last_name").in("id", ids);
+        const map = {};
+        (profs || []).forEach(p => { map[p.id] = [p.first_name, p.last_name].filter(Boolean).join(" ") || "Patient"; });
+        setPatientNames(map);
+      }
+    } catch (e) { console.error("Load prescriptions:", e); }
+  }
+
+  useEffect(() => { loadPrescriptions(); }, [user?.id]);
+
+  async function openPrescription(rx) {
+    setSelRx(rx); setLoading(true); setRxMeds([]);
+    try {
+      const { data } = await supabase.from("prescription_medications").select("*").eq("prescription_id", rx.id);
+      setRxMeds(data || []);
+    } catch (e) { console.error("Load rx medications:", e); }
     finally { setLoading(false); }
   }
 
-  async function addNote() {
-    if (!note.trim() || !selPat) return;
-    setNoteBusy(true);
+  async function claimPrescription(rx) {
+    setActionBusy(true);
     try {
-      const nd = await addDoc(collection(db,"pharmacistNotes"), {
-        pharmacistId: user.uid, patientId: selPat.id,
-        pharmacistEmail: user.email, patientEmail: selPat.email,
-        note: note.trim(), refillStatus: refill, createdAt: serverTimestamp(),
-      });
-      setNotes(n => [{ id:nd.id, note:note.trim(), refillStatus:refill }, ...n]);
-      setNote(""); setNoteSaved(true);
-      setTimeout(() => setNoteSaved(false), 2500);
-    } catch(e) { console.error("Add pharmacist note:", e); }
-    finally { setNoteBusy(false); }
+      await supabase.from("prescriptions").update({ pharmacist_id: user.id, updated_at: new Date().toISOString() }).eq("id", rx.id);
+      setSelRx(prev => prev?.id === rx.id ? { ...prev, pharmacist_id: user.id } : prev);
+      loadPrescriptions();
+    } catch (e) { console.error("Claim:", e); }
+    finally { setActionBusy(false); }
   }
 
-  const filtered = patients.filter(p =>
-    !search || p.fullName?.toLowerCase().includes(search.toLowerCase()) || p.email?.toLowerCase().includes(search.toLowerCase())
-  );
+  async function updateStatus(rx, newStatus) {
+    setActionBusy(true);
+    try {
+      await supabase.from("prescriptions").update({ status: newStatus, updated_at: new Date().toISOString() }).eq("id", rx.id);
+      setSelRx(prev => prev?.id === rx.id ? { ...prev, status: newStatus } : prev);
+      loadPrescriptions();
+    } catch (e) { console.error("Update status:", e); }
+    finally { setActionBusy(false); }
+  }
+
+  const pendingCount = prescriptions.filter(p => p.status === "pending_pharmacist" || p.status === "pending_fill").length;
+  const readyCount = prescriptions.filter(p => p.status === "ready" || p.status === "filled" || p.status === "picked_up").length;
+  const filtered = prescriptions.filter(p => {
+    const pname = (patientNames[p.patient_id] || "").toLowerCase();
+    return !search || pname.includes(search.toLowerCase());
+  });
 
   const PhAC = "var(--pha-p)";
-  const refillColors = { pending:["rgba(217,119,6,.1)","rgba(217,119,6,.25)","var(--am)"], approved:["rgba(5,150,105,.1)","rgba(5,150,105,.25)","var(--gr)"], dispensed:["rgba(37,99,235,.1)","rgba(37,99,235,.25)","var(--pl)"], denied:["rgba(220,38,38,.1)","rgba(220,38,38,.25)","var(--ro)"] };
 
   return (
     <div style={{display:"flex",minHeight:"100vh",background:"var(--bg)"}}>
@@ -2742,8 +2318,8 @@ function PharmacistPortal({ user, light, setLight, userName }) {
           </div>
           <div style={{height:1,background:"var(--b0)",margin:"0 12px 10px"}}/>
           <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:1}}>
-            {[["dashboard","Dashboard",HeartPulse],["patients","Patients",User]].map(([id,l,I]) => (
-              <div key={id} className={`nl ${page===id?"pha-on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
+            {[["dashboard","Dashboard",HeartPulse],["prescriptions","Prescriptions",Pill]].map(([id,l,I]) => (
+              <div key={id} className={`nl ${page===id?"pha-on":""}`} onClick={()=>{setPage(id);setSelRx(null);}}>
                 <I size={15}/>{l}
               </div>
             ))}
@@ -2755,7 +2331,7 @@ function PharmacistPortal({ user, light, setLight, userName }) {
               </span>
               <div className={`sw ${!light?"on":""}`} onClick={()=>setLight(!light)}/>
             </div>
-            <button onClick={()=>signOut(auth)}
+            <button onClick={()=>supabase.auth.signOut()}
               style={{display:"flex",alignItems:"center",gap:7,padding:"7px 10px",borderRadius:10,
                       border:"none",background:"transparent",cursor:"pointer",color:"var(--ro)",
                       fontFamily:"inherit",fontSize:12,fontWeight:500,width:"100%",transition:"background .15s"}}
@@ -2789,13 +2365,13 @@ function PharmacistPortal({ user, light, setLight, userName }) {
                 <h2 style={{color:t1,fontSize:26,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:600}}>
                   Welcome, {name.split(" ")[0]}.
                 </h2>
-                <p style={{color:t3,fontSize:13,marginTop:6}}>Manage prescriptions and patient records.</p>
+                <p style={{color:t3,fontSize:13,marginTop:6}}>Fulfill prescriptions and notify patients when ready.</p>
               </motion.div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:24}}>
                 {[
-                  {l:"Total Patients",v:patients.length,      c:PhAC,          bg:"var(--pha-pd)"},
-                  {l:"Refills Pending",v:Math.ceil(patients.length*.3), c:"var(--am)", bg:"rgba(217,119,6,.1)"},
-                  {l:"Dispensed Today",v:Math.floor(patients.length*.6),c:"var(--gr)",bg:"rgba(5,150,105,.1)"},
+                  {l:"Total prescriptions", v:prescriptions.length, c:PhAC, bg:"var(--pha-pd)"},
+                  {l:"Pending", v:pendingCount, c:"var(--am)", bg:"rgba(217,119,6,.1)"},
+                  {l:"Ready / Filled", v:readyCount, c:"var(--gr)", bg:"rgba(5,150,105,.1)"},
                 ].map((s,i) => (
                   <motion.div key={s.l} className={`au card d${i+1}`} style={{padding:"18px 16px",textAlign:"center"}}>
                     <div style={{width:38,height:38,borderRadius:11,background:s.bg,margin:"0 auto 10px",
@@ -2808,175 +2384,131 @@ function PharmacistPortal({ user, light, setLight, userName }) {
                 ))}
               </div>
               <motion.div className="au d3 card" style={{padding:22}}>
-                <h3 style={{color:t1,fontSize:15,fontWeight:600,marginBottom:14}}>Patient Lookup</h3>
-                <div style={{position:"relative",marginBottom:14}}>
-                  <Search size={14} color={t3} style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)"}}/>
-                  <input className="inp" value={search} onChange={e=>setSearch(e.target.value)}
-                    placeholder="Find a patient…" style={{paddingLeft:38}}/>
-                </div>
-                {filtered.slice(0,6).map(p => (
-                  <div key={p.id} onClick={() => { setPage("patients"); openPatient(p); }}
+                <h3 style={{color:t1,fontSize:15,fontWeight:600,marginBottom:14}}>Recent prescriptions</h3>
+                {filtered.slice(0,6).map(rx => (
+                  <div key={rx.id} onClick={() => { setPage("prescriptions"); openPrescription(rx); }}
                     style={{display:"flex",alignItems:"center",gap:11,padding:"10px 0",
                             borderBottom:"1px solid var(--b0)",cursor:"pointer"}}
                     onMouseEnter={e=>e.currentTarget.style.opacity=".75"}
                     onMouseLeave={e=>e.currentTarget.style.opacity="1"}>
                     <div style={{width:34,height:34,borderRadius:10,background:"var(--pha-pd)",
                                  display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-                      <User size={15} color={PhAC}/>
+                      <Pill size={15} color={PhAC}/>
                     </div>
                     <div style={{flex:1}}>
-                      <p style={{color:t1,fontSize:13,fontWeight:600}}>{p.fullName||"Unknown"}</p>
-                      <p style={{color:t3,fontSize:11}}>{p.email}</p>
+                      <p style={{color:t1,fontSize:13,fontWeight:600}}>{patientNames[rx.patient_id] || "Patient"}</p>
+                      <p style={{color:t3,fontSize:11}}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status} · {new Date(rx.created_at).toLocaleDateString()}</p>
                     </div>
                     <ArrowRight size={13} color={t3}/>
                   </div>
                 ))}
+                {prescriptions.length === 0 && <p style={{color:t3,fontSize:13}}>No prescriptions yet.</p>}
               </motion.div>
             </div>
           )}
 
-          {page==="patients" && (
+          {page==="prescriptions" && (
             <div style={{maxWidth:900,margin:"0 auto",padding:"30px 22px 44px"}}>
-              {!selPat ? (
+              {!selRx ? (
                 <>
                   <motion.div className="au" style={{marginBottom:22}}>
-                    <h2 style={{color:t1,fontSize:24,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:600}}>Patient Records</h2>
-                    <p style={{color:t3,fontSize:13,marginTop:4}}>{patients.length} registered patients</p>
+                    <h2 style={{color:t1,fontSize:24,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:600}}>Prescriptions</h2>
+                    <p style={{color:t3,fontSize:13,marginTop:4}}>{prescriptions.length} prescription{prescriptions.length!==1?"s":""}</p>
                   </motion.div>
                   <div style={{position:"relative",marginBottom:16}}>
                     <Search size={14} color={t3} style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)"}}/>
                     <input className="inp" value={search} onChange={e=>setSearch(e.target.value)}
-                      placeholder="Search patients…" style={{paddingLeft:40}}/>
+                      placeholder="Search by patient name…" style={{paddingLeft:40}}/>
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                    {filtered.map(p => (
-                      <motion.div key={p.id} className="card" onClick={() => openPatient(p)}
+                    {filtered.map(rx => (
+                      <motion.div key={rx.id} className="card" onClick={() => openPrescription(rx)}
                         style={{padding:"15px 18px",display:"flex",alignItems:"center",gap:13,cursor:"pointer"}}
                         whileHover={{x:2}}>
                         <div style={{width:40,height:40,borderRadius:12,background:"var(--pha-pd)",
                                      display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-                          <User size={18} color={PhAC}/>
+                          <Pill size={18} color={PhAC}/>
                         </div>
                         <div style={{flex:1}}>
-                          <p style={{color:t1,fontSize:14,fontWeight:600}}>{p.fullName||"Unknown"}</p>
-                          <p style={{color:t3,fontSize:12}}>{p.email}</p>
+                          <p style={{color:t1,fontSize:14,fontWeight:600}}>{patientNames[rx.patient_id] || "Patient"}</p>
+                          <p style={{color:t3,fontSize:12}}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status} · {new Date(rx.created_at).toLocaleDateString()}</p>
                         </div>
                         <ArrowRight size={14} color={t3}/>
                       </motion.div>
                     ))}
+                    {filtered.length === 0 && <p style={{color:t3,fontSize:13,padding:"12px 0"}}>No prescriptions found.</p>}
                   </div>
                 </>
               ) : (
                 <>
-                  <button onClick={() => setSelPat(null)}
+                  <button onClick={() => setSelRx(null)}
                     style={{display:"flex",alignItems:"center",gap:7,color:PhAC,fontSize:13,fontWeight:600,
                             background:"none",border:"none",cursor:"pointer",marginBottom:22,padding:0}}>
-                    <ArrowRight size={13} style={{transform:"rotate(180deg)"}}/> Back to patients
+                    <ArrowRight size={13} style={{transform:"rotate(180deg)"}}/> Back to prescriptions
                   </button>
                   {loading ? (
                     <div style={{display:"flex",alignItems:"center",gap:10,color:t3}}>
                       <Loader2 size={16} style={{animation:"spin360 .7s linear infinite"}}/> Loading…
                     </div>
                   ) : (
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
-                      <div style={{gridColumn:"1/-1"}}>
-                        <motion.div className="au card" style={{padding:20,display:"flex",alignItems:"center",gap:14,marginBottom:14}}>
+                    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                      <motion.div className="au card" style={{padding:20,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:14}}>
+                        <div style={{display:"flex",alignItems:"center",gap:14}}>
                           <div style={{width:52,height:52,borderRadius:16,background:"var(--pha-pd)",
                                        border:"1px solid rgba(124,58,237,.25)",display:"flex",alignItems:"center",justifyContent:"center"}}>
                             <User size={24} color={PhAC}/>
                           </div>
                           <div>
-                            <h3 style={{color:t1,fontSize:18,fontWeight:700}}>{selPat.fullName||"Unknown"}</h3>
-                            <p style={{color:t3,fontSize:13}}>{selPat.email}</p>
-                          </div>
-                        </motion.div>
-                      </div>
-
-                      {}
-                      <motion.div className="au d1 card" style={{padding:18}}>
-                        <h4 style={{color:t1,fontSize:13,fontWeight:600,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
-                          <AlertCircle size={13} color="var(--ro)"/> Allergy Warnings
-                        </h4>
-                        {patProfile?.allergies?.length > 0
-                          ? patProfile.allergies.map(a => (
-                              <div key={a} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",
-                                borderBottom:"1px solid var(--b0)"}}>
-                                <AlertCircle size={12} color="var(--ro)"/>
-                                <span style={{color:"var(--ro)",fontSize:13,fontWeight:600}}>{a}</span>
-                              </div>
-                            ))
-                          : <p style={{color:t3,fontSize:12}}>No known allergies</p>}
-                      </motion.div>
-
-                      {}
-                      <motion.div className="au d2 card" style={{padding:18}}>
-                        <h4 style={{color:t1,fontSize:13,fontWeight:600,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
-                          <Pill size={13} color={PhAC}/> Prescriptions ({patMeds.length})
-                        </h4>
-                        {patMeds.length === 0
-                          ? <p style={{color:t3,fontSize:12}}>No prescriptions found</p>
-                          : patMeds.map(m => {
-                            const col = COLS[m.color]||COLS.blue;
-                            return (
-                              <div key={m.id} style={{display:"flex",alignItems:"center",gap:9,
-                                padding:"7px 0",borderBottom:"1px solid var(--b0)"}}>
-                                <Pill size={14} color={col.a}/>
-                                <div style={{flex:1}}>
-                                  <p style={{color:t1,fontSize:13,fontWeight:600}}>{m.medicationName}</p>
-                                  <p style={{color:t3,fontSize:11}}>{m.dosage} · {m.freq}</p>
-                                </div>
-                              </div>
-                            );
-                          })}
-                      </motion.div>
-
-                      {}
-                      <motion.div className="au d3 card" style={{padding:18,gridColumn:"1/-1"}}>
-                        <h4 style={{color:t1,fontSize:13,fontWeight:600,marginBottom:12}}>Dispensing Notes</h4>
-                        <div style={{marginBottom:12}}>
-                          <label className="lbl">Refill Status</label>
-                          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                            {["pending","approved","dispensed","denied"].map(s => {
-                              const [bg,border,col] = refillColors[s] || refillColors.pending;
-                              return (
-                                <button key={s} onClick={() => setRefill(s)}
-                                  style={{padding:"6px 14px",borderRadius:9,border:`1.5px solid`,
-                                          fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:"pointer",
-                                          borderColor: refill===s ? border : "var(--b1)",
-                                          background: refill===s ? bg : "transparent",
-                                          color: refill===s ? col : t3,
-                                          textTransform:"capitalize",transition:"all .15s"}}>
-                                  {s}
-                                </button>
-                              );
-                            })}
+                            <h3 style={{color:t1,fontSize:18,fontWeight:700}}>{patientNames[selRx.patient_id] || "Patient"}</h3>
+                            <p style={{color:t3,fontSize:13,marginTop:2}}>{PRESCRIPTION_STATUS_LABELS[selRx.status] || selRx.status}</p>
                           </div>
                         </div>
-                        <textarea className="inp" rows={3} value={note}
-                          onChange={e => setNote(e.target.value)}
-                          placeholder="Add a dispensing note…" style={{marginBottom:10}}/>
-                        <AnimatePresence>
-                          {noteSaved && <div style={{marginBottom:10}}><OkBanner msg="Note saved."/></div>}
-                        </AnimatePresence>
-                        <button className="btn-pha" disabled={noteBusy||!note.trim()} onClick={addNote}
-                          style={{marginBottom:16}}>
-                          {noteBusy ? <Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/> : <><Plus size={13}/> Add Note</>}
-                        </button>
-                        {notes.map(n => {
-                          const [bg,border,col] = refillColors[n.refillStatus] || refillColors.pending;
-                          return (
-                            <div key={n.id} style={{padding:"11px 14px",borderRadius:12,marginBottom:8,
-                              background:"var(--s2)",border:"1px solid var(--b0)"}}>
-                              <span style={{padding:"2px 9px",borderRadius:99,fontSize:10,fontWeight:700,
-                                background:bg,border:`1px solid ${border}`,color:col,textTransform:"capitalize",marginBottom:6,display:"inline-block"}}>
-                                {n.refillStatus||"pending"}
-                              </span>
-                              <p style={{color:t1,fontSize:13,lineHeight:1.65,marginTop:5}}>{n.note}</p>
-                            </div>
-                          );
-                        })}
-                        {notes.length === 0 && <p style={{color:t3,fontSize:12}}>No notes yet.</p>}
+                        <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                          {!selRx.pharmacist_id && (
+                            <button className="btn-pha" disabled={actionBusy} onClick={() => claimPrescription(selRx)}>
+                              {actionBusy ? <Loader2 size={14} className="auth-spin"/> : "Claim prescription"}
+                            </button>
+                          )}
+                          {selRx.pharmacist_id && selRx.status === "pending_pharmacist" && (
+                            <button className="btn-pha" disabled={actionBusy} onClick={() => updateStatus(selRx, "pending_fill")}>
+                              {actionBusy ? <Loader2 size={14} className="auth-spin"/> : "Mark fulfilling"}
+                            </button>
+                          )}
+                          {(selRx.status === "pending_pharmacist" || selRx.status === "pending_fill") && (
+                            <button className="btn-pha" disabled={actionBusy} onClick={() => updateStatus(selRx, "ready")}
+                              style={{background:"rgba(5,150,105,.2)",color:"var(--gr)",borderColor:"var(--gr)"}}>
+                              {actionBusy ? <Loader2 size={14} className="auth-spin"/> : "Mark ready for pickup"}
+                            </button>
+                          )}
+                          {(selRx.status === "ready" || selRx.status === "filled") && (
+                            <button className="btn-pha" disabled={actionBusy} onClick={() => updateStatus(selRx, "picked_up")}
+                              style={{background:"rgba(16,185,129,.2)",color:"var(--gr)",borderColor:"var(--gr)"}}>
+                              {actionBusy ? <Loader2 size={14} className="auth-spin"/> : "Mark as picked up"}
+                            </button>
+                          )}
+                        </div>
                       </motion.div>
+                      {selRx.notes && (
+                        <div className="card" style={{padding:14}}>
+                          <p style={{color:t3,fontSize:11,fontWeight:600,marginBottom:6}}>Notes</p>
+                          <p style={{color:t1,fontSize:13,lineHeight:1.6}}>{selRx.notes}</p>
+                        </div>
+                      )}
+                      <div className="card" style={{padding:18}}>
+                        <h4 style={{color:t1,fontSize:13,fontWeight:600,marginBottom:12,display:"flex",alignItems:"center",gap:6}}>
+                          <Pill size={13} color={PhAC}/> Medications
+                        </h4>
+                        {rxMeds.length === 0 ? <p style={{color:t3,fontSize:12}}>No medications</p> : (
+                          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                            {rxMeds.map(m => (
+                              <div key={m.id} style={{padding:"10px 12px",borderRadius:10,background:"var(--s2)",border:"1px solid var(--b0)"}}>
+                                <p style={{color:t1,fontSize:13,fontWeight:600}}>{m.medication_name}</p>
+                                <p style={{color:t3,fontSize:11,marginTop:4}}>{m.dosage && `${m.dosage} · `}{m.frequency || ""} {m.instructions ? `· ${m.instructions}` : ""}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </>
@@ -2989,64 +2521,23 @@ function PharmacistPortal({ user, light, setLight, userName }) {
   );
 }
 
-export default function App() {
-  const [light,        setLight]        = useState(false);
-  const [user,         setUser]         = useState(undefined);
-  const [userRole,     setUserRole]     = useState("client");
-  const [page,         setPage]         = useState("dashboard");
-  const [meds,         setMeds]         = useState([]);
-  const [medsLoaded,   setMedsLoaded]   = useState(false);
-  const [addOpen,      setAddOpen]      = useState(false);
-  const [editMed,      setEditMed]      = useState(null);
-  const [showAI,       setShowAI]       = useState(false);
-  const [mobMenu,      setMobMenu]      = useState(false);
+function PatientDashboardContent() {
+  const { user, meds, setMeds, medsLoaded, displayName, setDisplayName } = useAuth();
+  const [light, setLight] = useState(false);
+  const [page, setPage] = useState("dashboard");
+  const [addOpen, setAddOpen] = useState(false);
+  const [editMed, setEditMed] = useState(null);
+  const [showAI, setShowAI] = useState(false);
+  const [mobMenu, setMobMenu] = useState(false);
   const [showNickname, setShowNickname] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
-  const [displayName,  setDisplayName]  = useState(() => localStorage.getItem("medtrack_name") || "");
   const isMob = useIsMobile();
-
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async u => {
-      if (u && u.emailVerified) {
-        setUser(u);
-        if (u.displayName && !localStorage.getItem("medtrack_name")) {
-          setDisplayName(u.displayName);
-          localStorage.setItem("medtrack_name", u.displayName);
-        }
-        try {
-          const userSnap = await getDoc(doc(db, "users", u.uid));
-          if (userSnap.exists()) {
-            setUserRole(userSnap.data().role || "client");
-          }
-        } catch(e) { console.warn("Could not load user role:", e); }
-        const loaded = await loadMedications(u.email);
-        setMeds(loaded.length > 0 ? loaded : SEED);
-        setMedsLoaded(true);
-      } else {
-        setUser(null);
-        setMeds(SEED);
-        setMedsLoaded(false);
-      }
-    });
-    return unsub;
-  }, []);
 
   useEffect(() => { document.body.className = light ? "light" : ""; }, [light]);
 
-  function handleVerifiedLogin(u) {
-    if (u.emailVerified) {
-      setUser(u);
-      if (u.displayName && !localStorage.getItem("medtrack_name")) {
-        setDisplayName(u.displayName);
-        localStorage.setItem("medtrack_name", u.displayName);
-      }
-    }
-  }
+  const saveName = (n) => { setDisplayName(n); };
 
-  const saveName = n => { setDisplayName(n); localStorage.setItem("medtrack_name", n); };
-
-  
-  const saveMed = useCallback(m => {
+  const saveMed = useCallback((m) => {
     setMeds(ms => ms.find(x=>x.id===m.id) ? ms.map(x=>x.id===m.id?m:x) : [m,...ms]);
   }, []);
 
@@ -3061,32 +2552,12 @@ export default function App() {
   const t1="var(--t1)", t2="var(--t2)", t3="var(--t3)";
   const b0="var(--b0)", b1="var(--b1)";
 
-  const tabs=[
-    ["dashboard", HeartPulse,       "Dashboard"],
-    ["schedule",  Calendar,         "Schedule"],
-    ["analytics", BarChart3,        "Analytics"],
-    ["settings",  SlidersHorizontal,"Settings"],
+  const tabs = [
+    ["dashboard", HeartPulse, "Dashboard"],
+    ["schedule", Calendar, "Schedule"],
+    ["analytics", BarChart3, "Analytics"],
+    ["settings", SlidersHorizontal, "Settings"],
   ];
-
-  if (user === undefined) return (
-    <div style={{ minHeight:"100vh", background:"var(--bg)", display:"flex", alignItems:"center",
-                  justifyContent:"center", flexDirection:"column", gap:16 }}>
-      <motion.div initial={{ opacity:0, scale:.8 }} animate={{ opacity:1, scale:1 }} transition={{ duration:.4 }}
-        style={{ width:52, height:52, borderRadius:16, background:"var(--pd)",
-                 border:"1px solid rgba(37,99,235,.3)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-        <HeartPulse size={24} color="var(--p)" style={{ filter:"drop-shadow(0 0 8px var(--p))" }}/>
-      </motion.div>
-      <motion.p initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:.2 }}
-        style={{ color:"var(--t3)", fontSize:12, letterSpacing:".05em" }}>
-        Loading your dashboard…
-      </motion.p>
-    </div>
-  );
-
-  if (!user) return <Auth onVerifiedLogin={handleVerifiedLogin}/>;
-
-  if (userRole === "doctor")      return <DoctorPortal user={user} light={light} setLight={setLight} userName={userName}/>;
-  if (userRole === "pharmacist")  return <PharmacistPortal user={user} light={light} setLight={setLight} userName={userName}/>;
 
   return (
     <div style={{ display:"flex", minHeight:"100vh", background:"var(--bg)" }}>
@@ -3140,7 +2611,7 @@ export default function App() {
               </span>
               <div className={`sw ${!light?"on":""}`} onClick={()=>setLight(!light)}/>
             </div>
-            <button onClick={()=>signOut(auth)}
+            <button onClick={()=>supabase.auth.signOut()}
               style={{ display:"flex", alignItems:"center", gap:7, padding:"7px 10px", borderRadius:10,
                        border:"none", background:"transparent", cursor:"pointer", color:"var(--ro)",
                        fontFamily:"inherit", fontSize:12, fontWeight:500, width:"100%", transition:"background .15s" }}
@@ -3260,7 +2731,7 @@ export default function App() {
                 <span style={{ color:t3, fontSize:12 }}>Dark mode</span>
                 <div className={`sw ${!light?"on":""}`} onClick={()=>setLight(!light)}/>
               </div>
-              <button onClick={()=>signOut(auth)}
+              <button onClick={()=>supabase.auth.signOut()}
                 style={{ display:"flex", alignItems:"center", gap:7, padding:"10px 12px", borderRadius:11,
                          border:"1px solid rgba(239,68,68,.18)", background:"rgba(239,68,68,.07)",
                          cursor:"pointer", fontFamily:"inherit", fontSize:12, fontWeight:500, color:"var(--ro)" }}>
@@ -3273,10 +2744,10 @@ export default function App() {
 
       {}
       <AnimatePresence>
-        {addOpen  && <MedModal onClose={()=>setAddOpen(false)} onSave={saveMed} userEmail={user?.email}/>}
+        {addOpen  && <MedModal onClose={()=>setAddOpen(false)} onSave={saveMed} userId={user?.id}/>}
       </AnimatePresence>
       <AnimatePresence>
-        {editMed  && <MedModal existing={editMed} onClose={()=>setEditMed(null)} onSave={saveMed} userEmail={user?.email}/>}
+        {editMed  && <MedModal existing={editMed} onClose={()=>setEditMed(null)} onSave={saveMed} userId={user?.id}/>}
       </AnimatePresence>
       <AnimatePresence>
         {showNickname && <NicknameModal currentName={userName} onSave={saveName} onClose={()=>setShowNickname(false)}/>}
@@ -3293,5 +2764,47 @@ export default function App() {
         </>)}
       </AnimatePresence>
     </div>
+  );
+}
+
+function DoctorDashboardContent() {
+  const { user, displayName } = useAuth();
+  const [light, setLight] = useState(false);
+  const userName = displayName || user?.email?.split("@")[0] || "";
+  return <DoctorPortal user={user} light={light} setLight={setLight} userName={userName} />;
+}
+
+function PharmacistDashboardContent() {
+  const { user, displayName } = useAuth();
+  const [light, setLight] = useState(false);
+  const userName = displayName || user?.email?.split("@")[0] || "";
+  return <PharmacistPortal user={user} light={light} setLight={setLight} userName={userName} />;
+}
+
+function RootRedirect() {
+  const { user, userRole, onboardingComplete } = useAuth();
+  if (user === undefined) return null;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!onboardingComplete) return <Navigate to="/onboarding" replace />;
+  if (userRole === "doctor") return <Navigate to="/doctor" replace />;
+  if (userRole === "pharmacist") return <Navigate to="/pharmacist" replace />;
+  return <Navigate to="/dashboard" replace />;
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/" element={<RootRedirect />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/onboarding" element={<ProtectedRoute requireOnboarding={false}><OnboardingPage /></ProtectedRoute>} />
+          <Route path="/dashboard" element={<ProtectedRoute><PatientDashboardContent /></ProtectedRoute>} />
+          <Route path="/doctor" element={<ProtectedRoute><DoctorDashboardContent /></ProtectedRoute>} />
+          <Route path="/pharmacist" element={<ProtectedRoute><PharmacistDashboardContent /></ProtectedRoute>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }
