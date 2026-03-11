@@ -6,18 +6,18 @@ import android.util.Patterns
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.csc490.androidui.auth.FirebaseAuthHelper
+import com.csc490.androidui.auth.SupabaseAuthHelper
 import com.csc490.androidui.databinding.ActivityRegisterBinding
 import kotlinx.coroutines.launch
 
 /**
  * Register screen — uses activity_register.xml.
- * Reached via "Get Started" on the landing screen.
+ * Uses Supabase Auth and updates profiles.first_name after signup.
  */
 class RegisterActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityRegisterBinding
-    private val authHelper = FirebaseAuthHelper()
+    private val authHelper = SupabaseAuthHelper()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,7 +32,7 @@ class RegisterActivity : AppCompatActivity() {
             finish()
         }
 
-        binding.btnBackRegister.setOnClickListener {
+        binding.registerButton.setOnClickListener {
             val name = binding.nameInput.text.toString().trim()
             val email = binding.emailInput.text.toString().trim()
             val password = binding.passwordInput.text.toString().trim()
@@ -92,23 +92,22 @@ class RegisterActivity : AppCompatActivity() {
     }
 
     private fun performRegister(name: String, email: String, password: String) {
-        binding.btnBackRegister.isEnabled = false
-        binding.btnBackRegister.text = "Creating account..."
+        binding.registerButton.isEnabled = false
+        binding.registerButton.text = "Creating account..."
 
         lifecycleScope.launch {
             authHelper.register(email, password, name)
                 .onSuccess { user ->
-                    authHelper.sendEmailVerification()
                     Toast.makeText(
                         this@RegisterActivity,
-                        "Welcome, ${user.displayName}!",
+                        "Welcome, ${user.email}!",
                         Toast.LENGTH_SHORT
                     ).show()
                     navigateToMedicationList()
                 }
                 .onFailure { e ->
-                    binding.btnBackRegister.isEnabled = true
-                    binding.btnBackRegister.text = "Create Account"
+                    binding.registerButton.isEnabled = true
+                    binding.registerButton.text = "Create Account"
                     Toast.makeText(
                         this@RegisterActivity,
                         "Registration failed: ${e.message}",

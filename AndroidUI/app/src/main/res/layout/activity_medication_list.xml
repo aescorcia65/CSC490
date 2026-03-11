@@ -47,37 +47,23 @@
             android:backgroundTint="#60A5FA"
             android:layout_marginTop="24dp" />
 
-        <LinearLayout
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerViewMedications"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="#FFFFFF"
-            android:padding="16dp"
-            android:layout_marginTop="24dp">
+            android:layout_marginTop="24dp" />
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Ibuprofen - 2x daily"
-                android:textSize="16sp"
-                android:textColor="#0F172A"
-                android:paddingBottom="12dp" />
+        <TextView
+            android:id="@+id/tvEmptyState"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="No medications found."
+            android:textSize="16sp"
+            android:textColor="#475569"
+            android:visibility="gone"
+            android:layout_marginTop="16dp" />
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Vitamin D - 1x daily"
-                android:textSize="16sp"
-                android:textColor="#0F172A"
-                android:paddingBottom="12dp" />
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Metformin - Morning"
-                android:textSize="16sp"
-                android:textColor="#0F172A" />
-        </LinearLayout>
 
     </LinearLayout>
 

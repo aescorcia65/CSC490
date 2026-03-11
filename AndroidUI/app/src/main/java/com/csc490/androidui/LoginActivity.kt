@@ -6,18 +6,18 @@ import android.util.Patterns
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.csc490.androidui.auth.FirebaseAuthHelper
+import com.csc490.androidui.auth.SupabaseAuthHelper
 import com.csc490.androidui.databinding.ActivityLoginBinding
 import kotlinx.coroutines.launch
 
 /**
- * Login screen — wired to activity_login.xml from MedTrack frontend.
- * View IDs used: emailInput, passwordInput, loginButton, btnBackLogin
+ * Login screen — uses activity_login.xml.
+ * Uses Supabase Auth for sign-in.
  */
 class LoginActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityLoginBinding
-    private val authHelper = FirebaseAuthHelper()
+    private val authHelper = SupabaseAuthHelper()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,12 +28,10 @@ class LoginActivity : AppCompatActivity() {
     }
 
     private fun setupClickListeners() {
-        // Back button → return to landing screen
         binding.btnBackLogin.setOnClickListener {
             finish()
         }
 
-        // Login button
         binding.loginButton.setOnClickListener {
             val email = binding.emailInput.text.toString().trim()
             val password = binding.passwordInput.text.toString().trim()
@@ -69,7 +67,6 @@ class LoginActivity : AppCompatActivity() {
     }
 
     private fun performLogin(email: String, password: String) {
-        // Disable button to prevent double taps
         binding.loginButton.isEnabled = false
         binding.loginButton.text = "Signing in..."
 
@@ -92,7 +89,6 @@ class LoginActivity : AppCompatActivity() {
 
     private fun navigateToMedicationList() {
         startActivity(Intent(this, MedicationListActivity::class.java))
-        // Clear back stack so user can't go back to login
         finishAffinity()
     }
 }

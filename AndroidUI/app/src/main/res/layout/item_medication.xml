@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#FFFFFF"
+    android:layout_marginTop="12dp">
+
+    <TextView
+        android:id="@+id/tvMedicationName"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Medication Name"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="#0F172A" />
+
+    <TextView
+        android:id="@+id/tvMedicationDosage"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Dosage: 500mg"
+        android:textSize="14sp"
+        android:textColor="#475569"
+        android:layout_marginTop="4dp" />
+
+    <TextView
+        android:id="@+id/tvMedicationFrequency"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Frequency: Twice daily"
+        android:textSize="14sp"
+        android:textColor="#475569"
+        android:layout_marginTop="2dp" />
+
+</LinearLayout>
