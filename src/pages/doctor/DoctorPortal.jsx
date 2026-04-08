@@ -2,9 +2,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, Calendar, LogOut, Moon, Sun, Menu, X, Plus, Send,
-  Clock, Check, AlertCircle, Loader2, Bell, User, ArrowRight,
+  Clock, Check, AlertCircle, Loader2, Bell, BellOff, User, ArrowRight,
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
-  Search, UserPlus
+  Search, UserPlus, Volume1, Volume2, AlertTriangle
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
@@ -63,8 +63,17 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [showPatPicker,setShowPatPicker]=useState(false);
   const [patPickerSearch,setPatPickerSearch]=useState("");
   const [chatPatient,setChatPatient]=useState(null);
+  const [chatPatientExpanded,setChatPatientExpanded]=useState(false);
   const [soundEnabled,setSoundEnabled]=useState(()=>localStorage.getItem("mt_sound_on")!=="false");
-  const [soundType,setSoundType]=useState(()=>localStorage.getItem("mt_sound_type")||"ping");
+  const [soundType,setSoundType]=useState(()=>{
+    const saved=localStorage.getItem("mt_sound_type");
+    const valid=["standard","urgent","subtle","chime","pulse"];
+    return valid.includes(saved)?saved:"standard";
+  });
+  const [soundVolume,setSoundVolume]=useState(()=>{
+    const v=parseFloat(localStorage.getItem("mt_sound_vol"));
+    return isNaN(v)?0.7:Math.min(1,Math.max(0.1,v));
+  });
   const [showSoundSettings,setShowSoundSettings]=useState(false);
   const msgEndRef=useRef(null);
   const isMob=useIsMobile();
@@ -79,28 +88,37 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     await supabase.from("user_presence").upsert({user_id:user.id,is_online:false,last_seen:new Date().toISOString()},{onConflict:"user_id"});
     await supabase.auth.signOut();
   }
-  function playNotifSound(type){
+
+  const SOUND_PROFILES={
+    standard:{label:"Standard",desc:"Clear double-tone",tones:[[880,"sine",0,0.06],[1320,"sine",0.07,0.18]]},
+    urgent:{label:"Urgent",desc:"Triple alert — high priority",tones:[[660,"square",0,0.06],[880,"square",0.07,0.06],[1100,"square",0.14,0.12]]},
+    subtle:{label:"Subtle",desc:"Soft single tone",tones:[[528,"sine",0,0.18]]},
+    chime:{label:"Chime",desc:"Ascending clinical chime",tones:[[523,"sine",0,0.12],[659,"sine",0.12,0.12],[784,"sine",0.24,0.2],[1047,"sine",0.36,0.16]]},
+    pulse:{label:"Pulse",desc:"Double pulse",tones:[[700,"sine",0,0.05],[700,"sine",0.1,0.05]]},
+  };
+
+  function playNotifSound(type,vol){
     try{
       const ctx=new (window.AudioContext||window.webkitAudioContext)();
-      const sounds={
-        ping:[[880,0,0.08],[1320,0.09,0.15]],
-        chime:[[523,0,0.1],[659,0.1,0.1],[784,0.2,0.15]],
-        pop:[[400,0,0.04],[200,0.04,0.04]],
-        soft:[[660,0,0.12]],
-      };
-      (sounds[type]||sounds.ping).forEach(([freq,delay,dur])=>{
+      const gain=vol!==undefined?vol:soundVolume;
+      const profile=SOUND_PROFILES[type]||SOUND_PROFILES.standard;
+      profile.tones.forEach(([freq,wave,delay,dur])=>{
         const o=ctx.createOscillator(),g=ctx.createGain();
         o.connect(g);g.connect(ctx.destination);
-        o.frequency.value=freq;o.type="sine";
+        o.frequency.value=freq;
+        o.type=wave||"sine";
         g.gain.setValueAtTime(0,ctx.currentTime+delay);
-        g.gain.linearRampToValueAtTime(0.25,ctx.currentTime+delay+0.01);
+        g.gain.linearRampToValueAtTime(gain,ctx.currentTime+delay+0.015);
         g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+delay+dur);
-        o.start(ctx.currentTime+delay);o.stop(ctx.currentTime+delay+dur+0.01);
+        o.start(ctx.currentTime+delay);
+        o.stop(ctx.currentTime+delay+dur+0.02);
       });
     }catch(e){}
   }
+
   function toggleSound(val){setSoundEnabled(val);localStorage.setItem("mt_sound_on",String(val));}
-  function changeSoundType(val){setSoundType(val);localStorage.setItem("mt_sound_type",val);playNotifSound(val);}
+  function changeSoundType(val){setSoundType(val);localStorage.setItem("mt_sound_type",val);playNotifSound(val,soundVolume);}
+  function changeSoundVolume(val){setSoundVolume(val);localStorage.setItem("mt_sound_vol",String(val));playNotifSound(soundType,val);}
   function sortContacts(list){
     return [...list].sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||""));
   }
@@ -612,7 +630,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     )}
                   </AnimatePresence>
                 </div>
-                <div style={{flex:1,overflowY:"auto"}}>
+                <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
                   {chatContacts.length===0?(
                     <div style={{padding:"30px 16px",textAlign:"center"}}>
                       <Search size={22} color={t3} style={{opacity:.2,margin:"0 auto 10px",display:"block"}}/>
@@ -681,7 +699,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         ))}
                       </div>
                     )}
-                    <div style={{flex:1,overflowY:"auto",overscrollBehavior:"contain",padding:"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
+                    <div style={{flex:1,overflowY:"auto",overscrollBehavior:"contain",WebkitOverflowScrolling:"touch",padding:"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
                       {messages.length===0&&(<div style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:8,padding:"60px 0"}}><Send size={22} color={t3} style={{opacity:.2}}/><p style={{color:t3,fontSize:13}}>No messages yet — send the first one</p></div>)}
                       {messages.map((msg,i)=>{
                         const isMe=msg.sender_id===user.id;
@@ -743,32 +761,50 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       )}
                       {}
                       {chatPatient&&!showPatPicker&&(
-                        <div style={{marginBottom:8,padding:"7px 12px",background:"var(--doc-pd)",border:`1px solid rgba(14,116,144,.2)`,borderRadius:10,display:"flex",alignItems:"center",gap:8}}>
-                          <User size={13} color={DocAC}/>
-                          <div style={{flex:1,minWidth:0}}>
-                            <p style={{color:DocAC,fontSize:11,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{chatPatient.fullName}</p>
-                            <p style={{color:t3,fontSize:10,margin:0}}>{[chatPatient.dob&&`DOB: ${chatPatient.dob}`,chatPatient.bloodType&&`Blood: ${chatPatient.bloodType}`,chatPatient.allergies?.length>0&&`${chatPatient.allergies.length} allerg${chatPatient.allergies.length>1?"ies":"y"}`].filter(Boolean).join(" · ")||chatPatient.email}</p>
+                        <div style={{marginBottom:8,background:"var(--doc-pd)",border:`1px solid rgba(14,116,144,.25)`,borderRadius:12,overflow:"hidden"}}>
+                          <div style={{padding:"7px 12px",display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>setChatPatientExpanded(p=>!p)}>
+                            <User size={13} color={DocAC}/>
+                            <div style={{flex:1,minWidth:0}}>
+                              <p style={{color:DocAC,fontSize:11,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{chatPatient.fullName}</p>
+                              <p style={{color:t3,fontSize:10,margin:0}}>{chatPatientExpanded?"Click to collapse":"Click to expand full profile"}</p>
+                            </div>
+                            <button onClick={e=>{e.stopPropagation();setChatPatient(null);setChatPatientExpanded(false);}} style={{background:"none",border:"none",cursor:"pointer",color:t3,padding:2,display:"flex",flexShrink:0}}><X size={12}/></button>
                           </div>
-                          <button onClick={()=>setChatPatient(null)} style={{background:"none",border:"none",cursor:"pointer",color:t3,padding:2,display:"flex",flexShrink:0}}><X size={12}/></button>
+                          {chatPatientExpanded&&(
+                            <div style={{borderTop:`1px solid rgba(14,116,144,.15)`,padding:"8px 12px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                              {chatPatient.dob&&<div><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Date of Birth</p><p style={{color:t1,fontSize:11,fontWeight:600,margin:0}}>{chatPatient.dob}</p></div>}
+                              {chatPatient.bloodType&&<div><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Blood Type</p><p style={{color:"var(--ro)",fontSize:11,fontWeight:700,margin:0}}>{chatPatient.bloodType}</p></div>}
+                              {chatPatient.allergies?.length>0&&<div style={{gridColumn:"1/-1"}}><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Allergies</p><p style={{color:"var(--ro)",fontSize:11,fontWeight:600,margin:"2px 0 0"}}>{chatPatient.allergies.join(", ")}</p></div>}
+                              {chatPatient.conditions?.length>0&&<div style={{gridColumn:"1/-1"}}><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Conditions</p><p style={{color:"var(--am)",fontSize:11,fontWeight:600,margin:"2px 0 0"}}>{chatPatient.conditions.join(", ")}</p></div>}
+                            </div>
+                          )}
                         </div>
                       )}
-                      {}
                       <AnimatePresence>
                         {showSoundSettings&&(
-                          <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0,y:6}} style={{marginBottom:10,padding:"10px 14px",background:"var(--s2)",border:`1px solid ${b1}`,borderRadius:12}}>
-                            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                          <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0,y:6}} style={{marginBottom:10,padding:"12px 14px",background:"var(--s2)",border:`1px solid ${b1}`,borderRadius:12}}>
+                            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
                               <span style={{color:t1,fontSize:12,fontWeight:700}}>Notification sounds</span>
                               <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                <span style={{color:t3,fontSize:11}}>{soundEnabled?"On":"Off"}</span>
+                                <span style={{color:soundEnabled?"var(--gr)":"var(--ro)",fontSize:11,fontWeight:600}}>{soundEnabled?"On":"Off"}</span>
                                 <div className={`sw ${soundEnabled?"on":""}`} onClick={()=>toggleSound(!soundEnabled)}/>
                               </div>
                             </div>
                             {soundEnabled&&(
-                              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                                {["ping","chime","pop","soft"].map(s=>(
-                                  <button key={s} onClick={()=>changeSoundType(s)} style={{padding:"4px 12px",borderRadius:99,fontSize:11,fontWeight:600,border:`1px solid ${soundType===s?DocAC:b1}`,background:soundType===s?"var(--doc-pd)":"transparent",color:soundType===s?DocAC:t3,cursor:"pointer",fontFamily:"inherit",textTransform:"capitalize"}}>{s}</button>
-                                ))}
-                              </div>
+                              <>
+                                <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
+                                  {Object.entries(SOUND_PROFILES).map(([key,prof])=>(
+                                    <button key={key} onClick={()=>changeSoundType(key)} style={{padding:"4px 11px",borderRadius:99,fontSize:10.5,fontWeight:600,border:`1.5px solid ${soundType===key?DocAC:b1}`,background:soundType===key?"var(--doc-pd)":"transparent",color:soundType===key?DocAC:t3,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}} title={prof.desc}>{prof.label}{key==="urgent"&&<AlertTriangle size={9} color="var(--ro)"/>}</button>
+                                  ))}
+                                </div>
+                                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                  <Volume1 size={13} color={t3} style={{flexShrink:0}}/>
+                                  <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e=>changeSoundVolume(parseFloat(e.target.value))} style={{flex:1,accentColor:DocAC,cursor:"pointer"}}/>
+                                  <Volume2 size={13} color={t3} style={{flexShrink:0}}/>
+                                  <span style={{color:t3,fontSize:10,flexShrink:0,minWidth:28}}>{Math.round(soundVolume*100)}%</span>
+                                </div>
+                                {SOUND_PROFILES[soundType]&&<p style={{color:t3,fontSize:10,margin:"6px 0 0",fontStyle:"italic"}}>{SOUND_PROFILES[soundType].desc}</p>}
+                              </>
                             )}
                           </motion.div>
                         )}
@@ -804,7 +840,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:5}}>
                           <p style={{color:t3,fontSize:10,margin:0}}>Enter to send · Shift+Enter for new line{chatPatient&&<span style={{color:DocAC}}> · Referencing <strong>{chatPatient.fullName}</strong></span>}</p>
                           <button onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}} style={{background:"none",border:"none",cursor:"pointer",color:soundEnabled?DocAC:t3,fontSize:10,fontWeight:600,display:"flex",alignItems:"center",gap:4,padding:0,fontFamily:"inherit"}}>
-                            {soundEnabled?"🔔":"🔕"} Sound
+                            {soundEnabled?<Bell size={11}/>:<BellOff size={11}/>} Sound
                           </button>
                         </div>
                       )}

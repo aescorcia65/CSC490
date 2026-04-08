@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, LogOut, Moon, Sun, Menu, X, Plus, Send,
   Loader2, User, ArrowRight, Pencil, HeartPulse,
-  ShieldCheck, MessageSquare, Search
+  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
@@ -33,7 +33,15 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const [chatSearchBusy, setChatSearchBusy] = useState(false);
   const [chatSearchMsg, setChatSearchMsg] = useState(null);
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("mt_sound_on") !== "false");
-  const [soundType, setSoundType] = useState(() => localStorage.getItem("mt_sound_type") || "ping");
+  const [soundType, setSoundType] = useState(() => {
+    const saved = localStorage.getItem("mt_sound_type");
+    const valid = ["standard", "urgent", "subtle", "chime", "pulse"];
+    return valid.includes(saved) ? saved : "standard";
+  });
+  const [soundVolume, setSoundVolume] = useState(() => {
+    const v = parseFloat(localStorage.getItem("mt_sound_vol"));
+    return isNaN(v) ? 0.7 : Math.min(1, Math.max(0.1, v));
+  });
   const [showSoundSettings, setShowSoundSettings] = useState(false);
   const msgEndRef = useRef(null);
   const [mobMenu, setMobMenu] = useState(false);
@@ -45,33 +53,42 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   useEffect(() => { if (userName) setLocalName(userName); }, [userName]);
   const name = localName || userName || user?.displayName || user?.email?.split("@")[0] || "Pharmacist";
   const saveName = (n) => { setLocalName(n); if (setDisplayName) setDisplayName(n); };
+
+  const SOUND_PROFILES = {
+    standard: { label: "Standard", desc: "Clear double-tone", tones: [[880, "sine", 0, 0.06], [1320, "sine", 0.07, 0.18]] },
+    urgent: { label: "Urgent", desc: "Triple alert — high priority", tones: [[660, "square", 0, 0.06], [880, "square", 0.07, 0.06], [1100, "square", 0.14, 0.12]] },
+    subtle: { label: "Subtle", desc: "Soft single tone", tones: [[528, "sine", 0, 0.18]] },
+    chime: { label: "Chime", desc: "Ascending clinical chime", tones: [[523, "sine", 0, 0.12], [659, "sine", 0.12, 0.12], [784, "sine", 0.24, 0.2], [1047, "sine", 0.36, 0.16]] },
+    pulse: { label: "Pulse", desc: "Double pulse", tones: [[700, "sine", 0, 0.05], [700, "sine", 0.1, 0.05]] },
+  };
+
   async function handleSignOut() {
     setOnlineUsers(prev => { const n = { ...prev }; delete n[user.id]; return n; });
     await supabase.from("user_presence").upsert({ user_id: user.id, is_online: false, last_seen: new Date().toISOString() }, { onConflict: "user_id" });
     await supabase.auth.signOut();
   }
-  function playNotifSound(type) {
+
+  function playNotifSound(type, vol) {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const sounds = {
-        ping: [[880, 0, 0.08], [1320, 0.09, 0.15]],
-        chime: [[523, 0, 0.1], [659, 0.1, 0.1], [784, 0.2, 0.15]],
-        pop: [[400, 0, 0.04], [200, 0.04, 0.04]],
-        soft: [[660, 0, 0.12]],
-      };
-      (sounds[type] || sounds.ping).forEach(([freq, delay, dur]) => {
+      const gain = vol !== undefined ? vol : soundVolume;
+      const profile = SOUND_PROFILES[type] || SOUND_PROFILES.standard;
+      profile.tones.forEach(([freq, wave, delay, dur]) => {
         const o = ctx.createOscillator(), g = ctx.createGain();
         o.connect(g); g.connect(ctx.destination);
-        o.frequency.value = freq; o.type = "sine";
+        o.frequency.value = freq;
+        o.type = wave || "sine";
         g.gain.setValueAtTime(0, ctx.currentTime + delay);
-        g.gain.linearRampToValueAtTime(0.25, ctx.currentTime + delay + 0.01);
+        g.gain.linearRampToValueAtTime(gain, ctx.currentTime + delay + 0.015);
         g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + dur);
-        o.start(ctx.currentTime + delay); o.stop(ctx.currentTime + delay + dur + 0.01);
+        o.start(ctx.currentTime + delay); o.stop(ctx.currentTime + delay + dur + 0.02);
       });
     } catch (e) {}
   }
+
   function toggleSound(val) { setSoundEnabled(val); localStorage.setItem("mt_sound_on", String(val)); }
-  function changeSoundType(val) { setSoundType(val); localStorage.setItem("mt_sound_type", val); playNotifSound(val); }
+  function changeSoundType(val) { setSoundType(val); localStorage.setItem("mt_sound_type", val); playNotifSound(val, soundVolume); }
+  function changeSoundVolume(val) { setSoundVolume(val); localStorage.setItem("mt_sound_vol", String(val)); playNotifSound(soundType, val); }
   async function findPatientByEmail() {
     const email = patSearchEmail.trim().toLowerCase();
     if (!email || patSearchBusy) return;
@@ -499,7 +516,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                     )}
                   </AnimatePresence>
                 </div>
-                <div style={{ flex: 1, overflowY: "auto" }}>
+                <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
                   {chatContacts.length === 0 ? (
                     <div style={{ padding: "30px 16px", textAlign: "center" }}>
                       <Search size={22} color={t3} style={{ opacity: .2, margin: "0 auto 10px", display: "block" }} />
@@ -577,7 +594,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                       </div>
                     )}
                     {}
-                    <div style={{ flex: 1, overflowY: "auto", overscrollBehavior: "contain", padding: "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
+                    <div style={{ flex: 1, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
                       {messages.length === 0 && (
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8, padding: "60px 0" }}>
                           <Send size={22} color={t3} style={{ opacity: .2 }} />
@@ -626,20 +643,29 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                     <div style={{ padding: `10px 14px calc(10px + env(safe-area-inset-bottom, 0px))`, background: "var(--s1)", borderTop: `1px solid ${b1}`, flexShrink: 0, position: "relative", zIndex: 10 }}>
                       <AnimatePresence>
                         {showSoundSettings && (
-                          <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }} style={{ marginBottom: 10, padding: "10px 14px", background: "var(--s2)", border: `1px solid ${b1}`, borderRadius: 12 }}>
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                          <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }} style={{ marginBottom: 10, padding: "12px 14px", background: "var(--s2)", border: `1px solid ${b1}`, borderRadius: 12 }}>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                               <span style={{ color: t1, fontSize: 12, fontWeight: 700 }}>Notification sounds</span>
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                <span style={{ color: t3, fontSize: 11 }}>{soundEnabled ? "On" : "Off"}</span>
+                                <span style={{ color: soundEnabled ? "var(--gr)" : "var(--ro)", fontSize: 11, fontWeight: 600 }}>{soundEnabled ? "On" : "Off"}</span>
                                 <div className={`sw ${soundEnabled ? "on" : ""}`} onClick={() => toggleSound(!soundEnabled)} />
                               </div>
                             </div>
                             {soundEnabled && (
-                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                {["ping", "chime", "pop", "soft"].map(s => (
-                                  <button key={s} onClick={() => changeSoundType(s)} style={{ padding: "4px 12px", borderRadius: 99, fontSize: 11, fontWeight: 600, border: `1px solid ${soundType === s ? PhAC : b1}`, background: soundType === s ? "var(--pha-pd)" : "transparent", color: soundType === s ? PhAC : t3, cursor: "pointer", fontFamily: "inherit", textTransform: "capitalize" }}>{s}</button>
-                                ))}
-                              </div>
+                              <>
+                                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 }}>
+                                  {Object.entries(SOUND_PROFILES).map(([key, prof]) => (
+                                    <button key={key} onClick={() => changeSoundType(key)} style={{ padding: "4px 11px", borderRadius: 99, fontSize: 10.5, fontWeight: 600, border: `1.5px solid ${soundType === key ? PhAC : b1}`, background: soundType === key ? "var(--pha-pd)" : "transparent", color: soundType === key ? PhAC : t3, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }} title={prof.desc}>{prof.label}{key === "urgent" && <AlertTriangle size={9} color="var(--ro)" />}</button>
+                                  ))}
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                  <Volume1 size={13} color={t3} style={{ flexShrink: 0 }} />
+                                  <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e => changeSoundVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: PhAC, cursor: "pointer" }} />
+                                  <Volume2 size={13} color={t3} style={{ flexShrink: 0 }} />
+                                  <span style={{ color: t3, fontSize: 10, flexShrink: 0, minWidth: 28 }}>{Math.round(soundVolume * 100)}%</span>
+                                </div>
+                                {SOUND_PROFILES[soundType] && <p style={{ color: t3, fontSize: 10, margin: "6px 0 0", fontStyle: "italic" }}>{SOUND_PROFILES[soundType].desc}</p>}
+                              </>
                             )}
                           </motion.div>
                         )}
@@ -672,7 +698,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 5 }}>
                           <p style={{ color: t3, fontSize: 10, margin: 0 }}>Enter to send · Shift+Enter for new line</p>
                           <button onClick={() => setShowSoundSettings(p => !p)} style={{ background: "none", border: "none", cursor: "pointer", color: soundEnabled ? PhAC : t3, fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", gap: 4, padding: 0, fontFamily: "inherit" }}>
-                            {soundEnabled ? "🔔" : "🔕"} Sound
+                            {soundEnabled ? <Bell size={11} /> : <BellOff size={11} />} Sound
                           </button>
                         </div>
                       )}
