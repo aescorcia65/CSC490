@@ -15,7 +15,6 @@ import OkBanner from "../../components/common/OkBanner";
 import NicknameModal from "../../components/modals/NicknameModal";
 import PrescribeModal from "../../components/modals/PrescribeModal";
 import RescheduleRequestRow from "../../components/appointments/RescheduleRequestRow";
-
 export default function DoctorPortal({ user, light, setLight, userName, setDisplayName }) {
   const [page,setPage]=useState("dashboard");
   const [patients,setPatients]=useState([]);
@@ -61,11 +60,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [chatSearchMsg,setChatSearchMsg]=useState(null);
   const [mobMenu,setMobMenu]=useState(false);
   const [showNickname,setShowNickname]=useState(false);
-  // Patient picker in chat
   const [showPatPicker,setShowPatPicker]=useState(false);
   const [patPickerSearch,setPatPickerSearch]=useState("");
   const [chatPatient,setChatPatient]=useState(null);
-  // Notification sound settings
   const [soundEnabled,setSoundEnabled]=useState(()=>localStorage.getItem("mt_sound_on")!=="false");
   const [soundType,setSoundType]=useState(()=>localStorage.getItem("mt_sound_type")||"ping");
   const [showSoundSettings,setShowSoundSettings]=useState(false);
@@ -77,14 +74,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   useEffect(()=>{ if(userName) setLocalName(userName); },[userName]);
   const name=localName||userName||user?.displayName||user?.email?.split("@")[0]||"Doctor";
   const saveName=(n)=>{ setLocalName(n); if(setDisplayName) setDisplayName(n); };
-
   async function handleSignOut(){
-    // Update local state immediately so UI reflects offline before redirect
     setOnlineUsers(prev=>{const n={...prev};delete n[user.id];return n;});
     await supabase.from("user_presence").upsert({user_id:user.id,is_online:false,last_seen:new Date().toISOString()},{onConflict:"user_id"});
     await supabase.auth.signOut();
   }
-
   function playNotifSound(type){
     try{
       const ctx=new (window.AudioContext||window.webkitAudioContext)();
@@ -105,14 +99,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       });
     }catch(e){}
   }
-
   function toggleSound(val){setSoundEnabled(val);localStorage.setItem("mt_sound_on",String(val));}
   function changeSoundType(val){setSoundType(val);localStorage.setItem("mt_sound_type",val);playNotifSound(val);}
-
   function sortContacts(list){
     return [...list].sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||""));
   }
-
   useEffect(()=>{
     (async()=>{
       try{
@@ -125,7 +116,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         setPatients(pRows.map(p=>({id:p.id,fullName:[p.first_name,p.last_name].filter(Boolean).join(" ")||"Unknown",email:p.email||"",dob:p.dob||null,bloodType:p.blood_type||null,allergies:p.allergies||[],conditions:p.medical_conditions||[]})));
         setAllAppointments(apptData.data||[]);
         const pharmacists=(pharmData.data||[]).map(p=>({id:p.id,name:[p.first_name,p.last_name].filter(Boolean).join(" ")||p.email||"Pharmacist",pharmacy:p.pharmacy_name||"Pharmacy",email:p.email||"",lastMessageAt:null}));
-        // fetch latest message timestamp per pharmacist so list sorts correctly
         if(pharmacists.length>0){
           const pharmIds=pharmacists.map(p=>p.id);
           const{data:latestMsgs}=await supabase.from("chat_messages")
@@ -149,11 +139,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       }catch(e){console.error("Load:",e);}
     })();
   },[]);
-
   useEffect(()=>{
     if(!user?.id) return;
     const channels=[];
-
     channels.push(
       supabase.channel(`doc-appt-${user.id}`)
         .on("postgres_changes",{event:"*",schema:"public",table:"appointments",filter:`doctor_id=eq.${user.id}`},(payload)=>{
@@ -177,7 +165,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           }
         }).subscribe()
     );
-
     channels.push(
       supabase.channel(`doc-pts-${user.id}`)
         .on("postgres_changes",{event:"INSERT",schema:"public",table:"doctor_patients",filter:`doctor_id=eq.${user.id}`},(payload)=>{
@@ -190,21 +177,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             });
         }).subscribe()
     );
-
     channels.push(
       supabase.channel(`doc-rx-${user.id}`)
         .on("postgres_changes",{event:"UPDATE",schema:"public",table:"prescriptions",filter:`doctor_id=eq.${user.id}`},(payload)=>{
           setPatRx(prev=>prev.map(rx=>rx.id===payload.new.id?{...rx,...payload.new}:rx));
         }).subscribe()
     );
-
     return ()=>{ channels.forEach(c=>supabase.removeChannel(c)); };
   },[user?.id]);
-
   const selChatRef=useRef(selChat);
   useEffect(()=>{ selChatRef.current=selChat; },[selChat]);
-
-  // keep selChat in sync when chatContacts array re-sorts
   useEffect(()=>{
     if(!selChat) return;
     setChatContacts(prev=>{
@@ -215,17 +197,13 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       return prev;
     });
   },[chatContacts]);
-
   useEffect(()=>{
     if(!selChat||!user?.id)return;
     loadMessages(selChat.id);
   },[selChat?.id]);
-
   useEffect(()=>{
     msgEndRef.current?.scrollIntoView({behavior:"smooth"});
   },[messages]);
-
-  // Polling: re-fetch messages every 2s when on messages page with a chat open
   useEffect(()=>{
     if(page!=="messages"||!selChat||!user?.id) return;
     const interval=setInterval(()=>{
@@ -241,7 +219,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             const lastPrevId=realPrev[realPrev.length-1]?.id;
             const lastNewId=data[data.length-1]?.id;
             if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-            // bump this contact to top when new message arrives
             if(lastPrevId!==lastNewId&&data.length>0){
               const ts=data[data.length-1].created_at;
               setChatContacts(prev=>[...prev].map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
@@ -252,8 +229,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     },2000);
     return ()=>clearInterval(interval);
   },[page,selChat?.id,user?.id]);
-
-  // Polling: re-fetch messages every 2s when on messages page
   useEffect(()=>{
     if(page!=="messages"||!selChat||!user?.id) return;
     const interval=setInterval(()=>{
@@ -279,13 +254,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     },2000);
     return ()=>clearInterval(interval);
   },[page,selChat?.id,user?.id]);
-
   const [rtStatus,setRtStatus]=useState("connecting");
-
   useEffect(()=>{
     if(!user?.id) return;
     let channel;
-
     function subscribe(){
       channel=supabase
         .channel(`doctor-msgs-${user.id}`)
@@ -293,10 +265,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           (payload)=>{
             const msg=payload.new;
             if(msg.sender_id===user.id) return;
-            // play notification sound for incoming messages
             if(soundEnabled) playNotifSound(soundType);
             const currentChat=selChatRef.current;
-            // bump sender contact to top
             setChatContacts(prev=>[...prev].map(c=>c.id===msg.pharmacist_id?{...c,lastMessageAt:msg.created_at}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
             if(currentChat&&msg.pharmacist_id===currentChat.id){
               setMessages(prev=>{
@@ -333,21 +303,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           } else if(status==="CLOSED"){ setRtStatus("connecting"); }
         });
     }
-
     subscribe();
     return ()=>{ if(channel) supabase.removeChannel(channel); };
   },[user?.id]);
-
-  // Presence: use database to track online/offline reliably
   useEffect(()=>{
     if(!user?.id) return;
-
-    // Mark self as online immediately
     supabase.from("user_presence")
       .upsert({user_id:user.id,is_online:true,last_seen:new Date().toISOString()},{onConflict:"user_id"})
       .then(()=>{});
-
-    // Load all users' presence on mount
     supabase.from("user_presence").select("user_id,is_online")
       .then(({data})=>{
         if(!data) return;
@@ -355,8 +318,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         data.forEach(r=>{ if(r.is_online) online[r.user_id]=true; });
         setOnlineUsers(online);
       });
-
-    // Listen for INSERT and UPDATE separately so payload.new is always correct
     const ch=supabase.channel("presence-all")
       .on("postgres_changes",{event:"INSERT",schema:"public",table:"user_presence"},(payload)=>{
         if(!payload.new?.user_id) return;
@@ -369,21 +330,17 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         else setOnlineUsers(prev=>{const n={...prev};delete n[payload.new.user_id];return n;});
       })
       .subscribe();
-
-    // Mark offline when tab closes
     const markOffline=()=>{
       supabase.from("user_presence")
         .upsert({user_id:user.id,is_online:false,last_seen:new Date().toISOString()},{onConflict:"user_id"})
         .then(()=>{});
     };
     window.addEventListener("beforeunload",markOffline);
-
     return ()=>{
       window.removeEventListener("beforeunload",markOffline);
       supabase.removeChannel(ch);
     };
   },[user?.id]);
-
   async function loadMessages(pharmacistId){
     try{
       const{data,error}=await supabase
@@ -392,9 +349,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         .order("created_at",{ascending:true});
       if(error){ console.error("Load msgs:",error.message); return; }
       setMessages(data||[]);
-      // clear unread badge for this contact
       setUnreadPerContact(prev=>{ const n={...prev}; delete n[pharmacistId]; return n; });
-      // update lastMessageAt for this contact so ordering stays correct
       if(data&&data.length>0){
         const ts=data[data.length-1].created_at;
         setChatContacts(prev=>[...prev].map(c=>c.id===pharmacistId?{...c,lastMessageAt:ts}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
@@ -406,12 +361,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       }
     }catch(e){console.error("loadMessages:",e);}
   }
-
   async function sendMessage(){
     if(!msgInput.trim()||!selChat||msgSending) return;
     setMsgSending(true);
     const userText=msgInput.trim();
-    // prepend patient context if one is selected
     const patContext=chatPatient?`📋 Re: ${chatPatient.fullName}${chatPatient.dob?` (DOB: ${chatPatient.dob})`:""}${chatPatient.bloodType?` · Blood: ${chatPatient.bloodType}`:""}${chatPatient.allergies?.length>0?` · Allergies: ${chatPatient.allergies.join(", ")}`:""}${chatPatient.conditions?.length>0?` · Conditions: ${chatPatient.conditions.join(", ")}`:""}
 `:"";
     const body=patContext+userText;
@@ -421,7 +374,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const tempId=`temp-${Date.now()}`;
     const tempMsg={id:tempId,doctor_id:user.id,pharmacist_id:selChat.id,sender_id:user.id,body,created_at:now,read_at:null};
     setMessages(prev=>[...prev,tempMsg]);
-    // bump this contact to top immediately on send
     setChatContacts(prev=>[...prev].map(c=>c.id===selChat.id?{...c,lastMessageAt:now}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
     try{
       const{data:msg,error}=await supabase.from("chat_messages")
@@ -440,7 +392,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       setMsgInput(body);
     }finally{setMsgSending(false);}
   }
-
   async function findPharmacistByEmail(){
     const email=chatSearchEmail.trim().toLowerCase();
     if(!email||chatSearchBusy)return;
@@ -464,7 +415,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }catch(e){setChatSearchMsg({type:"err",text:"Something went wrong."});}
     finally{setChatSearchBusy(false);}
   }
-
   async function addPatientByEmail(){
     const email=addPatientEmail.trim().toLowerCase();
     if(!email||addPatientBusy)return;
@@ -494,7 +444,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }catch(e){console.error("addPatientByEmail:",e);setAddPatientMsg({type:"err",text:"Error: "+e.message});}
     finally{setAddPatientBusy(false);}
   }
-
   async function openPatient(pat){
     setSelPat(pat);setLoading(true);setPatProfile(null);setPatMeds([]);setNotes([]);setPatRx([]);
     setActiveTab("overview");setPatFlag("none");setVitals({bp:"",hr:"",temp:"",weight:"",o2:"",notes:""});
@@ -517,11 +466,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       try{const s=JSON.parse(localStorage.getItem(key)||"{}");if(s.flag)setPatFlag(s.flag);if(s.vitals)setVitals(s.vitals);}catch{}
     }catch(e){}finally{setLoading(false);}
   }
-
   function saveToLocal(patch){const key=`doc_${user.id}_pat_${selPat?.id}`;try{const e=JSON.parse(localStorage.getItem(key)||"{}");localStorage.setItem(key,JSON.stringify({...e,...patch}));}catch{}}
   async function saveFlag(flag){setPatFlag(flag);saveToLocal({flag});}
   async function saveVitals(){setVitalsBusy(true);saveToLocal({vitals});await new Promise(r=>setTimeout(r,400));setVitalsBusy(false);setVitalsSaved(true);setTimeout(()=>setVitalsSaved(false),2500);}
-
   async function addAppointment(){
     if(!apptForm.date||!apptForm.time||!selPat)return;setApptBusy(true);
     try{
@@ -532,12 +479,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       await supabase.from("notifications").insert({user_id:selPat.id,type:"general",title:`Appointment: ${apptForm.type}`,body:`Scheduled on ${new Date(apptForm.date+"T"+apptForm.time).toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}.`});
     }catch(e){}finally{setApptBusy(false);}
   }
-
   async function deleteAppointment(id){
     await supabase.from("appointments").update({status:"cancelled",updated_at:new Date().toISOString()}).eq("id",id);
     setAppointments(p=>p.filter(a=>a.id!==id));setAllAppointments(p=>p.filter(a=>a.id!==id));
   }
-
   async function confirmReschedule(appt,newDate,newTime){
     await supabase.from("appointments").update({date:newDate,time:newTime,status:"scheduled",reschedule_request:null,updated_at:new Date().toISOString()}).eq("id",appt.id);
     const updater=a=>a.id===appt.id?{...a,date:newDate,time:newTime,status:"scheduled",reschedule_request:null}:a;
@@ -546,7 +491,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     setRescheduleReqs(p=>p.filter(r=>r.id!==appt.id));
     await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Appointment Approved",body:`Your reschedule was approved. New time: ${new Date(newDate+"T"+newTime).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}.`}).catch(()=>{});
   }
-
   async function rejectReschedule(appt,message){
     await supabase.from("appointments").update({status:"scheduled",reschedule_request:null,updated_at:new Date().toISOString()}).eq("id",appt.id);
     const updater=a=>a.id===appt.id?{...a,status:"scheduled",reschedule_request:null}:a;
@@ -555,21 +499,17 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     setRescheduleReqs(p=>p.filter(r=>r.id!==appt.id));
     await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Reschedule Request Denied",body:message}).catch(()=>{});
   }
-
   async function addNote(){
     if(!note.trim()||!selPat)return;setNoteBusy(true);
     try{const{data:nd,error}=await supabase.from("doctor_notes").insert({doctor_id:user.id,patient_id:selPat.id,note:note.trim()}).select("id,created_at").single();if(error)throw error;setNotes(n=>[{id:nd.id,note:note.trim(),createdAt:nd.created_at},...n]);setNote("");setNoteSaved(true);setTimeout(()=>setNoteSaved(false),2500);}
     catch(e){}finally{setNoteBusy(false);}
   }
-
   async function saveEditNote(){
     if(!editNote?.text?.trim())return;setNoteBusy(true);
     try{await supabase.from("doctor_notes").update({note:editNote.text.trim()}).eq("id",editNote.id);setNotes(ns=>ns.map(n=>n.id===editNote.id?{...n,note:editNote.text.trim()}:n));setEditNote(null);}
     catch(e){}finally{setNoteBusy(false);}
   }
-
   async function deleteNote(id){try{await supabase.from("doctor_notes").delete().eq("id",id);setNotes(ns=>ns.filter(n=>n.id!==id));}catch(e){}}
-
   async function deletePatient(patId){
     setDeleteBusy(true);
     try{
@@ -579,12 +519,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       setPatients(ps=>ps.filter(p=>p.id!==patId));setDeleteConfirm(null);setSelPat(null);
     }catch(e){}finally{setDeleteBusy(false);}
   }
-
   const filtered=patients.filter(p=>!search||(p.fullName||"").toLowerCase().includes(search.toLowerCase())||(p.email||"").toLowerCase().includes(search.toLowerCase()));
   const greetHour=new Date().getHours();
   const docGreet=greetHour<12?"Good morning":greetHour<17?"Good afternoon":"Good evening";
   const FLAG_CONFIG={none:{label:"No flag",color:t3,bg:"var(--s2)",border:b1},stable:{label:"Stable",color:"var(--gr)",bg:"rgba(5,150,105,.1)",border:"rgba(5,150,105,.25)"},"follow-up":{label:"Follow-up",color:"var(--am)",bg:"rgba(217,119,6,.1)",border:"rgba(217,119,6,.25)"},urgent:{label:"Urgent",color:"var(--ro)",bg:"rgba(185,28,28,.1)",border:"rgba(185,28,28,.25)"}};
-
   const TabBtn=({id,label,count})=>(
     <motion.button type="button" whileTap={{scale:.96}} onClick={()=>setActiveTab(id)}
       className={`whitespace-nowrap shrink-0 ${isMob?"snap-start":""}`}
@@ -592,7 +530,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       {label}{count!==undefined&&<span style={{background:activeTab===id?"rgba(255,255,255,.3)":"var(--b1)",borderRadius:99,padding:"1px 7px",fontSize:10.5,fontWeight:800}}>{count}</span>}
     </motion.button>
   );
-
   const VitalField=({label,value,field,placeholder,unit})=>(
     <div className="min-w-0">
       <label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:t3,marginBottom:5}}>{label}</label>
@@ -602,7 +539,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       </div>
     </div>
   );
-
   return (
     <div style={{display:"flex",minHeight:"100vh",background:"var(--bg)"}}>
       {!isMob&&(
@@ -636,7 +572,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           </div>
         </aside>
       )}
-
       <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <header className="tb">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -652,17 +587,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             {light?<Moon size={13} color={DocAC}/>:<Sun size={13} color="var(--am)"/>}{!isMob&&(light?"Dark":"Light")}
           </button>
         </header>
-
         <div style={{flex:1,overflowY:page==="messages"?"hidden":"auto",paddingBottom:isMob&&!(page==="messages"&&selChat)?"calc(66px + env(safe-area-inset-bottom, 0px))":0,display:"flex",flexDirection:"column"}}>
-
-          {/* ══ MESSAGES ══ */}
+          {}
           {page==="messages"&&(
             <div style={{height:isMob?"calc(100dvh - 57px)":"calc(100vh - 57px)",display:"flex",overflow:"hidden",flexDirection:isMob?"column":"row"}}>
               {(!isMob||!selChat)&&(
               <div style={{width:isMob?"100%":280,flexShrink:0,borderRight:isMob?"none":`1px solid ${b1}`,borderBottom:isMob?`1px solid ${b1}`:"none",display:"flex",flexDirection:"column",background:"var(--s1)"}}>
                 <div style={{padding:"14px 16px",borderBottom:`1px solid ${b1}`}}>
                   <h2 style={{color:t1,fontSize:15,fontWeight:700,margin:0,display:"flex",alignItems:"center",gap:8}}><MessageSquare size={14} color={DocAC}/> Pharmacy Chat</h2>
-                  {/* Find pharmacist by email */}
+                  {}
                   <div style={{marginTop:10,display:"flex",gap:7}}>
                     <input className="inp" type="email" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPharmacistByEmail();}} placeholder="Find pharmacist by email…" style={{flex:1,padding:"7px 11px",borderRadius:10,fontSize:12}}/>
                     <motion.button whileTap={{scale:.93}} onClick={findPharmacistByEmail} disabled={chatSearchBusy||!chatSearchEmail.trim()}
@@ -715,8 +648,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   })}
                 </div>
               </div>
-              )} {/* end contacts sidebar conditional */}
-
+              )} {}
               {(!isMob||selChat)&&(
               <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
                 {!selChat?(
@@ -784,7 +716,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       <div ref={msgEndRef}/>
                     </div>
                     <div style={{padding:`10px 14px calc(10px + env(safe-area-inset-bottom, 0px))`,background:"var(--s1)",borderTop:`1px solid ${b1}`,flexShrink:0,position:"relative",zIndex:10}}>
-                      {/* Patient context panel */}
+                      {}
                       {showPatPicker&&(
                         <div style={{marginBottom:10,background:"var(--s2)",border:`1px solid ${b1}`,borderRadius:14,overflow:"hidden"}}>
                           <div style={{padding:"8px 12px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",gap:8}}>
@@ -809,7 +741,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           </div>
                         </div>
                       )}
-                      {/* Active patient card */}
+                      {}
                       {chatPatient&&!showPatPicker&&(
                         <div style={{marginBottom:8,padding:"7px 12px",background:"var(--doc-pd)",border:`1px solid rgba(14,116,144,.2)`,borderRadius:10,display:"flex",alignItems:"center",gap:8}}>
                           <User size={13} color={DocAC}/>
@@ -820,7 +752,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           <button onClick={()=>setChatPatient(null)} style={{background:"none",border:"none",cursor:"pointer",color:t3,padding:2,display:"flex",flexShrink:0}}><X size={12}/></button>
                         </div>
                       )}
-                      {/* Sound settings panel */}
+                      {}
                       <AnimatePresence>
                         {showSoundSettings&&(
                           <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0,y:6}} style={{marginBottom:10,padding:"10px 14px",background:"var(--s2)",border:`1px solid ${b1}`,borderRadius:12}}>
@@ -842,7 +774,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         )}
                       </AnimatePresence>
                       <div style={{display:"flex",alignItems:"flex-end",gap:9}}>
-                        {/* Patient attach button */}
+                        {}
                         <button onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient" style={{width:36,height:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>
                           <User size={15}/>
                         </button>
@@ -880,11 +812,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   </>
                 )}
               </div>
-              )} {/* end chat window conditional */}
+              )} {}
             </div>
           )}
-
-          {/* ══ DASHBOARD ══ */}
+          {}
           {page==="dashboard"&&(
             <div style={{maxWidth:920,margin:"0 auto",padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
               <motion.div className="au" style={{marginBottom:isMob?20:28}}>
@@ -1025,8 +956,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </motion.div>
             </div>
           )}
-
-          {/* ══ PATIENTS PAGE ══ */}
+          {}
           {page==="patients"&&(
             <div className="w-full min-w-0 max-w-[1020px] mx-auto" style={{padding:isMob?"16px 14px":"32px 22px 48px",paddingBottom:isMob?"calc(56px + env(safe-area-inset-bottom, 0px))":undefined}}>
               {!selPat?(
@@ -1035,8 +965,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Patients</h2>
                     <p style={{color:t3,fontSize:13,marginTop:4}}>{filtered.length} of {patients.length} shown</p>
                   </motion.div>
-
-                  {/* ── ADD PATIENT BY EMAIL ── */}
+                  {}
                   <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",marginBottom:16,boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
                     <h4 style={{color:t1,fontSize:13,fontWeight:700,marginBottom:4,display:"flex",alignItems:"center",gap:8}}><UserPlus size={15} color={DocAC}/> Add patient by email</h4>
                     <p style={{color:t3,fontSize:12,marginBottom:12,lineHeight:1.45}}>Enter the patient's registered email address to add them to your list.</p>
@@ -1054,7 +983,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       )}
                     </AnimatePresence>
                   </motion.div>
-
                   <div style={{position:"relative",marginBottom:18}}>
                     <Search size={15} color={t3} style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",pointerEvents:"none"}}/>
                     <input className="inp w-full min-w-0" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search patients..." style={{paddingLeft:42,borderRadius:14,fontSize:16}}/>
@@ -1117,7 +1045,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           </div>
                         </div>
                       </motion.div>
-
                       <div className={`flex gap-2 mb-4 ${isMob?"snap-x snap-mandatory overflow-x-auto pb-2 -mx-3 px-3 touch-pan-x":"flex-wrap"}`}>
                         <TabBtn id="overview" label="Overview"/>
                         <TabBtn id="vitals" label="Vitals"/>
@@ -1126,7 +1053,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         <TabBtn id="appointments" label={isMob?"Appts":"Appointments"} count={appointments.filter(a=>a.status!=="cancelled").length}/>
                         <TabBtn id="prescriptions" label="Rx" count={patRx.length}/>
                       </div>
-
                       {activeTab==="overview"&&(
                         <div className="min-w-0" style={{display:"grid",gridTemplateColumns:isMob?"1fr":"1fr 1fr",gap:isMob?12:14}}>
                           <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="min-w-0" style={{gridColumn:"1/-1",background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px"}}>
@@ -1145,7 +1071,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           </motion.div>
                         </div>
                       )}
-
                       {activeTab==="vitals"&&(
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"22px 24px"}}>
                           <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:isMob?14:20}}>Record Vitals</h4>
@@ -1163,7 +1088,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           </motion.button>
                         </motion.div>
                       )}
-
                       {activeTab==="meds"&&(
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px"}}>
                           <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:16,display:"flex",alignItems:"center",gap:8}}><Pill size={15} color={DocAC}/> Current Medications</h4>
@@ -1174,7 +1098,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           )}
                         </motion.div>
                       )}
-
                       {activeTab==="notes"&&(
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"20px 22px"}}>
                           <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:16}}>Clinical Notes</h4>
@@ -1192,7 +1115,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           </div>
                         </motion.div>
                       )}
-
                       {activeTab==="appointments"&&(
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="min-w-0" style={{display:"flex",flexDirection:"column",gap:14}}>
                           {rescheduleReqs.length>0&&(<div className="min-w-0 overflow-hidden" style={{background:"rgba(217,119,6,.07)",border:"1px solid rgba(217,119,6,.25)",borderRadius:16,padding:isMob?"14px 14px":"16px 18px"}}><p style={{color:"var(--am)",fontSize:13,fontWeight:700,marginBottom:12}}>{rescheduleReqs.length} reschedule request{rescheduleReqs.length>1?"s":""}</p>{rescheduleReqs.map(appt=>(<RescheduleRequestRow key={appt.id} appt={appt} onConfirm={(nd,nt)=>confirmReschedule(appt,nd,nt)} onCancel={()=>deleteAppointment(appt.id)} onReject={(msg)=>rejectReschedule(appt,msg)} t1={t1} t3={t3}/>))}</div>)}
@@ -1223,7 +1145,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           </div>
                         </motion.div>
                       )}
-
                       {activeTab==="prescriptions"&&(
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"20px 22px"}}>
                           <div className={`mb-4 flex gap-3 ${isMob?"flex-col":"flex-row items-center justify-between"}`}>
@@ -1239,7 +1160,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       )}
                     </>
                   )}
-
                   <AnimatePresence>
                     {deleteConfirm&&(
                       <motion.div className="ov" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setDeleteConfirm(null)}>
@@ -1265,12 +1185,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           )}
         </div>
       </div>
-
       <AnimatePresence>
         {showPrescribe&&selPat&&(<PrescribeModal patient={selPat} patientProfile={patProfile} doctor={user} onClose={()=>setShowPrescribe(false)} onSuccess={()=>setShowPrescribe(false)}/>)}
       </AnimatePresence>
       <AnimatePresence>{showNickname&&<NicknameModal currentName={name} onSave={saveName} onClose={()=>setShowNickname(false)} userId={user?.id}/>}</AnimatePresence>
-
       {/* ── Mobile bottom nav — hidden inside open chat so it never overlaps input ── */}
       {isMob&&!(page==="messages"&&selChat)&&(
         <nav className="btabs">
@@ -1284,7 +1202,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           ))}
         </nav>
       )}
-
       {/* ── Mobile slide-in menu ── */}
       <AnimatePresence>
         {mobMenu&&(
