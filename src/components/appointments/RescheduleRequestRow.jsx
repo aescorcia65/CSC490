@@ -16,7 +16,16 @@ export default function RescheduleRequestRow({ appt, onConfirm, onCancel, onReje
     <div style={{ padding: "12px 14px", borderRadius: 12, background: "var(--s1)", border: "1px solid var(--b1)", marginBottom: 8 }}>
       <p style={{ color: t1, fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{appt.type}</p>
       <p style={{ color: "var(--am)", fontSize: 12, marginBottom: 10 }}>
-        Patient requested: <strong>{appt.reschedule_request}</strong>
+        Patient requested:{" "}
+        <strong>
+          {(() => {
+            const r = appt.reschedule_request;
+            if (!r) return "—";
+            const date = r.date ? new Date(r.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" }) : "";
+            const time = r.time ? new Date("2000-01-01T" + r.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+            return [date, time].filter(Boolean).join(" at ");
+          })()}
+        </strong>
       </p>
       {!showReject ? (
         <>

@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, Calendar, LogOut, Moon, Sun, Menu, X, Plus, Send,
   Clock, Check, AlertCircle, Loader2, Bell, BellOff, User, ArrowRight,
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
-  Search, UserPlus, Volume1, Volume2, AlertTriangle
+  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText,
+  Sparkles, ChevronRight
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
@@ -64,6 +65,24 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [patPickerSearch,setPatPickerSearch]=useState("");
   const [chatPatient,setChatPatient]=useState(null);
   const [chatPatientExpanded,setChatPatientExpanded]=useState(false);
+  const [showSendToPharmacy,setShowSendToPharmacy]=useState(false);
+  const [sendToPharmacyBusy,setSendToPharmacyBusy]=useState(false);
+  const [sendToPharmacyDone,setSendToPharmacyDone]=useState(false);
+  const [selRxChat,setSelRxChat]=useState(null);
+  // Notifications
+  const [docNotifs,setDocNotifs]=useState([]);
+  const [showNotifPanel,setShowNotifPanel]=useState(false);
+  const unreadNotifCount=docNotifs.filter(n=>!n.read_at).length;
+  // AI Chat
+  const [showDocAI,setShowDocAI]=useState(false);
+  const [aiMessages,setAiMessages]=useState([]);
+  const [aiInput,setAiInput]=useState("");
+  const [aiLoading,setAiLoading]=useState(false);
+  const aiEndRef=useRef(null);
+  const [rxMessages,setRxMessages]=useState([]);
+  const [rxMsgInput,setRxMsgInput]=useState("");
+  const [rxMsgSending,setRxMsgSending]=useState(false);
+  const [dashModal,setDashModal]=useState(null); // {title, items, renderItem}
   const [soundEnabled,setSoundEnabled]=useState(()=>localStorage.getItem("mt_sound_on")!=="false");
   const [soundType,setSoundType]=useState(()=>{
     const saved=localStorage.getItem("mt_sound_type");
@@ -76,6 +95,20 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   });
   const [showSoundSettings,setShowSoundSettings]=useState(false);
   const msgEndRef=useRef(null);
+  const msgListRef=useRef(null);
+  const atBottomRef=useRef(true);
+  const typingTimeoutRef=useRef(null);
+  const [peerTyping,setPeerTyping]=useState(false);
+
+  function sortMsgs(arr){ return [...arr].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)); }
+
+  const doScroll=useCallback(()=>{
+    // Run immediately and again after next paint to catch any layout shifts
+    if(msgListRef.current) msgListRef.current.scrollTop=msgListRef.current.scrollHeight;
+    requestAnimationFrame(()=>{
+      if(msgListRef.current) msgListRef.current.scrollTop=msgListRef.current.scrollHeight;
+    });
+  },[]);
   const isMob=useIsMobile();
   const t1="var(--t1)",t2="var(--t2)",t3="var(--t3)",b1="var(--b1)";
   const DocAC="var(--doc-p)";
@@ -92,9 +125,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const SOUND_PROFILES={
     standard:{label:"Standard",desc:"Clear double-tone",tones:[[880,"sine",0,0.06],[1320,"sine",0.07,0.18]]},
     urgent:{label:"Urgent",desc:"Triple alert — high priority",tones:[[660,"square",0,0.06],[880,"square",0.07,0.06],[1100,"square",0.14,0.12]]},
-    subtle:{label:"Subtle",desc:"Soft single tone",tones:[[528,"sine",0,0.18]]},
-    chime:{label:"Chime",desc:"Ascending clinical chime",tones:[[523,"sine",0,0.12],[659,"sine",0.12,0.12],[784,"sine",0.24,0.2],[1047,"sine",0.36,0.16]]},
-    pulse:{label:"Pulse",desc:"Double pulse",tones:[[700,"sine",0,0.05],[700,"sine",0.1,0.05]]},
+    subtle:{label:"Subtle",desc:"Soft single tone",tones:[[528,"sine",0,0.22]]},
+    chime:{label:"Chime",desc:"Ascending 4-note chime",tones:[[523,"sine",0,0.12],[659,"sine",0.12,0.12],[784,"sine",0.24,0.2],[1047,"sine",0.36,0.16]]},
+    pulse:{label:"Pulse",desc:"Quick double pulse",tones:[[700,"sine",0,0.05],[700,"sine",0.12,0.05]]},
+    ding:{label:"Ding",desc:"Single bright ding",tones:[[1047,"sine",0,0.2]]},
+    low:{label:"Low",desc:"Deep low tone",tones:[[220,"sine",0,0.25],[330,"sine",0.05,0.18]]},
+    tri:{label:"Tri-tone",desc:"Classic tri-tone",tones:[[523,"sine",0,0.1],[659,"sine",0.11,0.1],[523,"sine",0.22,0.14]]},
   };
 
   function playNotifSound(type,vol){
@@ -217,11 +253,29 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   },[chatContacts]);
   useEffect(()=>{
     if(!selChat||!user?.id)return;
+    atBottomRef.current=true;
     loadMessages(selChat.id);
   },[selChat?.id]);
+
+  // Scroll to bottom whenever messages or typing indicator changes AND user is at bottom
+  useLayoutEffect(()=>{
+    if(atBottomRef.current) doScroll();
+  },[messages,peerTyping,doScroll]);
+
+  // Also scroll after selChat changes - chat just opened, always go to bottom
   useEffect(()=>{
-    msgEndRef.current?.scrollIntoView({behavior:"smooth"});
-  },[messages]);
+    if(!selChat) return;
+    atBottomRef.current=true;
+    const t1=setTimeout(doScroll,50);
+    const t2=setTimeout(doScroll,200);
+    return ()=>{ clearTimeout(t1); clearTimeout(t2); };
+  },[selChat?.id,doScroll]);
+
+  function handleMsgScroll(){
+    const el=msgListRef.current;
+    if(!el) return;
+    atBottomRef.current=el.scrollHeight-el.scrollTop-el.clientHeight<60;
+  }
   useEffect(()=>{
     if(page!=="messages"||!selChat||!user?.id) return;
     const interval=setInterval(()=>{
@@ -239,34 +293,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
             if(lastPrevId!==lastNewId&&data.length>0){
               const ts=data[data.length-1].created_at;
-              setChatContacts(prev=>[...prev].map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
-            }
-            return data;
-          });
-        });
-    },2000);
-    return ()=>clearInterval(interval);
-  },[page,selChat?.id,user?.id]);
-  useEffect(()=>{
-    if(page!=="messages"||!selChat||!user?.id) return;
-    const interval=setInterval(()=>{
-      const chat=selChatRef.current;
-      if(!chat) return;
-      supabase.from("chat_messages").select("*")
-        .eq("doctor_id",user.id).eq("pharmacist_id",chat.id)
-        .order("created_at",{ascending:true})
-        .then(({data})=>{
-          if(!data) return;
-          setMessages(prev=>{
-            const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
-            const lastPrevId=realPrev[realPrev.length-1]?.id;
-            const lastNewId=data[data.length-1]?.id;
-            if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-            if(data.length>0&&lastPrevId!==lastNewId){
-              const ts=data[data.length-1].created_at;
               setChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
             }
-            return data;
+            return sortMsgs(data);
           });
         });
     },2000);
@@ -289,7 +318,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             if(currentChat&&msg.pharmacist_id===currentChat.id){
               setMessages(prev=>{
                 if(prev.some(m=>m.id===msg.id)) return prev;
-                return [...prev,msg];
+                return sortMsgs([...prev,msg]);
               });
               supabase.from("chat_messages").update({read_at:new Date().toISOString()}).eq("id",msg.id).then(()=>{});
             } else {
@@ -359,6 +388,27 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       supabase.removeChannel(ch);
     };
   },[user?.id]);
+
+  useEffect(()=>{
+    if(!selChat?.id||!user?.id) return;
+    setPeerTyping(false);
+    const ch=supabase.channel(`typing-doc-${user.id}-${selChat.id}`);
+    ch.on("broadcast",{event:"typing"},(payload)=>{
+      if(payload.payload?.sender_id!==user.id){
+        setPeerTyping(true);
+        clearTimeout(ch._typingTimer);
+        ch._typingTimer=setTimeout(()=>setPeerTyping(false),2500);
+      }
+    }).subscribe();
+    return ()=>{ clearTimeout(ch._typingTimer); supabase.removeChannel(ch); };
+  },[selChat?.id,user?.id]);
+
+  function emitTyping(){
+    if(!selChat?.id||!user?.id) return;
+    const chName=`typing-doc-${user.id}-${selChat.id}`;
+    supabase.channel(chName).send({type:"broadcast",event:"typing",payload:{sender_id:user.id}}).catch(()=>{});
+  }
+
   async function loadMessages(pharmacistId){
     try{
       const{data,error}=await supabase
@@ -366,7 +416,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         .eq("doctor_id",user.id).eq("pharmacist_id",pharmacistId)
         .order("created_at",{ascending:true});
       if(error){ console.error("Load msgs:",error.message); return; }
-      setMessages(data||[]);
+      atBottomRef.current=true;
+      setMessages(sortMsgs(data||[]));
       setUnreadPerContact(prev=>{ const n={...prev}; delete n[pharmacistId]; return n; });
       if(data&&data.length>0){
         const ts=data[data.length-1].created_at;
@@ -391,7 +442,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const now=new Date().toISOString();
     const tempId=`temp-${Date.now()}`;
     const tempMsg={id:tempId,doctor_id:user.id,pharmacist_id:selChat.id,sender_id:user.id,body,created_at:now,read_at:null};
-    setMessages(prev=>[...prev,tempMsg]);
+    setMessages(prev=>sortMsgs([...prev,tempMsg]));
     setChatContacts(prev=>[...prev].map(c=>c.id===selChat.id?{...c,lastMessageAt:now}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
     try{
       const{data:msg,error}=await supabase.from("chat_messages")
@@ -403,13 +454,137 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         setMsgInput(body);
         return;
       }
-      setMessages(prev=>prev.map(m=>m.id===tempId?msg:m));
+      setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
     }catch(e){
       console.error("sendMessage:",e);
       setMessages(prev=>prev.filter(m=>m.id!==tempId));
       setMsgInput(body);
     }finally{setMsgSending(false);}
   }
+  async function sendPatientToPharmacy(pharmacist){
+    if(!selPat||sendToPharmacyBusy) return;
+    setSendToPharmacyBusy(true);
+    try{
+      const payload={
+        id:selPat.id,
+        name:selPat.fullName,
+        email:selPat.email||"",
+        dob:patProfile?.dob||selPat.dob||null,
+        blood:patProfile?.blood_type||selPat.bloodType||null,
+        allergies:patProfile?.allergies||selPat.allergies||[],
+        conditions:patProfile?.medical_conditions||selPat.conditions||[],
+        meds:patMeds.map(m=>({name:m.medicationName,dosage:m.dosage,freq:m.freq})).slice(0,6),
+        sentBy:name,
+        sentAt:new Date().toISOString(),
+      };
+      const body="PATREF:"+JSON.stringify(payload);
+      // ensure pharmacist is in chatContacts, add if not
+      let pharmContact=chatContacts.find(c=>c.id===pharmacist.id);
+      if(!pharmContact){
+        pharmContact=pharmacist;
+        setChatContacts(prev=>[...prev,pharmacist]);
+      }
+      await supabase.from("chat_messages").insert({
+        doctor_id:user.id,
+        pharmacist_id:pharmacist.id,
+        sender_id:user.id,
+        body,
+      });
+      setSendToPharmacyDone(true);
+      setTimeout(()=>{ setSendToPharmacyDone(false); setShowSendToPharmacy(false); },2000);
+    }catch(e){ console.error("sendPatientToPharmacy:",e); }
+    finally{ setSendToPharmacyBusy(false); }
+  }
+
+  // Load doctor notifications + poll every 15s as fallback until realtime publication is configured
+  useEffect(()=>{
+    if(!user?.id) return;
+    const load=()=>supabase.from("notifications").select("*").eq("user_id",user.id).order("created_at",{ascending:false}).limit(30).then(({data})=>setDocNotifs(data||[]));
+    load();
+    const poll=setInterval(load,15000);
+    const ch=supabase.channel(`doc-notifs-${user.id}`)
+      .on("postgres_changes",{event:"INSERT",schema:"public",table:"notifications",filter:`user_id=eq.${user.id}`},(p)=>{
+        setDocNotifs(prev=>prev.some(n=>n.id===p.new.id)?prev:[p.new,...prev]);
+      }).subscribe();
+    return ()=>{ clearInterval(poll); supabase.removeChannel(ch); };
+  },[user?.id]);
+
+  async function markNotifRead(id){
+    setDocNotifs(prev=>prev.map(n=>n.id===id?{...n,read_at:new Date().toISOString()}:n));
+    await supabase.from("notifications").update({read_at:new Date().toISOString()}).eq("id",id);
+  }
+  async function markAllNotifsRead(){
+    const ids=docNotifs.filter(n=>!n.read_at).map(n=>n.id);
+    if(!ids.length) return;
+    setDocNotifs(prev=>prev.map(n=>({...n,read_at:n.read_at||new Date().toISOString()})));
+    await supabase.from("notifications").update({read_at:new Date().toISOString()}).in("id",ids);
+  }
+
+  // Doctor AI chat
+  const OPENAI_KEY=import.meta.env.VITE_OPENAI_API_KEY;
+  async function sendDocAI(){
+    if(!aiInput.trim()||aiLoading) return;
+    const msg={role:"user",content:aiInput.trim()};
+    setAiMessages(prev=>[...prev,msg]);
+    setAiInput("");
+    setAiLoading(true);
+    try{
+      const todayAppts=allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()).length;
+      const system=`You are a clinical assistant for Dr. ${name}. They have ${patients.length} patients and ${todayAppts} appointments today. Provide concise, evidence-based clinical guidance. Always recommend consulting specialist or references for critical decisions. Do not replace clinical judgment.`;
+      const res=await fetch("https://api.openai.com/v1/chat/completions",{
+        method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${OPENAI_KEY}`},
+        body:JSON.stringify({model:"gpt-4o-mini",messages:[{role:"system",content:system},...aiMessages,msg],max_tokens:600})
+      });
+      const data=await res.json();
+      const reply=data.choices?.[0]?.message?.content||"Unable to respond.";
+      setAiMessages(prev=>[...prev,{role:"assistant",content:reply}]);
+    }catch(e){ setAiMessages(prev=>[...prev,{role:"assistant",content:"Error contacting AI. Check API key."}]); }
+    finally{ setAiLoading(false); }
+  }
+  useEffect(()=>{ aiEndRef.current?.scrollIntoView({behavior:"smooth"}); },[aiMessages]);
+
+  async function loadRxMessages(rxId){
+    const{data}=await supabase.from("prescription_messages").select("*").eq("prescription_id",rxId).order("created_at",{ascending:true});
+    setRxMessages(data||[]);
+  }
+
+  async function sendRxMessage(){
+    if(!rxMsgInput.trim()||!selRxChat||rxMsgSending) return;
+    const body=rxMsgInput.trim();
+    setRxMsgInput("");
+    // Optimistic insert
+    const tempId=`temp-${Date.now()}`;
+    const tempMsg={id:tempId,prescription_id:selRxChat,sender_id:user.id,body,created_at:new Date().toISOString()};
+    setRxMessages(prev=>[...prev,tempMsg]);
+    try{
+      const{data:msg,error}=await supabase.from("prescription_messages").insert({prescription_id:selRxChat,sender_id:user.id,body}).select("*").single();
+      if(error) throw error;
+      setRxMessages(prev=>prev.map(m=>m.id===tempId?msg:m));
+      // Notify pharmacist of new rx chat message
+      const rx=patRx.find(r=>r.id===selRxChat);
+      if(rx?.pharmacist_id){
+        try{
+          await supabase.from("notifications").insert({user_id:rx.pharmacist_id,type:"general",title:"New prescription message",body:`Dr. ${name} sent a message about a prescription.`,related_id:selRxChat});
+        }catch{}
+      }
+    }catch{
+      setRxMessages(prev=>prev.filter(m=>m.id!==tempId));
+      setRxMsgInput(body);
+    }
+  }
+
+  useEffect(()=>{
+    if(!selRxChat) return;
+    loadRxMessages(selRxChat);
+    // Poll every 3s as fallback in case realtime misses a message
+    const poll=setInterval(()=>loadRxMessages(selRxChat),3000);
+    const ch=supabase.channel(`rx-msg-doc-${selRxChat}`)
+      .on("postgres_changes",{event:"INSERT",schema:"public",table:"prescription_messages",filter:`prescription_id=eq.${selRxChat}`},(payload)=>{
+        setRxMessages(prev=>prev.some(m=>m.id===payload.new.id)?prev:[...prev,payload.new]);
+      }).subscribe();
+    return ()=>{ clearInterval(poll); supabase.removeChannel(ch); };
+  },[selRxChat]);
+
   async function findPharmacistByEmail(){
     const email=chatSearchEmail.trim().toLowerCase();
     if(!email||chatSearchBusy)return;
@@ -558,7 +733,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     </div>
   );
   return (
-    <div style={{display:"flex",minHeight:"100vh",background:"var(--bg)"}}>
+    <div style={{display:"flex",height:"100vh",overflow:"hidden",background:"var(--bg)"}}>
       {!isMob&&(
         <aside className="sidebar">
           <div style={{padding:"22px 14px 14px"}}>
@@ -590,7 +765,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           </div>
         </aside>
       )}
-      <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
+      <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden"}}>
         <header className="tb">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             {isMob&&(
@@ -601,16 +776,27 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             {!isMob&&<span className="role-badge role-doctor">Doctor</span>}
             <motion.button whileHover={{scale:1.1}} whileTap={{scale:.9}} onClick={()=>setShowNickname(true)} title="Edit display name" style={{width:24,height:24,borderRadius:7,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3,flexShrink:0}}><Pencil size={11}/></motion.button>
           </div>
-          <button onClick={()=>setLight(!light)} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 13px",borderRadius:99,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",fontSize:12,fontWeight:600,color:t2}}>
-            {light?<Moon size={13} color={DocAC}/>:<Sun size={13} color="var(--am)"/>}{!isMob&&(light?"Dark":"Light")}
-          </button>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {/* Notification bell */}
+            <button onClick={()=>setShowNotifPanel(p=>!p)} style={{position:"relative",width:34,height:34,borderRadius:10,border:`1px solid ${b1}`,background:showNotifPanel?"var(--doc-pd)":"var(--s1)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:unreadNotifCount>0?DocAC:t3}}>
+              <Bell size={15}/>
+              {unreadNotifCount>0&&<span style={{position:"absolute",top:-4,right:-4,width:16,height:16,borderRadius:"50%",background:"var(--ro)",color:"#fff",fontSize:9,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center"}}>{unreadNotifCount>9?"9+":unreadNotifCount}</span>}
+            </button>
+            {/* AI assistant */}
+            <button onClick={()=>setShowDocAI(p=>!p)} style={{width:34,height:34,borderRadius:10,border:`1px solid ${b1}`,background:showDocAI?"var(--doc-pd)":"var(--s1)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:showDocAI?DocAC:t3}}>
+              <Sparkles size={15}/>
+            </button>
+            <button onClick={()=>setLight(!light)} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 13px",borderRadius:99,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",fontSize:12,fontWeight:600,color:t2}}>
+              {light?<Moon size={13} color={DocAC}/>:<Sun size={13} color="var(--am)"/>}{!isMob&&(light?"Dark":"Light")}
+            </button>
+          </div>
         </header>
-        <div style={{flex:1,overflowY:page==="messages"?"hidden":"auto",paddingBottom:isMob&&!(page==="messages"&&selChat)?"calc(66px + env(safe-area-inset-bottom, 0px))":0,display:"flex",flexDirection:"column"}}>
+        <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
           {}
           {page==="messages"&&(
-            <div style={{height:isMob?"calc(100dvh - 57px)":"calc(100vh - 57px)",display:"flex",overflow:"hidden",flexDirection:isMob?"column":"row"}}>
+            <div style={{flex:1,display:"flex",overflow:"hidden",flexDirection:isMob?"column":"row",minHeight:0}}>
               {(!isMob||!selChat)&&(
-              <div style={{width:isMob?"100%":280,flexShrink:0,borderRight:isMob?"none":`1px solid ${b1}`,borderBottom:isMob?`1px solid ${b1}`:"none",display:"flex",flexDirection:"column",background:"var(--s1)"}}>
+              <div style={{width:isMob?"100%":280,flexShrink:0,borderRight:isMob?"none":`1px solid ${b1}`,borderBottom:isMob?`1px solid ${b1}`:"none",display:"flex",flexDirection:"column",background:"var(--s1)",minHeight:0,overflow:"hidden"}}>
                 <div style={{padding:"14px 16px",borderBottom:`1px solid ${b1}`}}>
                   <h2 style={{color:t1,fontSize:15,fontWeight:700,margin:0,display:"flex",alignItems:"center",gap:8}}><MessageSquare size={14} color={DocAC}/> Pharmacy Chat</h2>
                   {}
@@ -668,7 +854,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
               )} {}
               {(!isMob||selChat)&&(
-              <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+              <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden"}}>
                 {!selChat?(
                   <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}>
                     <MessageSquare size={32} color={t3} style={{opacity:.2}}/>
@@ -699,16 +885,40 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         ))}
                       </div>
                     )}
-                    <div style={{flex:1,overflowY:"auto",overscrollBehavior:"contain",WebkitOverflowScrolling:"touch",padding:"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
+                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{flex:1,minHeight:0,overflowY:"auto",overscrollBehavior:"contain",WebkitOverflowScrolling:"touch",padding:"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
                       {messages.length===0&&(<div style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:8,padding:"60px 0"}}><Send size={22} color={t3} style={{opacity:.2}}/><p style={{color:t3,fontSize:13}}>No messages yet — send the first one</p></div>)}
                       {messages.map((msg,i)=>{
                         const isMe=msg.sender_id===user.id;
                         const showDate=i===0||new Date(msg.created_at).toDateString()!==new Date(messages[i-1].created_at).toDateString();
                         const groupTop=i===0||showDate||messages[i-1].sender_id!==msg.sender_id;
                         const groupBottom=i===messages.length-1||messages[i+1].sender_id!==msg.sender_id;
+                        const isLastSent=isMe&&i===messages.length-1;
+                        const isRead=isMe&&msg.read_at;
                         const bubbleRadius=isMe
                           ?`${groupTop?"18px":"6px"} 18px 18px ${groupBottom?"18px":"6px"}`
                           :`18px ${groupTop?"18px":"6px"} ${groupBottom?"18px":"6px"} 18px`;
+                        const bodyLines=msg.body.split("\n");
+                        const isPatRef=bodyLines[0]?.startsWith("📋 Re:");
+                        const isNewPatRef=msg.body.startsWith("PATREF:");
+                        let patCard=null;
+                        // Handle new PATREF:{JSON} format
+                        if(isNewPatRef){
+                          try{
+                            const json=JSON.parse(msg.body.slice(7));
+                            patCard={name:json.name,dob:json.dob,blood:json.blood,allergies:Array.isArray(json.allergies)?json.allergies.join(", "):json.allergies,conditions:Array.isArray(json.conditions)?json.conditions.join(", "):json.conditions};
+                          }catch{}
+                        }
+                        // Handle legacy 📋 Re: format
+                        if(isPatRef&&!patCard){
+                          const refLine=bodyLines[0].replace("📋 Re:","").trim();
+                          const nameMatch=refLine.match(/^([^(·]+)/);
+                          const dobMatch=refLine.match(/DOB:\s*([^·)]+)/);
+                          const bloodMatch=refLine.match(/Blood:\s*([^·]+)/);
+                          const allergyMatch=refLine.match(/Allergies:\s*([^·]+)/);
+                          const condMatch=refLine.match(/Conditions:\s*([^·]+)/);
+                          patCard={name:nameMatch?.[1]?.replace(/\(.*$/,"").trim(),dob:dobMatch?.[1]?.trim(),blood:bloodMatch?.[1]?.trim(),allergies:allergyMatch?.[1]?.trim(),conditions:condMatch?.[1]?.trim()};
+                        }
+                        const displayBody=(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():msg.body;
                         return (
                           <div key={msg.id} style={{display:"block",width:"100%",marginTop:groupTop?14:3}}>
                             {showDate&&(<div style={{textAlign:"center",margin:"16px 0 14px"}}><span style={{padding:"4px 16px",borderRadius:99,fontSize:10,background:"var(--s2)",border:"1px solid var(--b0)",color:t3,fontWeight:700,letterSpacing:".03em"}}>{new Date(msg.created_at).toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"})}</span></div>)}
@@ -720,130 +930,158 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                   </div>
                                 )}
                               </div>
-                              <div style={{maxWidth:"72%",minWidth:0,display:"flex",flexDirection:"column",alignItems:isMe?"flex-end":"flex-start"}}>
+                              <div style={{maxWidth:isMob?"min(82%,320px)":"72%",minWidth:0,display:"flex",flexDirection:"column",alignItems:isMe?"flex-end":"flex-start"}}>
                                 {groupTop&&!isMe&&<p style={{color:t3,fontSize:10,marginBottom:4,fontWeight:600,paddingLeft:2}}>{selChat.name}</p>}
+                                {(isPatRef||isNewPatRef)&&patCard&&(
+                                  <div style={{marginBottom:6,width:"100%",background:"var(--s1)",border:"1.5px solid rgba(14,116,144,.25)",borderRadius:12,overflow:"hidden",boxShadow:"0 2px 8px rgba(14,116,144,.08)"}}>
+                                    <div style={{padding:"7px 12px",background:"rgba(14,116,144,.08)",borderBottom:"1px solid rgba(14,116,144,.15)",display:"flex",alignItems:"center",gap:6}}>
+                                      <FileText size={12} color={DocAC}/>
+                                      <span style={{color:DocAC,fontSize:11,fontWeight:700}}>Patient Reference</span>
+                                    </div>
+                                    <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:5}}>
+                                      {patCard.name&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Patient</span><span style={{color:t1,fontSize:12,fontWeight:700}}>{patCard.name}</span></div>}
+                                      {patCard.dob&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>DOB</span><span style={{color:t1,fontSize:12}}>{patCard.dob}</span></div>}
+                                      {patCard.blood&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Blood Type</span><span style={{color:"var(--ro)",fontSize:12,fontWeight:700}}>{patCard.blood}</span></div>}
+                                      {patCard.allergies&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Allergies</span><span style={{color:"var(--ro)",fontSize:12}}>{patCard.allergies}</span></div>}
+                                      {patCard.conditions&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Conditions</span><span style={{color:"var(--am)",fontSize:12}}>{patCard.conditions}</span></div>}
+                                    </div>
+                                  </div>
+                                )}
+                                {displayBody&&(
                                 <div style={{padding:"9px 14px",borderRadius:bubbleRadius,background:isMe?DocAC:"var(--s1)",border:isMe?"none":`1px solid ${b1}`,boxShadow:isMe?"0 2px 8px rgba(14,116,144,.18)":"0 1px 3px rgba(0,0,0,.06)",maxWidth:"100%",transition:"box-shadow .2s"}}>
-                                  <p style={{color:isMe?"#fff":t1,fontSize:13.5,lineHeight:1.6,margin:0,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{msg.body}</p>
+                                  <p style={{color:isMe?"#fff":t1,fontSize:13.5,lineHeight:1.6,margin:0,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{displayBody}</p>
                                 </div>
-                                {groupBottom&&<p style={{color:t3,fontSize:9,marginTop:4,textAlign:isMe?"right":"left",paddingLeft:isMe?0:2,paddingRight:isMe?2:0}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>}
+                                )}
+                                {groupBottom&&(
+                                  <div style={{display:"flex",alignItems:"center",gap:4,marginTop:4,flexDirection:isMe?"row-reverse":"row"}}>
+                                    <p style={{color:t3,fontSize:9,textAlign:isMe?"right":"left",paddingLeft:isMe?0:2,paddingRight:isMe?2:0,margin:0}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>
+                                    {isMe&&<CheckCheck size={14} color={isRead?"#22c55e":t3} strokeWidth={isRead?2.5:2}/>}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </div>
                         );
                       })}
+                      {peerTyping&&(
+                        <div style={{display:"flex",alignItems:"flex-end",gap:8,marginTop:10}}>
+                          <div style={{width:26,height:26,borderRadius:"50%",background:"linear-gradient(135deg,#7c3aed,#6d28d9)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                            <span style={{color:"#fff",fontSize:10,fontWeight:800}}>{selChat.name[0]?.toUpperCase()}</span>
+                          </div>
+                          <div style={{padding:"10px 14px",borderRadius:"18px 18px 18px 3px",background:"var(--s1)",border:`1px solid ${b1}`,display:"flex",alignItems:"center",gap:4}}>
+                            {[0,1,2].map(d=><span key={d} style={{width:5,height:5,borderRadius:"50%",background:t3,display:"inline-block",animation:`typingDot 1.2s ${d*0.2}s infinite ease-in-out`}}/>)}
+                          </div>
+                        </div>
+                      )}
                       <div ref={msgEndRef}/>
                     </div>
-                    <div style={{padding:`10px 14px calc(10px + env(safe-area-inset-bottom, 0px))`,background:"var(--s1)",borderTop:`1px solid ${b1}`,flexShrink:0,position:"relative",zIndex:10}}>
-                      {}
-                      {showPatPicker&&(
-                        <div style={{marginBottom:10,background:"var(--s2)",border:`1px solid ${b1}`,borderRadius:14,overflow:"hidden"}}>
-                          <div style={{padding:"8px 12px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",gap:8}}>
-                            <User size={13} color={DocAC}/>
-                            <span style={{color:t1,fontSize:12,fontWeight:700,flex:1}}>Attach patient context</span>
-                            <button onClick={()=>{setShowPatPicker(false);setPatPickerSearch("");}} style={{background:"none",border:"none",cursor:"pointer",color:t3,padding:2,display:"flex"}}><X size={13}/></button>
-                          </div>
-                          <div style={{padding:"6px 10px",borderBottom:`1px solid ${b1}`}}>
-                            <input value={patPickerSearch} onChange={e=>setPatPickerSearch(e.target.value)} placeholder="Search patients…" style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,color:t1,fontFamily:"inherit"}}/>
-                          </div>
-                          <div style={{maxHeight:160,overflowY:"auto"}}>
-                            {patients.filter(p=>!patPickerSearch||(p.fullName||"").toLowerCase().includes(patPickerSearch.toLowerCase())).slice(0,6).map(p=>(
-                              <div key={p.id} onClick={()=>{setChatPatient(p);setShowPatPicker(false);setPatPickerSearch("");}} style={{padding:"7px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:8,borderBottom:"1px solid var(--b0)"}} onMouseEnter={e=>e.currentTarget.style.background="var(--pd)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                                <div style={{width:26,height:26,borderRadius:"50%",background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><User size={11} color={DocAC}/></div>
-                                <div style={{minWidth:0,flex:1}}>
-                                  <p style={{color:t1,fontSize:12,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.fullName}</p>
-                                  {p.allergies?.length>0&&<p style={{color:"var(--ro)",fontSize:10,margin:0}}>{p.allergies.length} allerg{p.allergies.length>1?"ies":"y"}</p>}
-                                </div>
+                    <div style={{flexShrink:0,borderTop:`1px solid ${b1}`,background:"var(--s1)",position:"relative",zIndex:10}}>
+                      {(showPatPicker||chatPatient||showSoundSettings)&&(
+                        <div style={{maxHeight:"40vh",overflowY:"auto",borderBottom:`1px solid ${b1}`}}>
+                          {showPatPicker&&(
+                            <div style={{background:"var(--s2)"}}>
+                              <div style={{padding:"8px 12px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",gap:8}}>
+                                <User size={13} color={DocAC}/>
+                                <span style={{color:t1,fontSize:12,fontWeight:700,flex:1}}>Attach patient context</span>
+                                <button onClick={()=>{setShowPatPicker(false);setPatPickerSearch("");}} style={{background:"none",border:"none",cursor:"pointer",color:t3,padding:2,display:"flex"}}><X size={13}/></button>
                               </div>
-                            ))}
-                            {patients.filter(p=>!patPickerSearch||(p.fullName||"").toLowerCase().includes(patPickerSearch.toLowerCase())).length===0&&<p style={{color:t3,fontSize:12,padding:"10px 12px",margin:0}}>No patients found</p>}
-                          </div>
-                        </div>
-                      )}
-                      {}
-                      {chatPatient&&!showPatPicker&&(
-                        <div style={{marginBottom:8,background:"var(--doc-pd)",border:`1px solid rgba(14,116,144,.25)`,borderRadius:12,overflow:"hidden"}}>
-                          <div style={{padding:"7px 12px",display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>setChatPatientExpanded(p=>!p)}>
-                            <User size={13} color={DocAC}/>
-                            <div style={{flex:1,minWidth:0}}>
-                              <p style={{color:DocAC,fontSize:11,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{chatPatient.fullName}</p>
-                              <p style={{color:t3,fontSize:10,margin:0}}>{chatPatientExpanded?"Click to collapse":"Click to expand full profile"}</p>
-                            </div>
-                            <button onClick={e=>{e.stopPropagation();setChatPatient(null);setChatPatientExpanded(false);}} style={{background:"none",border:"none",cursor:"pointer",color:t3,padding:2,display:"flex",flexShrink:0}}><X size={12}/></button>
-                          </div>
-                          {chatPatientExpanded&&(
-                            <div style={{borderTop:`1px solid rgba(14,116,144,.15)`,padding:"8px 12px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
-                              {chatPatient.dob&&<div><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Date of Birth</p><p style={{color:t1,fontSize:11,fontWeight:600,margin:0}}>{chatPatient.dob}</p></div>}
-                              {chatPatient.bloodType&&<div><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Blood Type</p><p style={{color:"var(--ro)",fontSize:11,fontWeight:700,margin:0}}>{chatPatient.bloodType}</p></div>}
-                              {chatPatient.allergies?.length>0&&<div style={{gridColumn:"1/-1"}}><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Allergies</p><p style={{color:"var(--ro)",fontSize:11,fontWeight:600,margin:"2px 0 0"}}>{chatPatient.allergies.join(", ")}</p></div>}
-                              {chatPatient.conditions?.length>0&&<div style={{gridColumn:"1/-1"}}><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Conditions</p><p style={{color:"var(--am)",fontSize:11,fontWeight:600,margin:"2px 0 0"}}>{chatPatient.conditions.join(", ")}</p></div>}
+                              <div style={{padding:"6px 10px",borderBottom:`1px solid ${b1}`}}>
+                                <input value={patPickerSearch} onChange={e=>setPatPickerSearch(e.target.value)} placeholder="Search patients…" style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,color:t1,fontFamily:"inherit"}}/>
+                              </div>
+                              <div>
+                                {patients.filter(p=>!patPickerSearch||(p.fullName||"").toLowerCase().includes(patPickerSearch.toLowerCase())).slice(0,6).map(p=>(
+                                  <div key={p.id} onClick={()=>{setChatPatient(p);setShowPatPicker(false);setPatPickerSearch("");}} style={{padding:"7px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:8,borderBottom:"1px solid var(--b0)"}} onMouseEnter={e=>e.currentTarget.style.background="var(--pd)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                                    <div style={{width:26,height:26,borderRadius:"50%",background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><User size={11} color={DocAC}/></div>
+                                    <div style={{minWidth:0,flex:1}}>
+                                      <p style={{color:t1,fontSize:12,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.fullName}</p>
+                                      {p.allergies?.length>0&&<p style={{color:"var(--ro)",fontSize:10,margin:0}}>{p.allergies.length} allerg{p.allergies.length>1?"ies":"y"}</p>}
+                                    </div>
+                                  </div>
+                                ))}
+                                {patients.filter(p=>!patPickerSearch||(p.fullName||"").toLowerCase().includes(patPickerSearch.toLowerCase())).length===0&&<p style={{color:t3,fontSize:12,padding:"10px 12px",margin:0}}>No patients found</p>}
+                              </div>
                             </div>
                           )}
+                          {chatPatient&&!showPatPicker&&(
+                            <div style={{background:"var(--doc-pd)",borderBottom:`1px solid rgba(14,116,144,.15)`}}>
+                              <div style={{padding:"7px 12px",display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>setChatPatientExpanded(p=>!p)}>
+                                <User size={13} color={DocAC}/>
+                                <div style={{flex:1,minWidth:0}}>
+                                  <p style={{color:DocAC,fontSize:11,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{chatPatient.fullName}</p>
+                                  <p style={{color:t3,fontSize:10,margin:0}}>{chatPatientExpanded?"Click to collapse":"Click to expand full profile"}</p>
+                                </div>
+                                <button onClick={e=>{e.stopPropagation();setChatPatient(null);setChatPatientExpanded(false);}} style={{background:"none",border:"none",cursor:"pointer",color:t3,padding:2,display:"flex",flexShrink:0}}><X size={12}/></button>
+                              </div>
+                              {chatPatientExpanded&&(
+                                <div style={{padding:"8px 12px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                                  {chatPatient.dob&&<div><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Date of Birth</p><p style={{color:t1,fontSize:11,fontWeight:600,margin:0}}>{chatPatient.dob}</p></div>}
+                                  {chatPatient.bloodType&&<div><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Blood Type</p><p style={{color:"var(--ro)",fontSize:11,fontWeight:700,margin:0}}>{chatPatient.bloodType}</p></div>}
+                                  {chatPatient.allergies?.length>0&&<div style={{gridColumn:"1/-1"}}><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Allergies</p><p style={{color:"var(--ro)",fontSize:11,fontWeight:600,margin:"2px 0 0"}}>{chatPatient.allergies.join(", ")}</p></div>}
+                                  {chatPatient.conditions?.length>0&&<div style={{gridColumn:"1/-1"}}><p style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",margin:0}}>Conditions</p><p style={{color:"var(--am)",fontSize:11,fontWeight:600,margin:"2px 0 0"}}>{chatPatient.conditions.join(", ")}</p></div>}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <AnimatePresence>
+                            {showSoundSettings&&(
+                              <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0,y:6}} style={{padding:"12px 14px",background:"var(--s2)"}}>
+                                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                                  <span style={{color:t1,fontSize:12,fontWeight:700}}>Notification sounds</span>
+                                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                    <span style={{color:soundEnabled?"var(--gr)":"var(--ro)",fontSize:11,fontWeight:600}}>{soundEnabled?"On":"Off"}</span>
+                                    <div className={`sw ${soundEnabled?"on":""}`} onClick={()=>toggleSound(!soundEnabled)}/>
+                                  </div>
+                                </div>
+                                {soundEnabled&&(
+                                  <>
+                                    <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
+                                      {Object.entries(SOUND_PROFILES).map(([key,prof])=>(
+                                        <button key={key} onClick={()=>changeSoundType(key)} style={{padding:"4px 11px",borderRadius:99,fontSize:10.5,fontWeight:600,border:`1.5px solid ${soundType===key?DocAC:b1}`,background:soundType===key?"var(--doc-pd)":"transparent",color:soundType===key?DocAC:t3,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}} title={prof.desc}>{prof.label}{key==="urgent"&&<AlertTriangle size={9} color="var(--ro)"/>}</button>
+                                      ))}
+                                    </div>
+                                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                      <Volume1 size={13} color={t3} style={{flexShrink:0}}/>
+                                      <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e=>changeSoundVolume(parseFloat(e.target.value))} style={{flex:1,accentColor:DocAC,cursor:"pointer"}}/>
+                                      <Volume2 size={13} color={t3} style={{flexShrink:0}}/>
+                                      <span style={{color:t3,fontSize:10,flexShrink:0,minWidth:28}}>{Math.round(soundVolume*100)}%</span>
+                                    </div>
+                                    {SOUND_PROFILES[soundType]&&<p style={{color:t3,fontSize:10,margin:"6px 0 0",fontStyle:"italic"}}>{SOUND_PROFILES[soundType].desc}</p>}
+                                  </>
+                                )}
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
                       )}
-                      <AnimatePresence>
-                        {showSoundSettings&&(
-                          <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0,y:6}} style={{marginBottom:10,padding:"12px 14px",background:"var(--s2)",border:`1px solid ${b1}`,borderRadius:12}}>
-                            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-                              <span style={{color:t1,fontSize:12,fontWeight:700}}>Notification sounds</span>
-                              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                <span style={{color:soundEnabled?"var(--gr)":"var(--ro)",fontSize:11,fontWeight:600}}>{soundEnabled?"On":"Off"}</span>
-                                <div className={`sw ${soundEnabled?"on":""}`} onClick={()=>toggleSound(!soundEnabled)}/>
-                              </div>
-                            </div>
-                            {soundEnabled&&(
-                              <>
-                                <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
-                                  {Object.entries(SOUND_PROFILES).map(([key,prof])=>(
-                                    <button key={key} onClick={()=>changeSoundType(key)} style={{padding:"4px 11px",borderRadius:99,fontSize:10.5,fontWeight:600,border:`1.5px solid ${soundType===key?DocAC:b1}`,background:soundType===key?"var(--doc-pd)":"transparent",color:soundType===key?DocAC:t3,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}} title={prof.desc}>{prof.label}{key==="urgent"&&<AlertTriangle size={9} color="var(--ro)"/>}</button>
-                                  ))}
-                                </div>
-                                <div style={{display:"flex",alignItems:"center",gap:10}}>
-                                  <Volume1 size={13} color={t3} style={{flexShrink:0}}/>
-                                  <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e=>changeSoundVolume(parseFloat(e.target.value))} style={{flex:1,accentColor:DocAC,cursor:"pointer"}}/>
-                                  <Volume2 size={13} color={t3} style={{flexShrink:0}}/>
-                                  <span style={{color:t3,fontSize:10,flexShrink:0,minWidth:28}}>{Math.round(soundVolume*100)}%</span>
-                                </div>
-                                {SOUND_PROFILES[soundType]&&<p style={{color:t3,fontSize:10,margin:"6px 0 0",fontStyle:"italic"}}>{SOUND_PROFILES[soundType].desc}</p>}
-                              </>
-                            )}
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                      <div style={{display:"flex",alignItems:"flex-end",gap:9}}>
-                        {}
-                        <button onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient" style={{width:36,height:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>
-                          <User size={15}/>
-                        </button>
-                        <div style={{flex:1,background:"var(--s2)",border:`1.5px solid ${b1}`,borderRadius:20,padding:"10px 14px"}}
-                          onClick={e=>e.currentTarget.querySelector("textarea")?.focus()}>
-                          <textarea
-                            value={msgInput}
-                            onChange={e=>setMsgInput(e.target.value)}
-                            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
-                            placeholder={`Message ${selChat.name}…`}
-                            rows={isMob?1:2}
-                            style={{border:"none",background:"transparent",resize:"none",padding:0,
-                              fontSize:16,color:t1,outline:"none",fontFamily:"inherit",
-                              lineHeight:1.6,width:"100%",display:"block",
-                              WebkitAppearance:"none",touchAction:"manipulation"}}/>
-                        </div>
-                        <button onClick={sendMessage}
-                          style={{width:44,height:44,borderRadius:"50%",border:"none",flexShrink:0,
-                            background:DocAC,color:"#fff",
-                            cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",
-                            transition:"background .2s",opacity:msgInput.trim()?1:0.45,
-                            WebkitTapHighlightColor:"transparent",touchAction:"manipulation"}}>
-                          {msgSending?<Loader2 size={15} style={{animation:"spin360 .7s linear infinite"}}/>:<Send size={15}/>}
-                        </button>
-                      </div>
-                      {!isMob&&(
-                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:5}}>
-                          <p style={{color:t3,fontSize:10,margin:0}}>Enter to send · Shift+Enter for new line{chatPatient&&<span style={{color:DocAC}}> · Referencing <strong>{chatPatient.fullName}</strong></span>}</p>
-                          <button onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}} style={{background:"none",border:"none",cursor:"pointer",color:soundEnabled?DocAC:t3,fontSize:10,fontWeight:600,display:"flex",alignItems:"center",gap:4,padding:0,fontFamily:"inherit"}}>
-                            {soundEnabled?<Bell size={11}/>:<BellOff size={11}/>} Sound
+                      <div style={{padding:`10px 14px calc(10px + env(safe-area-inset-bottom,0px))`}}>
+                        <div style={{display:"flex",alignItems:"flex-end",gap:9}}>
+                          <button onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient" style={{width:36,height:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>
+                            <User size={15}/>
+                          </button>
+                          <div style={{flex:1,background:"var(--s2)",border:`1.5px solid ${b1}`,borderRadius:20,padding:"10px 14px"}}
+                            onClick={e=>e.currentTarget.querySelector("textarea")?.focus()}>
+                            <textarea
+                              value={msgInput}
+                              onChange={e=>{setMsgInput(e.target.value);emitTyping();}}
+                              onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
+                              placeholder={`Message ${selChat.name}…`}
+                              rows={isMob?1:2}
+                              style={{border:"none",background:"transparent",resize:"none",padding:0,fontSize:16,color:t1,outline:"none",fontFamily:"inherit",lineHeight:1.6,width:"100%",display:"block",WebkitAppearance:"none",touchAction:"manipulation"}}/>
+                          </div>
+                          <button onClick={sendMessage}
+                            style={{width:44,height:44,borderRadius:"50%",border:"none",flexShrink:0,background:DocAC,color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"background .2s",opacity:msgInput.trim()?1:0.45,WebkitTapHighlightColor:"transparent",touchAction:"manipulation"}}>
+                            {msgSending?<Loader2 size={15} style={{animation:"spin360 .7s linear infinite"}}/>:<Send size={15}/>}
                           </button>
                         </div>
-                      )}
+                        {!isMob&&(
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:5}}>
+                            <p style={{color:t3,fontSize:10,margin:0}}>Enter to send · Shift+Enter for new line{chatPatient&&<span style={{color:DocAC}}> · Referencing <strong>{chatPatient.fullName}</strong></span>}</p>
+                            <button onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}} style={{background:"none",border:"none",cursor:"pointer",color:soundEnabled?DocAC:t3,fontSize:10,fontWeight:600,display:"flex",alignItems:"center",gap:4,padding:0,fontFamily:"inherit"}}>
+                              {soundEnabled?<Bell size={11}/>:<BellOff size={11}/>} Sound
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </>
                 )}
@@ -853,14 +1091,24 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           )}
           {}
           {page==="dashboard"&&(
+            <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(66px + env(safe-area-inset-bottom,0px))":0}}>
             <div style={{maxWidth:920,margin:"0 auto",padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
               <motion.div className="au" style={{marginBottom:isMob?20:28}}>
                 <h2 style={{color:t1,fontSize:isMob?22:28,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,marginBottom:4}}>{docGreet}, Dr. {name.split(" ")[0]}.</h2>
                 <p style={{color:t3,fontSize:13.5,margin:0}}>{new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}</p>
               </motion.div>
               <div className="grid w-full min-w-0 grid-cols-1 min-[400px]:grid-cols-2 xl:grid-cols-4 gap-3 mb-5">
-                {[{l:"Total patients",v:patients.length,c:DocAC,bg:"var(--doc-pd)"},{l:"Today's appts",v:allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()).length,c:"var(--gr)",bg:"rgba(5,150,105,.1)"},{l:"With allergies",v:patients.filter(p=>p.allergies?.length>0).length,c:"var(--ro)",bg:"rgba(185,28,28,.09)"},{l:"With conditions",v:patients.filter(p=>p.conditions?.length>0).length,c:"var(--am)",bg:"rgba(217,119,6,.09)"}].map((s,i)=>(
-                  <motion.div key={s.l} className={`au d${i+1} min-w-0 overflow-hidden`} whileHover={{y:-3}} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:16,padding:isMob?"12px 11px":"18px 16px",boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
+                {[
+                  {l:"Total patients",v:patients.length,c:DocAC,bg:"var(--doc-pd)",
+                    items:patients,render:p=><div key={p.id} onClick={()=>{setPage("patients");openPatient(p);}} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",gap:10}} onMouseEnter={e=>e.currentTarget.style.background="var(--pd)"} onMouseLeave={e=>e.currentTarget.style.background="var(--s2)"}><div style={{width:32,height:32,borderRadius:"50%",background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><User size={13} color={DocAC}/></div><div style={{minWidth:0,flex:1}}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.fullName}</p><p style={{color:t3,fontSize:11,margin:0}}>{p.email||"No email"}</p></div></div>},
+                  {l:"Today's appts",v:allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()).length,c:"var(--gr)",bg:"rgba(5,150,105,.1)",
+                    items:allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()),render:a=><div key={a.id} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0}}>{a.type}</p><p style={{color:t3,fontSize:11,margin:"3px 0 0"}}>{new Date("2000-01-01T"+a.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})} · {patientNames?.[a.patient_id]||"Patient"}</p></div>},
+                  {l:"With allergies",v:patients.filter(p=>p.allergies?.length>0).length,c:"var(--ro)",bg:"rgba(185,28,28,.09)",
+                    items:patients.filter(p=>p.allergies?.length>0),render:p=><div key={p.id} onClick={()=>{setPage("patients");openPatient(p);}} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="var(--pd)"} onMouseLeave={e=>e.currentTarget.style.background="var(--s2)"}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0}}>{p.fullName}</p><p style={{color:"var(--ro)",fontSize:11,margin:"3px 0 0"}}>{(p.allergies||[]).join(", ")}</p></div>},
+                  {l:"With conditions",v:patients.filter(p=>p.conditions?.length>0).length,c:"var(--am)",bg:"rgba(217,119,6,.09)",
+                    items:patients.filter(p=>p.conditions?.length>0),render:p=><div key={p.id} onClick={()=>{setPage("patients");openPatient(p);}} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="var(--pd)"} onMouseLeave={e=>e.currentTarget.style.background="var(--s2)"}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0}}>{p.fullName}</p><p style={{color:"var(--am)",fontSize:11,margin:"3px 0 0"}}>{(p.conditions||[]).join(", ")}</p></div>},
+                ].map((s,i)=>(
+                  <motion.div key={s.l} className={`au d${i+1} min-w-0 overflow-hidden`} whileHover={{y:-3}} onClick={()=>setDashModal({title:s.l,items:s.items,render:s.render})} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:16,padding:isMob?"12px 11px":"18px 16px",boxShadow:"0 2px 8px rgba(0,0,0,.04)",cursor:"pointer"}}>
                     <div style={{width:isMob?30:38,height:isMob?30:38,borderRadius:isMob?9:12,background:s.bg,marginBottom:isMob?6:12,display:"flex",alignItems:"center",justifyContent:"center"}}><User size={isMob?13:17} color={s.c}/></div>
                     <p className="tabular-nums truncate" style={{color:t1,fontSize:isMob?17:22,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,marginBottom:2}}>{s.v}</p>
                     <p className="leading-snug line-clamp-2" style={{color:t3,fontSize:9,fontWeight:800,letterSpacing:".07em",textTransform:"uppercase"}}>{s.l}</p>
@@ -991,10 +1239,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 ))}
               </motion.div>
             </div>
+            </div>
           )}
           {}
           {page==="patients"&&(
-            <div className="w-full min-w-0 max-w-[1020px] mx-auto" style={{padding:isMob?"16px 14px":"32px 22px 48px",paddingBottom:isMob?"calc(56px + env(safe-area-inset-bottom, 0px))":undefined}}>
+            <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(56px + env(safe-area-inset-bottom,0px))":0}}>
+            <div className="w-full min-w-0 max-w-[1020px] mx-auto" style={{padding:isMob?"16px 14px":"32px 22px 48px"}}>
               {!selPat?(
                 <>
                   <motion.div className="au" style={{marginBottom:isMob?18:22}}>
@@ -1076,7 +1326,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           </div>
                           <div className={`flex gap-2 ${isMob?"w-full flex-col":"flex-wrap items-start justify-end"}`}>
                             <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={`btn-doc ${isMob?"w-full justify-center py-2.5":""}`} onClick={()=>setShowPrescribe(true)} style={{display:"flex",alignItems:"center",gap:7,padding:isMob?"10px 14px":"10px 18px",fontSize:isMob?12.5:13,borderRadius:12}}><Pill size={14}/> Prescribe</motion.button>
-                            <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={isMob?"w-full justify-center py-2.5":""} onClick={()=>setPage("messages")} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:isMob?"10px 14px":"10px 16px",borderRadius:12,border:"1px solid rgba(14,116,144,.3)",background:"rgba(14,116,144,.07)",color:DocAC,cursor:"pointer",fontFamily:"inherit",fontSize:isMob?12.5:13,fontWeight:600}}><MessageSquare size={13}/> Message Pharmacy</motion.button>
+                            <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={isMob?"w-full justify-center py-2.5":""} onClick={()=>{setShowSendToPharmacy(true);setSendToPharmacyDone(false);}} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:isMob?"10px 14px":"10px 16px",borderRadius:12,border:"1px solid rgba(14,116,144,.3)",background:"rgba(14,116,144,.07)",color:DocAC,cursor:"pointer",fontFamily:"inherit",fontSize:isMob?12.5:13,fontWeight:600}}><Send size={13}/> Send to Pharmacy</motion.button>
+                            <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={isMob?"w-full justify-center py-2.5":""} onClick={()=>setPage("messages")} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:isMob?"10px 14px":"10px 16px",borderRadius:12,border:"1px solid rgba(14,116,144,.3)",background:"transparent",color:DocAC,cursor:"pointer",fontFamily:"inherit",fontSize:isMob?12.5:13,fontWeight:600}}><MessageSquare size={13}/> Message</motion.button>
                             <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={isMob?"w-full justify-center py-2.5":""} onClick={()=>setDeleteConfirm(selPat.id)} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:isMob?"10px 14px":"10px 16px",borderRadius:12,border:"1px solid rgba(185,28,28,.25)",background:"rgba(185,28,28,.06)",color:"var(--ro)",cursor:"pointer",fontFamily:"inherit",fontSize:isMob?12.5:13,fontWeight:600}}><Trash2 size={13}/>{isMob?" Remove patient":" Remove"}</motion.button>
                           </div>
                         </div>
@@ -1188,8 +1439,50 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={`btn-doc shrink-0 ${isMob?"w-full justify-center py-2":""}`} onClick={()=>setShowPrescribe(true)} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:"8px 16px",fontSize:12.5,borderRadius:11}}><Plus size={13}/> New prescription</motion.button>
                           </div>
                           {patRx.length===0?<p style={{color:t3,fontSize:13}}>No prescriptions yet.</p>:(
-                            <div style={{display:"flex",flexDirection:"column",gap:9}}>
-                              {patRx.map(rx=>(<div key={rx.id} className="min-w-0 overflow-hidden" style={{padding:"12px 14px",borderRadius:13,background:"var(--s2)",border:"1px solid var(--b0)"}}><div className="flex flex-wrap items-start justify-between gap-2"><span className="shrink-0" style={{color:t2,fontSize:12.5,fontWeight:600}}>{new Date(rx.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span><span className="max-w-[min(100%,200px)] break-words text-right" style={{padding:"3px 10px",borderRadius:99,fontSize:11,fontWeight:700,background:"rgba(217,119,6,.12)",color:"var(--am)"}}>{PRESCRIPTION_STATUS_LABELS[rx.status]||rx.status}</span></div>{rx.notes&&<p className="break-words" style={{color:t3,fontSize:12,marginTop:6,lineHeight:1.5,marginBottom:0}}>{rx.notes}</p>}</div>))}
+                            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                              {patRx.map(rx=>{
+                                const isOpen=selRxChat===rx.id;
+                                const statusColors={pending_pharmacist:{bg:"rgba(217,119,6,.1)",color:"var(--am)"},pending_fill:{bg:"rgba(14,116,144,.1)",color:DocAC},ready:{bg:"rgba(5,150,105,.1)",color:"var(--gr)"},filled:{bg:"rgba(5,150,105,.1)",color:"var(--gr)"},picked_up:{bg:"rgba(5,150,105,.08)",color:"var(--gr)"}};
+                                const sc=statusColors[rx.status]||{bg:"var(--s2)",color:t3};
+                                return(
+                                  <div key={rx.id} className="min-w-0" style={{border:`1px solid ${b1}`,borderRadius:14,overflow:"hidden"}}>
+                                    <div style={{padding:"12px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"var(--s2)"}}>
+                                      <div style={{flex:1,minWidth:0}}>
+                                        <span style={{color:t2,fontSize:12,fontWeight:600}}>{new Date(rx.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span>
+                                        {rx.notes&&<p style={{color:t3,fontSize:11,margin:"3px 0 0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rx.notes}</p>}
+                                      </div>
+                                      <span style={{padding:"3px 10px",borderRadius:99,fontSize:11,fontWeight:700,background:sc.bg,color:sc.color,flexShrink:0}}>{PRESCRIPTION_STATUS_LABELS[rx.status]||rx.status}</span>
+                                      <button onClick={()=>{setSelRxChat(isOpen?null:rx.id);}} style={{padding:"4px 10px",borderRadius:8,border:`1px solid ${b1}`,background:isOpen?DocAC:"transparent",color:isOpen?"#fff":t3,cursor:"pointer",fontSize:11,fontWeight:600,fontFamily:"inherit",flexShrink:0}}>
+                                        {isOpen?"Close":"Chat"}
+                                      </button>
+                                    </div>
+                                    {isOpen&&(
+                                      <div style={{borderTop:`1px solid ${b1}`,display:"flex",flexDirection:"column",height:280}}>
+                                        <div style={{flex:1,overflowY:"auto",padding:"10px 14px",display:"flex",flexDirection:"column",gap:6,background:"var(--bg)"}}>
+                                          {rxMessages.length===0&&<p style={{color:t3,fontSize:12,textAlign:"center",margin:"auto 0"}}>No messages yet. Start the conversation.</p>}
+                                          {rxMessages.map(m=>{
+                                            const isMe=m.sender_id===user.id;
+                                            return(
+                                              <div key={m.id} style={{display:"flex",justifyContent:isMe?"flex-end":"flex-start"}}>
+                                                <div style={{maxWidth:"75%",padding:"7px 12px",borderRadius:isMe?"14px 14px 3px 14px":"14px 14px 14px 3px",background:isMe?DocAC:"var(--s1)",border:isMe?"none":`1px solid ${b1}`,boxShadow:"0 1px 3px rgba(0,0,0,.06)"}}>
+                                                  <p style={{color:isMe?"#fff":t1,fontSize:13,margin:0,wordBreak:"break-word"}}>{m.body}</p>
+                                                  <p style={{color:isMe?"rgba(255,255,255,.6)":t3,fontSize:9,margin:"3px 0 0",textAlign:isMe?"right":"left"}}>{new Date(m.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>
+                                                </div>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                        <div style={{padding:"8px 12px",borderTop:`1px solid ${b1}`,display:"flex",gap:8,background:"var(--s1)"}}>
+                                          <input value={rxMsgInput} onChange={e=>setRxMsgInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendRxMessage();}}} placeholder="Message pharmacist about this prescription…" style={{flex:1,border:`1px solid ${b1}`,borderRadius:10,padding:"8px 12px",fontSize:13,background:"var(--s2)",color:t1,outline:"none",fontFamily:"inherit"}}/>
+                                          <button onClick={sendRxMessage} disabled={rxMsgSending||!rxMsgInput.trim()} style={{padding:"8px 14px",borderRadius:10,border:"none",background:DocAC,color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700,opacity:rxMsgInput.trim()?1:0.5}}>
+                                            {rxMsgSending?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<Send size={13}/>}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
                         </motion.div>
@@ -1218,6 +1511,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 </>
               )}
             </div>
+            </div>
           )}
         </div>
       </div>
@@ -1225,6 +1519,139 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         {showPrescribe&&selPat&&(<PrescribeModal patient={selPat} patientProfile={patProfile} doctor={user} onClose={()=>setShowPrescribe(false)} onSuccess={()=>setShowPrescribe(false)}/>)}
       </AnimatePresence>
       <AnimatePresence>{showNickname&&<NicknameModal currentName={name} onSave={saveName} onClose={()=>setShowNickname(false)} userId={user?.id}/>}</AnimatePresence>
+
+      {/* Notification panel */}
+      <AnimatePresence>
+        {showNotifPanel&&(
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setShowNotifPanel(false)} style={{position:"fixed",inset:0,zIndex:70}}>
+            <motion.div initial={{opacity:0,y:-8,scale:.97}} animate={{opacity:1,y:0,scale:1}} exit={{opacity:0,y:-8}} transition={{type:"spring",damping:28,stiffness:320}} onClick={e=>e.stopPropagation()} style={{position:"absolute",top:58,right:isMob?8:16,width:isMob?"calc(100vw - 16px)":"360px",maxHeight:"70vh",display:"flex",flexDirection:"column",background:"var(--bg)",border:`1px solid ${b1}`,borderRadius:18,boxShadow:"0 16px 48px rgba(0,0,0,.18)",overflow:"hidden",zIndex:71}}>
+              <div style={{padding:"14px 16px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+                <h3 style={{color:t1,fontSize:14,fontWeight:700,margin:0,display:"flex",alignItems:"center",gap:7}}><Bell size={13} color={DocAC}/> Notifications {unreadNotifCount>0&&<span style={{background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:800,padding:"1px 7px"}}>{unreadNotifCount}</span>}</h3>
+                {unreadNotifCount>0&&<button onClick={markAllNotifsRead} style={{fontSize:11,fontWeight:600,color:DocAC,background:"none",border:"none",cursor:"pointer",fontFamily:"inherit"}}>Mark all read</button>}
+              </div>
+              <div style={{flex:1,overflowY:"auto"}}>
+                {docNotifs.length===0&&<p style={{color:t3,fontSize:13,textAlign:"center",padding:"28px 16px"}}>No notifications yet.</p>}
+                {docNotifs.map(n=>(
+                  <div key={n.id} onClick={()=>markNotifRead(n.id)} style={{padding:"12px 16px",borderBottom:`1px solid ${b1}`,cursor:"pointer",background:n.read_at?"transparent":"rgba(14,116,144,.04)",display:"flex",gap:10,alignItems:"flex-start"}} onMouseEnter={e=>e.currentTarget.style.background="var(--s2)"} onMouseLeave={e=>e.currentTarget.style.background=n.read_at?"transparent":"rgba(14,116,144,.04)"}>
+                    <div style={{width:8,height:8,borderRadius:"50%",background:n.read_at?"transparent":DocAC,flexShrink:0,marginTop:5}}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{color:t1,fontSize:13,fontWeight:n.read_at?500:700,margin:0}}>{n.title}</p>
+                      {n.body&&<p style={{color:t3,fontSize:12,margin:"3px 0 0",lineHeight:1.5}}>{n.body}</p>}
+                      <p style={{color:t3,fontSize:10,margin:"4px 0 0"}}>{new Date(n.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Doctor AI Chat Drawer */}
+      <AnimatePresence>
+        {showDocAI&&(
+          <motion.div initial={{x:"100%"}} animate={{x:0}} exit={{x:"100%"}} transition={{type:"spring",damping:28,stiffness:280}} style={{position:"fixed",top:0,right:0,bottom:0,width:isMob?"100vw":"400px",background:"var(--bg)",borderLeft:`1px solid ${b1}`,zIndex:75,display:"flex",flexDirection:"column",boxShadow:"-8px 0 32px rgba(0,0,0,.12)"}}>
+            <div style={{padding:"14px 16px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",gap:10,flexShrink:0,background:"var(--s1)"}}>
+              <div style={{width:34,height:34,borderRadius:10,background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Sparkles size={15} color={DocAC}/></div>
+              <div style={{flex:1}}>
+                <p style={{color:t1,fontSize:14,fontWeight:700,margin:0}}>Clinical Assistant</p>
+                <p style={{color:t3,fontSize:11,margin:0}}>AI-powered clinical guidance</p>
+              </div>
+              <button onClick={()=>setShowDocAI(false)} style={{width:30,height:30,borderRadius:9,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3}}><X size={13}/></button>
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:12}}>
+              {aiMessages.length===0&&(
+                <div style={{textAlign:"center",padding:"40px 16px"}}>
+                  <Sparkles size={28} color={t3} style={{opacity:.2,margin:"0 auto 12px",display:"block"}}/>
+                  <p style={{color:t2,fontSize:14,fontWeight:600,marginBottom:6}}>Clinical AI Assistant</p>
+                  <p style={{color:t3,fontSize:12,lineHeight:1.6}}>Ask about drug interactions, clinical guidelines, dosing, or patient management.</p>
+                  <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:16}}>
+                    {["Drug interactions for metformin + lisinopril","Signs of serotonin syndrome","Hypertension management guidelines","When to refer for cardiology"].map(s=>(
+                      <button key={s} onClick={()=>{setAiInput(s);}} style={{padding:"8px 12px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s2)",color:t2,cursor:"pointer",fontFamily:"inherit",fontSize:12,textAlign:"left"}}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {aiMessages.map((m,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+                  <div style={{maxWidth:"85%",padding:"10px 14px",borderRadius:m.role==="user"?"18px 18px 3px 18px":"18px 18px 18px 3px",background:m.role==="user"?DocAC:"var(--s1)",border:m.role==="user"?"none":`1px solid ${b1}`,color:m.role==="user"?"#fff":t1,fontSize:13,lineHeight:1.6,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {aiLoading&&<div style={{display:"flex",gap:5,padding:"10px 14px",borderRadius:"18px 18px 18px 3px",background:"var(--s1)",border:`1px solid ${b1}`,width:"fit-content"}}>{[0,1,2].map(d=><span key={d} style={{width:6,height:6,borderRadius:"50%",background:t3,display:"inline-block",animation:`typingDot 1.2s ${d*.2}s infinite ease-in-out`}}/>)}</div>}
+              <div ref={aiEndRef}/>
+            </div>
+            <div style={{padding:"12px 14px calc(12px + env(safe-area-inset-bottom,0px))",borderTop:`1px solid ${b1}`,background:"var(--s1)",flexShrink:0}}>
+              <p style={{color:"var(--am)",fontSize:10,margin:"0 0 8px",display:"flex",alignItems:"center",gap:4}}><AlertTriangle size={10}/> For guidance only — not a substitute for clinical judgment.</p>
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:1,background:"var(--s2)",border:`1.5px solid ${b1}`,borderRadius:16,padding:"9px 13px"}} onClick={e=>e.currentTarget.querySelector("textarea")?.focus()}>
+                  <textarea value={aiInput} onChange={e=>setAiInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendDocAI();}}} placeholder="Ask a clinical question…" rows={1} style={{border:"none",background:"transparent",resize:"none",padding:0,fontSize:14,color:t1,outline:"none",fontFamily:"inherit",lineHeight:1.5,width:"100%",display:"block"}}/>
+                </div>
+                <button onClick={sendDocAI} disabled={aiLoading||!aiInput.trim()} style={{width:40,height:40,borderRadius:"50%",border:"none",background:DocAC,color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",opacity:aiInput.trim()?1:0.45,flexShrink:0}}>
+                  {aiLoading?<Loader2 size={14} style={{animation:"spin360 .7s linear infinite"}}/>:<Send size={14}/>}
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {dashModal&&(
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setDashModal(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:80,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <motion.div initial={{y:20,opacity:0,scale:.97}} animate={{y:0,opacity:1,scale:1}} exit={{y:16,opacity:0}} transition={{type:"spring",damping:26,stiffness:300}} onClick={e=>e.stopPropagation()} style={{background:"var(--bg)",borderRadius:20,width:"100%",maxWidth:480,maxHeight:"80vh",display:"flex",flexDirection:"column",border:`1px solid ${b1}`,boxShadow:"0 20px 60px rgba(0,0,0,.2)"}}>
+              <div style={{padding:"16px 20px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+                <h3 style={{color:t1,fontSize:16,fontWeight:700,margin:0}}>{dashModal.title}</h3>
+                <button onClick={()=>setDashModal(null)} style={{width:30,height:30,borderRadius:9,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3}}><X size={13}/></button>
+              </div>
+              <div style={{flex:1,overflowY:"auto",padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
+                {dashModal.items.length===0
+                  ?<p style={{color:t3,fontSize:13,textAlign:"center",padding:"24px 0"}}>Nothing to show.</p>
+                  :dashModal.items.map(dashModal.render)
+                }
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showSendToPharmacy&&selPat&&(
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setShowSendToPharmacy(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:80,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+            <motion.div initial={{y:20,opacity:0,scale:.97}} animate={{y:0,opacity:1,scale:1}} exit={{y:16,opacity:0}} transition={{type:"spring",damping:26,stiffness:300}} onClick={e=>e.stopPropagation()} style={{background:"var(--bg)",borderRadius:20,padding:24,width:"100%",maxWidth:400,border:`1px solid ${b1}`,boxShadow:"0 20px 60px rgba(0,0,0,.2)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+                <div style={{width:40,height:40,borderRadius:12,background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><User size={18} color={DocAC}/></div>
+                <div><h3 style={{color:t1,fontSize:16,fontWeight:700,margin:0}}>Send to Pharmacy</h3><p style={{color:t3,fontSize:12,margin:0}}>{selPat.fullName}</p></div>
+              </div>
+              <div style={{padding:"10px 14px",background:"var(--s2)",borderRadius:12,marginBottom:16,display:"flex",flexDirection:"column",gap:5}}>
+                {[["Patient",selPat.fullName],[patProfile?.dob&&"DOB",patProfile?.dob],[patProfile?.blood_type&&"Blood Type",patProfile?.blood_type],[(patProfile?.allergies?.length>0)&&"Allergies",(patProfile?.allergies||[]).join(", ")],[(patProfile?.medical_conditions?.length>0)&&"Conditions",(patProfile?.medical_conditions||[]).join(", ")],[patMeds.length>0&&"Medications",patMeds.map(m=>m.medicationName).join(", ")]].filter(([k])=>k).map(([k,v])=>(
+                  <div key={k} style={{display:"flex",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".06em",minWidth:76,paddingTop:1,flexShrink:0}}>{k}</span><span style={{color:t1,fontSize:12}}>{v||"—"}</span></div>
+                ))}
+              </div>
+              {sendToPharmacyDone?(
+                <div style={{display:"flex",alignItems:"center",gap:8,color:"var(--gr)",fontSize:13,fontWeight:600,justifyContent:"center",padding:"8px 0"}}><CheckCircle2 size={16}/> Sent to pharmacy.</div>
+              ):chatContacts.length===0?(
+                <div style={{textAlign:"center",padding:"8px 0"}}>
+                  <p style={{color:t3,fontSize:13,marginBottom:12}}>No pharmacy contacts yet. Add one in Messages first.</p>
+                  <button onClick={()=>{setShowSendToPharmacy(false);setPage("messages");}} style={{padding:"9px 18px",borderRadius:11,border:"none",background:DocAC,color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:700}}>Go to Messages</button>
+                </div>
+              ):(
+                <>
+                  <p style={{color:t3,fontSize:12,marginBottom:8}}>Select pharmacy:</p>
+                  <div style={{display:"flex",flexDirection:"column",gap:7,maxHeight:200,overflowY:"auto"}}>
+                    {chatContacts.map(ph=>(
+                      <button key={ph.id} onClick={()=>sendPatientToPharmacy(ph)} disabled={sendToPharmacyBusy} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",fontFamily:"inherit",textAlign:"left",transition:"border-color .15s"}} onMouseEnter={e=>e.currentTarget.style.borderColor=DocAC} onMouseLeave={e=>e.currentTarget.style.borderColor=b1}>
+                        <div style={{width:32,height:32,borderRadius:"50%",background:"linear-gradient(135deg,#7c3aed,#6d28d9)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{color:"#fff",fontSize:11,fontWeight:800}}>{ph.name[0]?.toUpperCase()}</span></div>
+                        <div style={{flex:1,minWidth:0}}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ph.name}</p><p style={{color:t3,fontSize:11,margin:0}}>{ph.pharmacy||ph.email||""}</p></div>
+                        {sendToPharmacyBusy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite",color:t3,flexShrink:0}}/>:<Send size={12} color={DocAC} style={{flexShrink:0}}/>}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* ── Mobile bottom nav — hidden inside open chat so it never overlaps input ── */}
       {isMob&&!(page==="messages"&&selChat)&&(
         <nav className="btabs">

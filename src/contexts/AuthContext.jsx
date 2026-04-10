@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, useRef } from "react";
 import { supabase } from "../supabase";
 import { loadMedications } from "../lib/medications";
-import { loadTodaysTaken } from "../lib/adherence";
+import { loadTodaysDoseLogs } from "../lib/adherence";
 
 const AuthContext = createContext({});
 export const useAuth = () => useContext(AuthContext);
@@ -16,14 +16,14 @@ function cacheWrite(uid, key, val) {
 export function AuthProvider({ children }) {
   const [user, setUser]                     = useState(undefined);
   const [userRole, setUserRole]             = useState(null);
-  const [onboardingComplete, setOnboarding] = useState(null); 
+  const [onboardingComplete, setOnboarding] = useState(null);
   const [profileLoaded, setProfileLoaded]   = useState(false);
   const [displayName, setDisplayNameState]  = useState("");
   const [meds, setMeds]                     = useState([]);
   const [medsLoaded, setMedsLoaded]         = useState(false);
+  const [doseLogs, setDoseLogs]             = useState([]);
   const profileFetchedFor                   = useRef(null);
 
-  
   useEffect(() => {
     if (user?.id) {
       const stored = cacheRead(user.id, "display_name") || "";
@@ -51,7 +51,6 @@ export function AuthProvider({ children }) {
           await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
           return fetchProfile(uid, attempt + 1);
         }
-        
         const cachedRole = cacheRead(uid, "role") || "client";
         const cachedOnboarding = cacheRead(uid, "onboarding");
         setUserRole(cachedRole);
@@ -61,14 +60,13 @@ export function AuthProvider({ children }) {
       }
 
       const role = data.role || "client";
-      const done = data.onboarding_complete === true; 
+      const done = data.onboarding_complete === true;
       setUserRole(role);
       setOnboarding(done);
       setProfileLoaded(true);
       cacheWrite(uid, "role", role);
       cacheWrite(uid, "onboarding", done);
 
-     
       const fullName = [data.first_name, data.last_name].filter(Boolean).join(" ");
       if (fullName && !cacheRead(uid, "display_name")) {
         cacheWrite(uid, "display_name", fullName);
@@ -88,17 +86,20 @@ export function AuthProvider({ children }) {
 
   async function loadUserMeds(uid) {
     try {
-      const [medsList, takenSet] = await Promise.all([
+      const [medsList, logs] = await Promise.all([
         loadMedications(uid),
-        loadTodaysTaken(uid),
+        loadTodaysDoseLogs(uid),
       ]);
+      setDoseLogs(logs);
+      const takenIds = new Set(logs.map(r => r.medication_id));
       const merged = (medsList || []).map(m => ({
         ...m,
-        taken: takenSet.has(m.id),
+        taken: takenIds.has(m.id),
       }));
       setMeds(merged);
     } catch {
       setMeds([]);
+      setDoseLogs([]);
     } finally {
       setMedsLoaded(true);
     }
@@ -107,14 +108,12 @@ export function AuthProvider({ children }) {
   function applyUser(u) {
     setUser(u);
     if (u) {
-      
+      // Pre-fill with cache for speed but don't mark profileLoaded until DB confirms
       const cachedRole       = cacheRead(u.id, "role");
       const cachedOnboarding = cacheRead(u.id, "onboarding");
       if (cachedRole) setUserRole(cachedRole);
-      if (cachedOnboarding !== null) {
-        setOnboarding(cachedOnboarding === "true");
-        setProfileLoaded(true);
-      }
+      if (cachedOnboarding !== null) setOnboarding(cachedOnboarding === "true");
+      // Always fetch fresh from DB — profileLoaded stays false until fetchProfile resolves
       if (profileFetchedFor.current !== u.id) {
         profileFetchedFor.current = u.id;
         fetchProfile(u.id);
@@ -126,6 +125,7 @@ export function AuthProvider({ children }) {
       setOnboarding(null);
       setProfileLoaded(false);
       setMeds([]);
+      setDoseLogs([]);
       setMedsLoaded(false);
       setDisplayNameState("");
     }
@@ -157,6 +157,8 @@ export function AuthProvider({ children }) {
       meds,
       setMeds,
       medsLoaded,
+      doseLogs,
+      setDoseLogs,
     }}>
       {children}
     </AuthContext.Provider>

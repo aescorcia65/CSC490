@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, LogOut, Moon, Sun, Menu, X, Plus, Send,
   Loader2, User, ArrowRight, Pencil, HeartPulse,
-  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle
+  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
@@ -44,8 +44,23 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   });
   const [showSoundSettings, setShowSoundSettings] = useState(false);
   const msgEndRef = useRef(null);
+  const msgListRef = useRef(null);
+  const atBottomRef = useRef(true);
+  const [peerTyping, setPeerTyping] = useState(false);
+
+  function sortMsgs(arr){ return [...arr].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)); }
+
+  const doScroll = useCallback(() => {
+    if(msgListRef.current) msgListRef.current.scrollTop = msgListRef.current.scrollHeight;
+    requestAnimationFrame(() => {
+      if(msgListRef.current) msgListRef.current.scrollTop = msgListRef.current.scrollHeight;
+    });
+  }, []);
   const [mobMenu, setMobMenu] = useState(false);
   const [showNickname, setShowNickname] = useState(false);
+  const [phaNotifs, setPhaNotifs] = useState([]);
+  const [showNotifPanel, setShowNotifPanel] = useState(false);
+  const unreadNotifCount = phaNotifs.filter(n => !n.read_at).length;
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t2 = "var(--t2)", t3 = "var(--t3)", b1 = "var(--b1)";
   const PhAC = "var(--pha-p)";
@@ -57,9 +72,12 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const SOUND_PROFILES = {
     standard: { label: "Standard", desc: "Clear double-tone", tones: [[880, "sine", 0, 0.06], [1320, "sine", 0.07, 0.18]] },
     urgent: { label: "Urgent", desc: "Triple alert — high priority", tones: [[660, "square", 0, 0.06], [880, "square", 0.07, 0.06], [1100, "square", 0.14, 0.12]] },
-    subtle: { label: "Subtle", desc: "Soft single tone", tones: [[528, "sine", 0, 0.18]] },
-    chime: { label: "Chime", desc: "Ascending clinical chime", tones: [[523, "sine", 0, 0.12], [659, "sine", 0.12, 0.12], [784, "sine", 0.24, 0.2], [1047, "sine", 0.36, 0.16]] },
-    pulse: { label: "Pulse", desc: "Double pulse", tones: [[700, "sine", 0, 0.05], [700, "sine", 0.1, 0.05]] },
+    subtle: { label: "Subtle", desc: "Soft single tone", tones: [[528, "sine", 0, 0.22]] },
+    chime: { label: "Chime", desc: "Ascending 4-note chime", tones: [[523, "sine", 0, 0.12], [659, "sine", 0.12, 0.12], [784, "sine", 0.24, 0.2], [1047, "sine", 0.36, 0.16]] },
+    pulse: { label: "Pulse", desc: "Quick double pulse", tones: [[700, "sine", 0, 0.05], [700, "sine", 0.12, 0.05]] },
+    ding: { label: "Ding", desc: "Single bright ding", tones: [[1047, "sine", 0, 0.2]] },
+    low: { label: "Low", desc: "Deep low tone", tones: [[220, "sine", 0, 0.25], [330, "sine", 0.05, 0.18]] },
+    tri: { label: "Tri-tone", desc: "Classic tri-tone", tones: [[523, "sine", 0, 0.1], [659, "sine", 0.11, 0.1], [523, "sine", 0.22, 0.14]] },
   };
 
   async function handleSignOut() {
@@ -193,11 +211,27 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   }, [chatContacts]);
   useEffect(() => {
     if (!selChat || !user?.id) return;
+    atBottomRef.current = true;
     loadMessages(selChat.id);
   }, [selChat?.id]);
+
+  useLayoutEffect(() => {
+    if(atBottomRef.current) doScroll();
+  }, [messages, peerTyping, doScroll]);
+
   useEffect(() => {
-    msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (!selChat) return;
+    atBottomRef.current = true;
+    const t1 = setTimeout(doScroll, 50);
+    const t2 = setTimeout(doScroll, 200);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [selChat?.id, doScroll]);
+
+  function handleMsgScroll() {
+    const el = msgListRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  }
   useEffect(() => {
     if (page !== "messages" || !selChat || !user?.id) return;
     const interval = setInterval(() => {
@@ -217,7 +251,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
               const ts = data[data.length - 1].created_at;
               setChatContacts(prev => [...prev].map(c => c.id === chat.id ? { ...c, lastMessageAt: ts } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
             }
-            return data;
+            return sortMsgs(data);
           });
         });
     }, 2000);
@@ -240,7 +274,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
             if (currentChat && msg.doctor_id === currentChat.id) {
               setMessages(prev => {
                 if (prev.some(m => m.id === msg.id)) return prev;
-                return [...prev, msg];
+                return sortMsgs([...prev, msg]);
               });
               supabase.from("chat_messages").update({ read_at: new Date().toISOString() }).eq("id", msg.id).then(() => {});
             } else {
@@ -315,6 +349,27 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     );
     return () => { channels.forEach(c => supabase.removeChannel(c)); };
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!selChat?.id || !user?.id) return;
+    setPeerTyping(false);
+    const ch = supabase.channel(`typing-doc-${selChat.id}-${user.id}`);
+    ch.on("broadcast", { event: "typing" }, (payload) => {
+      if (payload.payload?.sender_id !== user.id) {
+        setPeerTyping(true);
+        clearTimeout(ch._typingTimer);
+        ch._typingTimer = setTimeout(() => setPeerTyping(false), 2500);
+      }
+    }).subscribe();
+    return () => { clearTimeout(ch._typingTimer); supabase.removeChannel(ch); };
+  }, [selChat?.id, user?.id]);
+
+  function emitTyping() {
+    if (!selChat?.id || !user?.id) return;
+    const chName = `typing-doc-${selChat.id}-${user.id}`;
+    supabase.channel(chName).send({ type: "broadcast", event: "typing", payload: { sender_id: user.id } }).catch(() => {});
+  }
+
   async function loadMessages(doctorId) {
     try {
       const { data, error } = await supabase.from("chat_messages")
@@ -323,7 +378,8 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         .eq("doctor_id", doctorId)
         .order("created_at", { ascending: true });
       if (error) { console.error("Load messages error:", error.message); return; }
-      setMessages(data || []);
+      atBottomRef.current = true;
+      setMessages(sortMsgs(data || []));
       setUnreadPerContact(prev => { const n = { ...prev }; delete n[doctorId]; return n; });
       if (data && data.length > 0) {
         const ts = data[data.length - 1].created_at;
@@ -344,7 +400,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     const now = new Date().toISOString();
     const tempId = `temp-${Date.now()}`;
     const tempMsg = { id: tempId, doctor_id: selChat.id, pharmacist_id: user.id, sender_id: user.id, body, created_at: now, read_at: null };
-    setMessages(prev => [...prev, tempMsg]);
+    setMessages(prev => sortMsgs([...prev, tempMsg]));
     setChatContacts(prev => [...prev].map(c => c.id === selChat.id ? { ...c, lastMessageAt: now } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
     try {
       const { data: msg, error } = await supabase.from("chat_messages").insert({
@@ -359,7 +415,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         setMsgInput(body);
         return;
       }
-      setMessages(prev => prev.map(m => m.id === tempId ? msg : m));
+      setMessages(prev => sortMsgs(prev.map(m => m.id === tempId ? msg : m)));
     } catch (e) {
       console.error("Send:", e);
       setMessages(prev => prev.filter(m => m.id !== tempId));
@@ -402,28 +458,111 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     setSelRx(rx); setLoading(true); setRxMeds([]);
     try { const { data } = await supabase.from("prescription_medications").select("*").eq("prescription_id", rx.id); setRxMeds(data || []); }
     catch (e) { console.error("openPrescription:", e); } finally { setLoading(false); }
+    loadRxMessages(rx.id);
   }
+
   async function claimPrescription(rx) {
     setActionBusy(true);
     try {
       await supabase.from("prescriptions").update({ pharmacist_id: user.id, updated_at: new Date().toISOString() }).eq("id", rx.id);
       setSelRx(p => p?.id === rx.id ? { ...p, pharmacist_id: user.id } : p);
       loadPrescriptions();
+      const patName = patientNames[rx.patient_id] || "Patient";
+      if (rx.doctor_id) {
+        try { await supabase.from("notifications").insert({ user_id: rx.doctor_id, type: "general", title: "Prescription claimed by pharmacy", body: `Prescription for ${patName} has been claimed and is now being reviewed by ${name}.`, related_id: rx.id }); } catch {}
+      }
+      try { await supabase.from("notifications").insert({ user_id: user.id, type: "general", title: "You claimed a prescription", body: `Prescription for ${patName} — now reviewing.`, related_id: rx.id }); } catch {}
     } catch (e) { console.error("claimPrescription:", e); } finally { setActionBusy(false); }
   }
+
   async function updateStatus(rx, newStatus) {
     setActionBusy(true);
     try {
       await supabase.from("prescriptions").update({ status: newStatus, updated_at: new Date().toISOString() }).eq("id", rx.id);
       setSelRx(p => p?.id === rx.id ? { ...p, status: newStatus } : p);
       loadPrescriptions();
+      const patName = patientNames[rx.patient_id] || "Patient";
+      const statusLabel = newStatus.replace(/_/g, " ");
+      if (rx.doctor_id) {
+        try { await supabase.from("notifications").insert({ user_id: rx.doctor_id, type: "prescription_ready", title: `Prescription ${statusLabel}`, body: `${patName}'s prescription is now: ${statusLabel}. Updated by ${name} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`, related_id: rx.id }); } catch {}
+      }
+      try { await supabase.from("notifications").insert({ user_id: user.id, type: "general", title: `Marked: ${statusLabel}`, body: `Prescription for ${patName} — status set to "${statusLabel}".`, related_id: rx.id }); } catch {}
     } catch (e) { console.error("updateStatus:", e); } finally { setActionBusy(false); }
   }
+
+  // Load pharmacist notifications + poll every 15s as fallback
+  useEffect(() => {
+    if (!user?.id) return;
+    const load = () => supabase.from("notifications").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(40).then(({ data }) => setPhaNotifs(data || []));
+    load();
+    const poll = setInterval(load, 15000);
+    const ch = supabase.channel(`pha-notifs-${user.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, (p) => {
+        setPhaNotifs(prev => prev.some(n => n.id === p.new.id) ? prev : [p.new, ...prev]);
+      }).subscribe();
+    return () => { clearInterval(poll); supabase.removeChannel(ch); };
+  }, [user?.id]);
+
+  async function markNotifRead(id) {
+    setPhaNotifs(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
+    await supabase.from("notifications").update({ read_at: new Date().toISOString() }).eq("id", id);
+  }
+  async function markAllNotifsRead() {
+    const ids = phaNotifs.filter(n => !n.read_at).map(n => n.id);
+    if (!ids.length) return;
+    setPhaNotifs(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
+    await supabase.from("notifications").update({ read_at: new Date().toISOString() }).in("id", ids);
+  }
+
+  const [rxMessages, setRxMessages] = useState([]);
+  const [rxMsgInput, setRxMsgInput] = useState("");
+  const [rxMsgSending, setRxMsgSending] = useState(false);
+  const [dashModal, setDashModal] = useState(null);
+
+  async function loadRxMessages(rxId) {
+    const { data } = await supabase.from("prescription_messages").select("*").eq("prescription_id", rxId).order("created_at", { ascending: true });
+    setRxMessages(data || []);
+  }
+
+  async function sendRxMessage() {
+    if (!rxMsgInput.trim() || !selRx || rxMsgSending) return;
+    const body = rxMsgInput.trim();
+    setRxMsgInput("");
+    // Optimistic insert
+    const tempId = `temp-${Date.now()}`;
+    const tempMsg = { id: tempId, prescription_id: selRx.id, sender_id: user.id, body, created_at: new Date().toISOString() };
+    setRxMessages(prev => [...prev, tempMsg]);
+    try {
+      const { data: msg, error } = await supabase.from("prescription_messages").insert({ prescription_id: selRx.id, sender_id: user.id, body }).select("*").single();
+      if (error) throw error;
+      setRxMessages(prev => prev.map(m => m.id === tempId ? msg : m));
+      // Notify doctor of new rx chat message
+      if (selRx.doctor_id) {
+        try {
+          await supabase.from("notifications").insert({ user_id: selRx.doctor_id, type: "general", title: "New prescription message", body: `${name} sent a message about a prescription for ${patientNames[selRx.patient_id] || "a patient"}.`, related_id: selRx.id });
+        } catch {}
+      }
+    } catch {
+      setRxMessages(prev => prev.filter(m => m.id !== tempId));
+      setRxMsgInput(body);
+    }
+  }
+
+  useEffect(() => {
+    if (!selRx?.id) return;
+    // Poll every 3s as fallback
+    const poll = setInterval(() => loadRxMessages(selRx.id), 3000);
+    const ch = supabase.channel(`rx-msg-pha-${selRx.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "prescription_messages", filter: `prescription_id=eq.${selRx.id}` }, (payload) => {
+        setRxMessages(prev => prev.some(m => m.id === payload.new.id) ? prev : [...prev, payload.new]);
+      }).subscribe();
+    return () => { clearInterval(poll); supabase.removeChannel(ch); };
+  }, [selRx?.id]);
   const pendingCount = prescriptions.filter(p => p.status === "pending_pharmacist" || p.status === "pending_fill").length;
   const readyCount = prescriptions.filter(p => p.status === "ready" || p.status === "filled" || p.status === "picked_up").length;
   const filtered = prescriptions.filter(p => !search || (patientNames[p.patient_id] || "").toLowerCase().includes(search.toLowerCase()));
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: "var(--bg)" }}>
+    <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
       {}
       {!isMob && (
         <aside className="sidebar">
@@ -467,7 +606,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         </aside>
       )}
       {}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
         <header className="tb">
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             {isMob && (
@@ -478,17 +617,23 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
             {!isMob && <span className="role-badge role-pharmacist shrink-0">Pharmacist</span>}
             <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: .9 }} onClick={() => setShowNickname(true)} title="Edit display name" style={{ width: 24, height: 24, borderRadius: 7, border: `1px solid ${b1}`, background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0 }}><Pencil size={11} /></motion.button>
           </div>
-          <button type="button" onClick={() => setLight(!light)} className="shrink-0" style={{ display: "flex", alignItems: "center", gap: 6, padding: isMob ? "6px 10px" : "6px 13px", borderRadius: 99, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", fontSize: 12, fontWeight: 500, color: t2 }}>
-            {light ? <Moon size={13} color={PhAC} /> : <Sun size={13} color="var(--am)" />}{!isMob && (light ? "Dark" : "Light")}
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button onClick={() => setShowNotifPanel(p => !p)} style={{ position: "relative", width: 34, height: 34, borderRadius: 10, border: `1px solid ${b1}`, background: showNotifPanel ? "var(--pha-pd)" : "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: unreadNotifCount > 0 ? PhAC : t3, flexShrink: 0 }}>
+              <Bell size={15} />
+              {unreadNotifCount > 0 && <span style={{ position: "absolute", top: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: "var(--ro)", color: "#fff", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{unreadNotifCount > 9 ? "9+" : unreadNotifCount}</span>}
+            </button>
+            <button type="button" onClick={() => setLight(!light)} className="shrink-0" style={{ display: "flex", alignItems: "center", gap: 6, padding: isMob ? "6px 10px" : "6px 13px", borderRadius: 99, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", fontSize: 12, fontWeight: 500, color: t2 }}>
+              {light ? <Moon size={13} color={PhAC} /> : <Sun size={13} color="var(--am)" />}{!isMob && (light ? "Dark" : "Light")}
+            </button>
+          </div>
         </header>
-        <div style={{ flex: 1, overflowY: page === "messages" ? "hidden" : "auto", paddingBottom: isMob && !(page === "messages" && selChat) ? "calc(66px + env(safe-area-inset-bottom, 0px))" : 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", paddingBottom: isMob && !(page === "messages" && selChat) ? "calc(66px + env(safe-area-inset-bottom, 0px))" : 0 }}>
           {}
           {page === "messages" && (
-            <div style={{ height: isMob ? "calc(100dvh - 57px)" : "calc(100vh - 57px)", display: "flex", overflow: "hidden", flexDirection: isMob ? "column" : "row" }}>
+            <div style={{ flex: 1, display: "flex", overflow: "hidden", flexDirection: isMob ? "column" : "row", minHeight: 0 }}>
               {}
               {(!isMob || !selChat) && (
-              <div style={{ width: isMob ? "100%" : 280, flexShrink: 0, borderRight: isMob ? "none" : `1px solid ${b1}`, borderBottom: isMob ? `1px solid ${b1}` : "none", display: "flex", flexDirection: "column", background: "var(--s1)", maxHeight: isMob ? "100%" : undefined }}>
+              <div style={{ width: isMob ? "100%" : 280, flexShrink: 0, borderRight: isMob ? "none" : `1px solid ${b1}`, borderBottom: isMob ? `1px solid ${b1}` : "none", display: "flex", flexDirection: "column", background: "var(--s1)", minHeight: 0 }}>
                 <div style={{ padding: isMob ? "12px 12px" : "14px 16px", borderBottom: `1px solid ${b1}` }}>
                   <h2 className="text-sm sm:text-[15px]" style={{ color: t1, fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
                     <MessageSquare size={14} color={PhAC} className="shrink-0" /> Doctor Chat
@@ -555,7 +700,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
               )} {}
               {}
               {(!isMob || selChat) && (
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
                 {!selChat ? (
                   <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12 }}>
                     <MessageSquare size={32} color={t3} style={{ opacity: .2 }} />
@@ -594,7 +739,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                       </div>
                     )}
                     {}
-                    <div style={{ flex: 1, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
+                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
                       {messages.length === 0 && (
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8, padding: "60px 0" }}>
                           <Send size={22} color={t3} style={{ opacity: .2 }} />
@@ -606,9 +751,86 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                         const showDate = i === 0 || new Date(msg.created_at).toDateString() !== new Date(messages[i - 1].created_at).toDateString();
                         const groupTop = i === 0 || showDate || messages[i - 1].sender_id !== msg.sender_id;
                         const groupBottom = i === messages.length - 1 || messages[i + 1].sender_id !== msg.sender_id;
+                        const isRead = isMe && msg.read_at;
+
+                        // Detect PATREF JSON referral (new format)
+                        const isNewPatRef = !isMe && msg.body.startsWith("PATREF:");
+                        let newPatData = null;
+                        if (isNewPatRef) {
+                          try { newPatData = JSON.parse(msg.body.slice(7)); } catch(e) {}
+                        }
+
+                        // Detect legacy 📋 Re: format
+                        const bodyLines = msg.body.split("\n");
+                        const isLegacyRef = bodyLines[0]?.startsWith("📋 Re:");
+                        const displayBody = isLegacyRef ? bodyLines.slice(1).join("\n").trim() : msg.body;
+                        let legacyCard = null;
+                        if (isLegacyRef) {
+                          const refLine = bodyLines[0].replace("📋 Re:", "").trim();
+                          const nameMatch = refLine.match(/^([^(]+)/);
+                          const dobMatch = refLine.match(/DOB:\s*([^·)]+)/);
+                          const bloodMatch = refLine.match(/Blood:\s*([^·]+)/);
+                          const allergyMatch = refLine.match(/Allergies:\s*([^·]+)/);
+                          const condMatch = refLine.match(/Conditions:\s*([^·]+)/);
+                          legacyCard = { name: nameMatch?.[1]?.replace(/\(.*/, "").trim(), dob: dobMatch?.[1]?.trim(), blood: bloodMatch?.[1]?.trim(), allergies: allergyMatch?.[1]?.trim(), conditions: condMatch?.[1]?.trim() };
+                        }
+
+                        // If new PATREF format, render standalone referral card (not a bubble)
+                        if (isNewPatRef && newPatData) {
+                          return (
+                            <div key={msg.id} style={{ display: "block", width: "100%", marginTop: 16, marginBottom: 4 }}>
+                              {showDate && <div style={{ textAlign: "center", margin: "16px 0 14px" }}><span style={{ padding: "4px 16px", borderRadius: 99, fontSize: 10, background: "var(--s2)", border: "1px solid var(--b0)", color: t3, fontWeight: 700, letterSpacing: ".03em" }}>{new Date(msg.created_at).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</span></div>}
+                              <div style={{ background: "var(--s1)", border: "1.5px solid rgba(14,116,144,.3)", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 16px rgba(14,116,144,.1)", maxWidth: isMob ? "95%" : "80%" }}>
+                                <div style={{ padding: "10px 16px", background: "rgba(14,116,144,.09)", borderBottom: "1px solid rgba(14,116,144,.2)", display: "flex", alignItems: "center", gap: 8 }}>
+                                  <FileText size={14} color="var(--doc-p)" />
+                                  <span style={{ color: "var(--doc-p)", fontSize: 12, fontWeight: 700, flex: 1 }}>Patient Referral from Dr. {selChat.name}</span>
+                                  <span style={{ color: t3, fontSize: 10 }}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                                </div>
+                                <div style={{ padding: "10px 16px", display: "flex", flexDirection: "column", gap: 6, borderBottom: "1px solid var(--b0)" }}>
+                                  {[["Patient", newPatData.name], ["DOB", newPatData.dob], ["Blood Type", newPatData.blood], ["Allergies", (newPatData.allergies||[]).join(", ")], ["Conditions", (newPatData.conditions||[]).join(", ")], ["Medications", (newPatData.meds||[]).map(m=>m.name).join(", ")]].filter(([,v])=>v).map(([k,v])=>(
+                                    <div key={k} style={{ display: "flex", gap: 10 }}>
+                                      <span style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", minWidth: 80, flexShrink: 0, paddingTop: 1 }}>{k}</span>
+                                      <span style={{ color: k==="Allergies"||k==="Blood Type" ? "var(--ro)" : k==="Conditions" ? "var(--am)" : t1, fontSize: 12, fontWeight: k==="Patient" ? 700 : 400, wordBreak: "break-word" }}>{v}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div style={{ padding: "10px 16px" }}>
+                                  <p style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>Action</p>
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                                    {[
+                                      { label: "Received", color: "var(--gr)", bg: "rgba(5,150,105,.1)", border: "rgba(5,150,105,.25)" },
+                                      { label: "Processing", color: "var(--am)", bg: "rgba(217,119,6,.1)", border: "rgba(217,119,6,.25)" },
+                                      { label: "Ready for Pickup", color: "var(--doc-p)", bg: "rgba(14,116,144,.08)", border: "rgba(14,116,144,.25)" },
+                                      { label: "Out of Stock", color: "var(--ro)", bg: "rgba(185,28,28,.08)", border: "rgba(185,28,28,.25)" },
+                                      { label: "Need Clarification", color: t2, bg: "var(--s2)", border: "var(--b1)" },
+                                    ].map(act => (
+                                      <button key={act.label} onClick={() => {
+                                        const reply = `REFACTION:${newPatData.name}:${act.label}`;
+                                        setMsgInput(reply);
+                                        setTimeout(() => sendMessage(), 50);
+                                      }} style={{ padding: "5px 12px", borderRadius: 99, fontSize: 11, fontWeight: 600, border: `1px solid ${act.border}`, background: act.bg, color: act.color, cursor: "pointer", fontFamily: "inherit" }}>
+                                        {act.label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        }
+
                         const bubbleRadius = isMe
                           ? `${groupTop ? "18px" : "6px"} 18px 18px ${groupBottom ? "18px" : "6px"}`
                           : `18px ${groupTop ? "18px" : "6px"} ${groupBottom ? "18px" : "6px"} 18px`;
+
+                        // Detect REFACTION reply to render nicely
+                        const isRefAction = msg.body.startsWith("REFACTION:");
+                        let refActionDisplay = msg.body;
+                        if (isRefAction) {
+                          const parts = msg.body.split(":");
+                          refActionDisplay = `Status update for ${parts[1]}: ${parts[2]}`;
+                        }
+
                         return (
                           <div key={msg.id} style={{ display: "block", width: "100%", marginTop: groupTop ? 14 : 3 }}>
                             {showDate && (
@@ -626,24 +848,53 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                                   </div>
                                 )}
                               </div>
-                              <div style={{ maxWidth: isMob ? "min(80%, 300px)" : "72%", minWidth: 0, display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
+                              <div style={{ maxWidth: isMob ? "min(85%, 340px)" : "78%", minWidth: 0, display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
                                 {groupTop && !isMe && <p style={{ color: t3, fontSize: 10, marginBottom: 4, fontWeight: 600, paddingLeft: 2 }}>Dr. {selChat.name}</p>}
+                                {isLegacyRef && legacyCard && (
+                                  <div style={{ marginBottom: 6, width: "100%", background: "var(--s1)", border: `1.5px solid rgba(14,116,144,.25)`, borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(14,116,144,.08)" }}>
+                                    <div style={{ padding: "7px 12px", background: "rgba(14,116,144,.08)", borderBottom: "1px solid rgba(14,116,144,.15)", display: "flex", alignItems: "center", gap: 6 }}>
+                                      <FileText size={12} color="var(--doc-p)" /><span style={{ color: "var(--doc-p)", fontSize: 11, fontWeight: 700 }}>Patient Reference</span>
+                                    </div>
+                                    <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 5 }}>
+                                      {legacyCard.name && <div style={{ display: "flex", gap: 8 }}><span style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", minWidth: 72 }}>Patient</span><span style={{ color: t1, fontSize: 12, fontWeight: 700 }}>{legacyCard.name}</span></div>}
+                                      {legacyCard.dob && <div style={{ display: "flex", gap: 8 }}><span style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", minWidth: 72 }}>DOB</span><span style={{ color: t1, fontSize: 12 }}>{legacyCard.dob}</span></div>}
+                                      {legacyCard.blood && <div style={{ display: "flex", gap: 8 }}><span style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", minWidth: 72 }}>Blood</span><span style={{ color: "var(--ro)", fontSize: 12, fontWeight: 700 }}>{legacyCard.blood}</span></div>}
+                                      {legacyCard.allergies && <div style={{ display: "flex", gap: 8 }}><span style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", minWidth: 72 }}>Allergies</span><span style={{ color: "var(--ro)", fontSize: 12 }}>{legacyCard.allergies}</span></div>}
+                                      {legacyCard.conditions && <div style={{ display: "flex", gap: 8 }}><span style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", minWidth: 72 }}>Conditions</span><span style={{ color: "var(--am)", fontSize: 12 }}>{legacyCard.conditions}</span></div>}
+                                    </div>
+                                  </div>
+                                )}
                                 <div style={{ padding: "9px 14px", borderRadius: bubbleRadius, background: isMe ? PhAC : "var(--s1)", border: isMe ? "none" : `1px solid ${b1}`, boxShadow: isMe ? "0 2px 8px rgba(124,58,237,.18)" : "0 1px 3px rgba(0,0,0,.06)", maxWidth: "100%", transition: "box-shadow .2s" }}>
-                                  <p style={{ color: isMe ? "#fff" : t1, fontSize: isMob ? 13 : 13.5, lineHeight: 1.6, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{msg.body}</p>
+                                  <p style={{ color: isMe ? "#fff" : t1, fontSize: isMob ? 13 : 13.5, lineHeight: 1.6, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{isRefAction ? refActionDisplay : (displayBody || msg.body)}</p>
                                 </div>
-                                {groupBottom && <p style={{ color: t3, fontSize: 9, marginTop: 4, textAlign: isMe ? "right" : "left", paddingLeft: isMe ? 0 : 2, paddingRight: isMe ? 2 : 0 }}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>}
+                                {groupBottom && (
+                                  <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, flexDirection: isMe ? "row-reverse" : "row" }}>
+                                    <p style={{ color: t3, fontSize: 9, textAlign: isMe ? "right" : "left", paddingLeft: isMe ? 0 : 2, paddingRight: isMe ? 2 : 0, margin: 0 }}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+                                    {isMe && <CheckCheck size={14} color={isRead ? "#22c55e" : t3} strokeWidth={isRead ? 2.5 : 2} />}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </div>
                         );
                       })}
+                      {peerTyping && (
+                        <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginTop: 10 }}>
+                          <div style={{ width: 26, height: 26, borderRadius: "50%", background: "linear-gradient(135deg,#0e7490,#155e75)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            <span style={{ color: "#fff", fontSize: 10, fontWeight: 800 }}>{selChat.name[0]?.toUpperCase()}</span>
+                          </div>
+                          <div style={{ padding: "10px 14px", borderRadius: "18px 18px 18px 3px", background: "var(--s1)", border: `1px solid ${b1}`, display: "flex", alignItems: "center", gap: 4 }}>
+                            {[0, 1, 2].map(d => <span key={d} style={{ width: 5, height: 5, borderRadius: "50%", background: t3, display: "inline-block", animation: `typingDot 1.2s ${d * 0.2}s infinite ease-in-out` }} />)}
+                          </div>
+                        </div>
+                      )}
                       <div ref={msgEndRef} />
                     </div>
                     {}
-                    <div style={{ padding: `10px 14px calc(10px + env(safe-area-inset-bottom, 0px))`, background: "var(--s1)", borderTop: `1px solid ${b1}`, flexShrink: 0, position: "relative", zIndex: 10 }}>
+                    <div style={{ flexShrink: 0, borderTop: `1px solid ${b1}`, background: "var(--s1)", position: "relative", zIndex: 10 }}>
                       <AnimatePresence>
                         {showSoundSettings && (
-                          <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }} style={{ marginBottom: 10, padding: "12px 14px", background: "var(--s2)", border: `1px solid ${b1}`, borderRadius: 12 }}>
+                          <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }} style={{ maxHeight: "40vh", overflowY: "auto", borderBottom: `1px solid ${b1}`, padding: "12px 14px", background: "var(--s2)" }}>
                             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                               <span style={{ color: t1, fontSize: 12, fontWeight: 700 }}>Notification sounds</span>
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -670,38 +921,40 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                           </motion.div>
                         )}
                       </AnimatePresence>
-                      <div style={{ display: "flex", alignItems: "flex-end", gap: 9 }}>
-                        <div style={{ flex: 1, background: "var(--s2)", border: `1.5px solid ${b1}`, borderRadius: 20, padding: "10px 14px" }}
-                          onClick={e => e.currentTarget.querySelector("textarea")?.focus()}>
-                          <textarea
-                            value={msgInput}
-                            onChange={e => setMsgInput(e.target.value)}
-                            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-                            placeholder={`Message Dr. ${selChat.name}…`}
-                            rows={isMob ? 1 : 2}
-                            style={{ border: "none", background: "transparent", resize: "none", padding: 0,
-                              fontSize: 16, color: t1, outline: "none", fontFamily: "inherit",
-                              lineHeight: 1.6, width: "100%", display: "block",
-                              WebkitAppearance: "none", touchAction: "manipulation" }} />
-                        </div>
-                        <button onClick={sendMessage}
-                          style={{ width: 44, height: 44, borderRadius: "50%", border: "none", flexShrink: 0,
-                            background: PhAC, color: "#fff",
-                            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-                            boxShadow: msgInput.trim() ? "0 4px 14px rgba(124,58,237,.35)" : "none",
-                            transition: "all .2s", opacity: msgInput.trim() ? 1 : 0.45,
-                            WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}>
-                          {msgSending ? <Loader2 size={15} style={{ animation: "spin360 .7s linear infinite" }} /> : <Send size={15} />}
-                        </button>
-                      </div>
-                      {!isMob && (
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 5 }}>
-                          <p style={{ color: t3, fontSize: 10, margin: 0 }}>Enter to send · Shift+Enter for new line</p>
-                          <button onClick={() => setShowSoundSettings(p => !p)} style={{ background: "none", border: "none", cursor: "pointer", color: soundEnabled ? PhAC : t3, fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", gap: 4, padding: 0, fontFamily: "inherit" }}>
-                            {soundEnabled ? <Bell size={11} /> : <BellOff size={11} />} Sound
+                      <div style={{ padding: `10px 14px calc(10px + env(safe-area-inset-bottom, 0px))` }}>
+                        <div style={{ display: "flex", alignItems: "flex-end", gap: 9 }}>
+                          <div style={{ flex: 1, background: "var(--s2)", border: `1.5px solid ${b1}`, borderRadius: 20, padding: "10px 14px" }}
+                            onClick={e => e.currentTarget.querySelector("textarea")?.focus()}>
+                            <textarea
+                              value={msgInput}
+                              onChange={e => { setMsgInput(e.target.value); emitTyping(); }}
+                              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+                              placeholder={`Message Dr. ${selChat.name}…`}
+                              rows={isMob ? 1 : 2}
+                              style={{ border: "none", background: "transparent", resize: "none", padding: 0,
+                                fontSize: 16, color: t1, outline: "none", fontFamily: "inherit",
+                                lineHeight: 1.6, width: "100%", display: "block",
+                                WebkitAppearance: "none", touchAction: "manipulation" }} />
+                          </div>
+                          <button onClick={sendMessage}
+                            style={{ width: 44, height: 44, borderRadius: "50%", border: "none", flexShrink: 0,
+                              background: PhAC, color: "#fff",
+                              cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                              boxShadow: msgInput.trim() ? "0 4px 14px rgba(124,58,237,.35)" : "none",
+                              transition: "all .2s", opacity: msgInput.trim() ? 1 : 0.45,
+                              WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}>
+                            {msgSending ? <Loader2 size={15} style={{ animation: "spin360 .7s linear infinite" }} /> : <Send size={15} />}
                           </button>
                         </div>
-                      )}
+                        {!isMob && (
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 5 }}>
+                            <p style={{ color: t3, fontSize: 10, margin: 0 }}>Enter to send · Shift+Enter for new line</p>
+                            <button onClick={() => setShowSoundSettings(p => !p)} style={{ background: "none", border: "none", cursor: "pointer", color: soundEnabled ? PhAC : t3, fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", gap: 4, padding: 0, fontFamily: "inherit" }}>
+                              {soundEnabled ? <Bell size={11} /> : <BellOff size={11} />} Sound
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </>
                 )}
@@ -711,21 +964,24 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
           )}
           {}
           {page === "dashboard" && (
-            <div className="w-full min-w-0 max-w-[760px] mx-auto" style={{ padding: isMob ? "16px 14px calc(8px + env(safe-area-inset-bottom, 0px))" : "30px 22px 44px" }}>
+            <div className="w-full min-w-0 max-w-[760px] mx-auto" style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: isMob ? "16px 14px calc(8px + env(safe-area-inset-bottom, 0px))" : "30px 22px 44px" }}>
               <motion.div className="au" style={{ marginBottom: isMob ? 20 : 28 }}>
                 <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{ color: t1, fontFamily: "'Playfair Display',serif", fontStyle: "italic", fontWeight: 600 }}>
                   Welcome, {name.split(" ")[0]}.
                 </h2>
-                <p style={{ color: t3, fontSize: 13, marginTop: 6, lineHeight: 1.45 }}>Manage prescriptions and communicate with doctors.</p>
+                <p style={{ color: t3, fontSize: 13, marginTop: 6, lineHeight: 1.45 }}></p>
               </motion.div>
               {}
               <div className="mb-6 grid w-full min-w-0 grid-cols-1 gap-3 min-[380px]:grid-cols-3">
                 {[
-                  { l: "Total prescriptions", v: prescriptions.length, c: PhAC, bg: "var(--pha-pd)" },
-                  { l: "Pending", v: pendingCount, c: "var(--am)", bg: "rgba(217,119,6,.1)" },
-                  { l: "Ready / Filled", v: readyCount, c: "var(--gr)", bg: "rgba(5,150,105,.1)" },
+                  { l: "Total prescriptions", v: prescriptions.length, c: PhAC, bg: "var(--pha-pd)",
+                    items: prescriptions, render: rx => <div key={rx.id} onClick={() => { setPage("prescriptions"); openPrescription(rx); setDashModal(null); }} style={{ padding: "10px 14px", borderRadius: 12, border: `1px solid ${b1}`, background: "var(--s2)", cursor: "pointer" }} onMouseEnter={e => e.currentTarget.style.background = "var(--pha-pd)"} onMouseLeave={e => e.currentTarget.style.background = "var(--s2)"}><p style={{ color: t1, fontSize: 13, fontWeight: 700, margin: 0 }}>{patientNames[rx.patient_id] || "Patient"}</p><p style={{ color: t3, fontSize: 11, margin: "3px 0 0" }}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status}</p></div> },
+                  { l: "Pending", v: pendingCount, c: "var(--am)", bg: "rgba(217,119,6,.1)",
+                    items: prescriptions.filter(p => p.status === "pending_pharmacist" || p.status === "pending_fill"), render: rx => <div key={rx.id} onClick={() => { setPage("prescriptions"); openPrescription(rx); setDashModal(null); }} style={{ padding: "10px 14px", borderRadius: 12, border: `1px solid rgba(217,119,6,.25)`, background: "rgba(217,119,6,.06)", cursor: "pointer" }}><p style={{ color: t1, fontSize: 13, fontWeight: 700, margin: 0 }}>{patientNames[rx.patient_id] || "Patient"}</p><p style={{ color: "var(--am)", fontSize: 11, margin: "3px 0 0" }}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status}</p></div> },
+                  { l: "Ready / Filled", v: readyCount, c: "var(--gr)", bg: "rgba(5,150,105,.1)",
+                    items: prescriptions.filter(p => p.status === "ready" || p.status === "filled" || p.status === "picked_up"), render: rx => <div key={rx.id} onClick={() => { setPage("prescriptions"); openPrescription(rx); setDashModal(null); }} style={{ padding: "10px 14px", borderRadius: 12, border: `1px solid rgba(5,150,105,.25)`, background: "rgba(5,150,105,.06)", cursor: "pointer" }}><p style={{ color: t1, fontSize: 13, fontWeight: 700, margin: 0 }}>{patientNames[rx.patient_id] || "Patient"}</p><p style={{ color: "var(--gr)", fontSize: 11, margin: "3px 0 0" }}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status}</p></div> },
                 ].map((s, i) => (
-                  <motion.div key={s.l} className={`au card d${i + 1} min-w-0 overflow-hidden`} style={{ padding: isMob ? "12px 11px" : "18px 16px", textAlign: "center" }}>
+                  <motion.div key={s.l} className={`au card d${i + 1} min-w-0 overflow-hidden`} onClick={() => setDashModal({ title: s.l, items: s.items, render: s.render })} style={{ padding: isMob ? "12px 11px" : "18px 16px", textAlign: "center", cursor: "pointer" }}>
                     <div style={{ width: isMob ? 34 : 38, height: isMob ? 34 : 38, borderRadius: 11, background: s.bg, margin: "0 auto 8px", display: "flex", alignItems: "center", justifyContent: "center" }}><Pill size={isMob ? 15 : 17} color={s.c} /></div>
                     <p className="tabular-nums" style={{ color: t1, fontSize: isMob ? 19 : 22, fontFamily: "'Playfair Display',serif", fontStyle: "italic" }}>{s.v}</p>
                     <p className="line-clamp-2 leading-snug" style={{ color: t3, fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", marginTop: 4 }}>{s.l}</p>
@@ -771,7 +1027,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
           )}
           {}
           {page === "prescriptions" && (
-            <div className="w-full min-w-0 max-w-[900px] mx-auto" style={{ padding: isMob ? "16px 14px calc(8px + env(safe-area-inset-bottom, 0px))" : "30px 22px 44px" }}>
+            <div className="w-full min-w-0 max-w-[900px] mx-auto" style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: isMob ? "16px 14px calc(8px + env(safe-area-inset-bottom, 0px))" : "30px 22px 44px" }}>
               {!selRx ? (
                 <>
                   <motion.div className="au" style={{ marginBottom: isMob ? 18 : 22 }}>
@@ -885,6 +1141,32 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                           </div>
                         )}
                       </div>
+                      <div className="card w-full min-w-0" style={{ padding: 0, overflow: "hidden" }}>
+                        <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--b0)", display: "flex", alignItems: "center", gap: 7 }}>
+                          <MessageSquare size={13} color={PhAC} />
+                          <h4 style={{ color: t1, fontSize: 13, fontWeight: 600, margin: 0 }}>Prescription Chat</h4>
+                        </div>
+                        <div style={{ height: 260, overflowY: "auto", padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6, background: "var(--bg)" }}>
+                          {rxMessages.length === 0 && <p style={{ color: t3, fontSize: 12, textAlign: "center", margin: "auto 0" }}>No messages. Send a message to the doctor.</p>}
+                          {rxMessages.map(m => {
+                            const isMe = m.sender_id === user.id;
+                            return (
+                              <div key={m.id} style={{ display: "flex", justifyContent: isMe ? "flex-end" : "flex-start" }}>
+                                <div style={{ maxWidth: "75%", padding: "7px 12px", borderRadius: isMe ? "14px 14px 3px 14px" : "14px 14px 14px 3px", background: isMe ? PhAC : "var(--s1)", border: isMe ? "none" : "1px solid var(--b1)" }}>
+                                  <p style={{ color: isMe ? "#fff" : t1, fontSize: 13, margin: 0, wordBreak: "break-word" }}>{m.body}</p>
+                                  <p style={{ color: isMe ? "rgba(255,255,255,.6)" : t3, fontSize: 9, margin: "3px 0 0", textAlign: isMe ? "right" : "left" }}>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{ padding: "8px 12px", borderTop: "1px solid var(--b0)", display: "flex", gap: 8, background: "var(--s1)" }}>
+                          <input value={rxMsgInput} onChange={e => setRxMsgInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendRxMessage(); } }} placeholder="Message doctor about this prescription…" style={{ flex: 1, border: "1px solid var(--b1)", borderRadius: 10, padding: "8px 12px", fontSize: 13, background: "var(--s2)", color: t1, outline: "none", fontFamily: "inherit" }} />
+                          <button onClick={sendRxMessage} disabled={rxMsgSending || !rxMsgInput.trim()} style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: PhAC, color: "#fff", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, opacity: rxMsgInput.trim() ? 1 : 0.5 }}>
+                            {rxMsgSending ? <Loader2 size={13} style={{ animation: "spin360 .7s linear infinite" }} /> : <Send size={13} />}
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </>
@@ -910,6 +1192,54 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       )}
       {/* ── Mobile slide-in menu ── */}
       <AnimatePresence>{showNickname && <NicknameModal currentName={name} onSave={saveName} onClose={() => setShowNickname(false)} userId={user?.id} />}</AnimatePresence>
+
+      {/* Pharmacist Notification Panel */}
+      <AnimatePresence>
+        {showNotifPanel && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowNotifPanel(false)} style={{ position: "fixed", inset: 0, zIndex: 70 }}>
+            <motion.div initial={{ opacity: 0, y: -8, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -8 }} transition={{ type: "spring", damping: 28, stiffness: 320 }} onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 58, right: isMob ? 8 : 16, width: isMob ? "calc(100vw - 16px)" : "380px", maxHeight: "72vh", display: "flex", flexDirection: "column", background: "var(--bg)", border: `1px solid ${b1}`, borderRadius: 18, boxShadow: "0 16px 48px rgba(0,0,0,.18)", overflow: "hidden", zIndex: 71 }}>
+              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${b1}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+                <h3 style={{ color: t1, fontSize: 14, fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: 7 }}>
+                  <Bell size={13} color={PhAC} /> Notifications
+                  {unreadNotifCount > 0 && <span style={{ background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{unreadNotifCount}</span>}
+                </h3>
+                {unreadNotifCount > 0 && <button onClick={markAllNotifsRead} style={{ fontSize: 11, fontWeight: 600, color: PhAC, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Mark all read</button>}
+              </div>
+              <div style={{ flex: 1, overflowY: "auto" }}>
+                {phaNotifs.length === 0 && <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: "28px 16px" }}>No notifications yet.</p>}
+                {phaNotifs.map(n => (
+                  <div key={n.id} onClick={() => markNotifRead(n.id)} style={{ padding: "12px 16px", borderBottom: `1px solid ${b1}`, cursor: "pointer", background: n.read_at ? "transparent" : "rgba(124,58,237,.04)", display: "flex", gap: 10, alignItems: "flex-start" }} onMouseEnter={e => e.currentTarget.style.background = "var(--s2)"} onMouseLeave={e => e.currentTarget.style.background = n.read_at ? "transparent" : "rgba(124,58,237,.04)"}>
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: n.read_at ? "transparent" : PhAC, flexShrink: 0, marginTop: 5 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ color: t1, fontSize: 13, fontWeight: n.read_at ? 500 : 700, margin: 0 }}>{n.title}</p>
+                      {n.body && <p style={{ color: t3, fontSize: 12, margin: "3px 0 0", lineHeight: 1.5 }}>{n.body}</p>}
+                      <p style={{ color: t3, fontSize: 10, margin: "4px 0 0" }}>{new Date(n.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {dashModal && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDashModal(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+            <motion.div initial={{ y: 20, opacity: 0, scale: .97 }} animate={{ y: 0, opacity: 1, scale: 1 }} exit={{ y: 16, opacity: 0 }} transition={{ type: "spring", damping: 26, stiffness: 300 }} onClick={e => e.stopPropagation()} style={{ background: "var(--bg)", borderRadius: 20, width: "100%", maxWidth: 440, maxHeight: "80vh", display: "flex", flexDirection: "column", border: `1px solid ${b1}`, boxShadow: "0 20px 60px rgba(0,0,0,.2)" }}>
+              <div style={{ padding: "16px 20px", borderBottom: `1px solid ${b1}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+                <h3 style={{ color: t1, fontSize: 16, fontWeight: 700, margin: 0 }}>{dashModal.title}</h3>
+                <button onClick={() => setDashModal(null)} style={{ width: 30, height: 30, borderRadius: 9, border: `1px solid ${b1}`, background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}><X size={13} /></button>
+              </div>
+              <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+                {dashModal.items.length === 0
+                  ? <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: "24px 0" }}>Nothing to show.</p>
+                  : dashModal.items.map(dashModal.render)
+                }
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <AnimatePresence>
         {mobMenu && (
           <>

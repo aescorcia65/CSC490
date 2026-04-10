@@ -47,18 +47,42 @@ export default function PrescribeModal({ patient, patientProfile, doctor, onClos
         .select("id").single();
       if (rxErr) throw rxErr;
 
-      for (const m of valid) {
-        const dosageStr = m.dosage_amount
-          ? `${m.dosage_amount} ${m.dosage_unit}`.trim()
-          : null;
-        await supabase.from("prescription_medications").insert({
-          prescription_id: rx.id,
-          medication_name: m.medication_name.trim(),
-          dosage: dosageStr,
-          frequency: m.frequency.trim() || null,
-          instructions: m.instructions.trim() || null,
-        });
+      // Bulk insert all medications in one query instead of sequential loop
+      const medRows = valid.map(m => ({
+        prescription_id: rx.id,
+        medication_name: m.medication_name.trim(),
+        dosage: m.dosage_amount ? `${m.dosage_amount} ${m.dosage_unit}`.trim() : null,
+        frequency: m.frequency?.trim() || null,
+        instructions: m.instructions?.trim() || null,
+      }));
+      await supabase.from("prescription_medications").insert(medRows);
+
+      const medNames = valid.map(m => m.medication_name.trim()).join(", ");
+      const docName = doctor.first_name || doctor.email?.split("@")[0] || "Doctor";
+
+      // Fire notifications in parallel without blocking close
+      const notifPromises = [];
+      if (pharmacistId) {
+        notifPromises.push(
+          supabase.from("notifications").insert({
+            user_id: pharmacistId, type: "general",
+            title: "New prescription received",
+            body: `Dr. ${docName} sent a prescription for ${patient.fullName || "a patient"}: ${medNames}.`,
+            related_id: rx.id
+          })
+        );
       }
+      notifPromises.push(
+        supabase.from("notifications").insert({
+          user_id: doctor.id, type: "general",
+          title: "Prescription sent to pharmacy",
+          body: `You sent: ${medNames} for ${patient.fullName || "patient"}${pharmacistId ? "" : " (no pharmacist assigned yet)"}.`,
+          related_id: rx.id
+        })
+      );
+      // Don't await — fire and forget so modal closes instantly
+      Promise.allSettled(notifPromises);
+
       onSuccess?.(); onClose();
     } catch (e) { setErr(e.message || "Could not create prescription."); } finally { setBusy(false); }
   }
