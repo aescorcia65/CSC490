@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, useRef } from "react";
 import { supabase } from "../supabase";
 import { loadMedications } from "../lib/medications";
-import { loadTodaysDoseLogs } from "../lib/adherence";
+import { loadTodaysTaken } from "../lib/adherence";
 
 const AuthContext = createContext({});
 export const useAuth = () => useContext(AuthContext);
@@ -86,20 +86,17 @@ export function AuthProvider({ children }) {
 
   async function loadUserMeds(uid) {
     try {
-      const [medsList, logs] = await Promise.all([
+      const [medsList, takenSet] = await Promise.all([
         loadMedications(uid),
-        loadTodaysDoseLogs(uid),
+        loadTodaysTaken(uid),
       ]);
-      setDoseLogs(logs);
-      const takenIds = new Set(logs.map(r => r.medication_id));
       const merged = (medsList || []).map(m => ({
         ...m,
-        taken: takenIds.has(m.id),
+        taken: takenSet.has(m.id),
       }));
       setMeds(merged);
     } catch {
       setMeds([]);
-      setDoseLogs([]);
     } finally {
       setMedsLoaded(true);
     }
