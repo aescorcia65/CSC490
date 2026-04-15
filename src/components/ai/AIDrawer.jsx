@@ -1,15 +1,11 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { motion } from "framer-motion";
-import { X, Stethoscope, Info, Loader2, Send, User, AlertTriangle } from "lucide-react";
+import { X, Stethoscope, Info, Loader2, Send, User } from "lucide-react";
 import { supabase } from "../../supabase";
 import { to12h } from "../../lib/utils";
+import { callOpenAIChat, OPENAI_CHAT_MODEL } from "../../lib/openaiChat";
 
-/**
- * Uses VITE_OPENAI_API_KEY (see .env.example). The key is bundled into the client —
- * acceptable for local/dev only. For production, proxy chat through your backend.
- */
-const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-const MODEL = "gpt-4o-mini";
+/** Health Advisor — free offline tips + openFDA; optional paid OpenAI only if VITE_ENABLE_OPENAI_EDGE=true. */
 
 function formatMedsForContext(meds) {
   if (!meds?.length) return "None recorded in MedTrack.";
@@ -52,27 +48,25 @@ function buildHealthContextBlock(profile, meds, userName) {
 }
 
 function buildSystemPrompt(healthBlock) {
-  return `You are a careful, empathetic health education assistant inside MedTrack, a personal medication-tracking app.
+  return `You are a friendly, clear health assistant inside MedTrack (a medication-tracking app). Keep it simple and natural.
 
-Your role: help the user understand their medications, adherence, lifestyle topics related to their conditions, and general health literacy — always personalized using the CONTEXT below when relevant.
+Use the CONTEXT below when it’s relevant. Keep replies easy to read (short paragraphs; bullets only when helpful).
 
-Strict rules:
-- Do NOT diagnose diseases, interpret labs, or prescribe/start/stop medications. Encourage their doctor or pharmacist for those decisions.
-- If symptoms could be urgent (chest pain, trouble breathing, stroke signs, severe bleeding, confusion, suicidal thoughts), say clearly to call emergency services (e.g. 911 in the US) or seek immediate in-person care.
-- Reference the user's allergies and conditions when discussing OTC drugs, supplements, or lifestyle tips so advice is tailored (e.g. avoid NSAIDs if relevant; always flag interaction checks with a pharmacist).
-- Keep answers concise unless the user asks for detail. Use short paragraphs or bullet points.
-- Never claim you accessed external medical records — only the CONTEXT from MedTrack below.
-- If the user asks any topic NOT related to medication, medications, adherence, or health, politely decline and say you are not able to answer that question.
+Rules:
+- Don’t diagnose, interpret labs, or tell them to start/stop prescriptions—point to their clinician or pharmacist for those calls.
+- If something could be an emergency (chest pain, trouble breathing, stroke signs, severe bleeding, confusion, thoughts of self-harm), tell them clearly to use local emergency services or go to the ER.
+- When OTC, supplements, or diet come up, remember allergies/conditions from CONTEXT when relevant.
+- Don’t claim you saw outside medical records—only what’s in CONTEXT.
+- If they go far off-topic from health/meds, briefly say you’re here for health and meds in MedTrack.
 
-CONTEXT (user-provided in MedTrack; may be incomplete):
+CONTEXT (from MedTrack; may be incomplete):
 ---
 ${healthBlock}
 ---`;
 }
 
 export default function AIDrawer({ onClose, userName, meds, userId }) {
-  const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
-  const hasKey = Boolean(apiKey?.trim());
+  const canUseAI = Boolean(userId);
 
   const [healthProfile, setHealthProfile] = useState(null);
   const [profileLoaded, setProfileLoaded] = useState(false);
@@ -111,8 +105,8 @@ export default function AIDrawer({ onClose, userName, meds, userId }) {
     const medLine = meds?.length
       ? `I can see ${meds.length} medication${meds.length > 1 ? "s" : ""} on your schedule and your saved health profile.`
       : "Add medications and complete your health profile in Settings for more personalized guidance.";
-    return `Hello${name}! I'm your MedTrack Health Advisor.\n\n${medLine}\n\nAsk about your meds, allergies, conditions, or general wellness — I'll personalize answers using what you've saved here.\n\n${hasKey ? "" : "⚠️ Add VITE_OPENAI_API_KEY to your .env file to enable AI replies."}`;
-  }, [userName, meds, hasKey]);
+    return `Hey${name}! I’m here to chat about your health and medications in plain language—no paid AI required.\n\n${medLine}\n\nAsk anything—meds, side effects, routines, or how to talk to your doctor.`;
+  }, [userName, meds]);
 
   const [msgs, setMsgs] = useState([{ from: "bot", text: welcomeText }]);
   const [openAiThread, setOpenAiThread] = useState([]);
@@ -129,39 +123,24 @@ export default function AIDrawer({ onClose, userName, meds, userId }) {
 
   const callOpenAI = useCallback(
     async (threadPlusUser) => {
-      const res = await fetch(OPENAI_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: MODEL,
-          messages: [
-            { role: "system", content: buildSystemPrompt(healthBlock) },
-            ...threadPlusUser,
-          ],
-          max_tokens: 1200,
-          temperature: 0.45,
-        }),
+      const data = await callOpenAIChat({
+        model: OPENAI_CHAT_MODEL,
+        messages: [{ role: "system", content: buildSystemPrompt(healthBlock) }, ...threadPlusUser],
+        max_tokens: 1200,
+        temperature: 0.45,
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg = json?.error?.message || res.statusText || "Request failed";
-        throw new Error(msg);
-      }
-      const text = json?.choices?.[0]?.message?.content?.trim();
+      const text = data?.choices?.[0]?.message?.content?.trim();
       if (!text) throw new Error("No reply from model");
       return text;
     },
-    [apiKey, healthBlock]
+    [healthBlock]
   );
 
   async function send(textOverride) {
     const msgText = (textOverride !== undefined ? textOverride : inp).trim();
     if (!msgText || loading) return;
-    if (!hasKey) {
-      setErr("Set VITE_OPENAI_API_KEY in .env and restart the dev server.");
+    if (!userId) {
+      setErr("Sign in to use the Health Advisor.");
       return;
     }
     if (!profileLoaded) {
@@ -217,9 +196,9 @@ export default function AIDrawer({ onClose, userName, meds, userId }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <p style={{ color: t1, fontSize: 15, fontWeight: 700 }}>Health Advisor</p>
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", display: "block", background: hasKey ? "var(--gr)" : "var(--am)", boxShadow: hasKey ? "0 0 6px var(--gr)" : "none" }} />
+            <span style={{ width: 7, height: 7, borderRadius: "50%", display: "block", background: canUseAI ? "var(--gr)" : "var(--am)", boxShadow: canUseAI ? "0 0 6px var(--gr)" : "none" }} />
             <span style={{ color: t3, fontSize: 11 }}>
-              {hasKey ? "AI · personalized to your profile" : "API key required"}
+              {canUseAI ? "Free tips · uses your profile" : "Sign in to use Health Advisor"}
             </span>
           </div>
         </div>
@@ -233,19 +212,11 @@ export default function AIDrawer({ onClose, userName, meds, userId }) {
           Educational only — not medical advice. For diagnosis, treatment, or emergencies, contact a licensed professional or emergency services.
         </p>
       </div>
-      {!hasKey && (
-        <div style={{ margin: "10px 16px 0", padding: "10px 12px", borderRadius: 10, background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.2)", display: "flex", gap: 8, alignItems: "flex-start" }}>
-          <AlertTriangle size={14} color="var(--ro)" style={{ flexShrink: 0, marginTop: 1 }} />
-          <p style={{ color: t2, fontSize: 11, lineHeight: 1.55, margin: 0 }}>
-            Create <code style={{ fontSize: 10 }}>.env</code> with <code style={{ fontSize: 10 }}>VITE_OPENAI_API_KEY=sk-...</code> and restart Vite. For production, call OpenAI from your server — do not expose keys in the browser.
-          </p>
-        </div>
-      )}
       {err && (
         <p style={{ color: "var(--ro)", fontSize: 12, margin: "10px 16px 0", padding: "0 4px" }}>{err}</p>
       )}
-      <div style={{ flex: 1, overflowY: "auto", padding: "14px 16px 8px", display: "flex", flexDirection: "column", gap: 14 }}>
-        {msgs.length === 1 && hasKey && (
+      <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y", padding: "14px 16px 8px", display: "flex", flexDirection: "column", gap: 14 }}>
+        {msgs.length === 1 && canUseAI && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
             {chips.map((c) => (
               <button
@@ -293,21 +264,21 @@ export default function AIDrawer({ onClose, userName, meds, userId }) {
         <div style={{ display: "flex", gap: 9, alignItems: "flex-end" }}>
           <input
             value={inp}
-            placeholder={hasKey ? "Ask about your health or medications…" : "Configure API key to chat…"}
+            placeholder={canUseAI ? "Ask about your health or medications…" : "Sign in to chat…"}
             onChange={(e) => setInp(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            disabled={!hasKey || !profileLoaded}
-            style={{ flex: 1, padding: "12px 15px", borderRadius: 13, background: "var(--s2)", border: `1.5px solid ${b1}`, color: t1, fontFamily: "inherit", fontSize: 14, outline: "none", transition: "border-color .18s", caretColor: "var(--p)", opacity: hasKey && profileLoaded ? 1 : 0.6 }}
+            disabled={!canUseAI || !profileLoaded}
+            style={{ flex: 1, padding: "12px 15px", borderRadius: 13, background: "var(--s2)", border: `1.5px solid ${b1}`, color: t1, fontFamily: "inherit", fontSize: 14, outline: "none", transition: "border-color .18s", caretColor: "var(--p)", opacity: canUseAI && profileLoaded ? 1 : 0.6 }}
             onFocus={(e) => { e.target.style.borderColor = "var(--p)"; }}
             onBlur={(e) => { e.target.style.borderColor = b1; }}
           />
           <button
             type="button"
             onClick={() => send()}
-            disabled={!inp.trim() || loading || !hasKey || !profileLoaded}
-            style={{ width: 44, height: 44, borderRadius: 13, border: "none", flexShrink: 0, background: inp.trim() && hasKey && profileLoaded ? "var(--p)" : "var(--s2)", cursor: inp.trim() && hasKey && profileLoaded ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", transition: "all .18s", boxShadow: inp.trim() && hasKey ? "0 4px 16px rgba(37,99,235,.32)" : "none" }}
+            disabled={!inp.trim() || loading || !canUseAI || !profileLoaded}
+            style={{ width: 44, height: 44, borderRadius: 13, border: "none", flexShrink: 0, background: inp.trim() && canUseAI && profileLoaded ? "var(--p)" : "var(--s2)", cursor: inp.trim() && canUseAI && profileLoaded ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", transition: "all .18s", boxShadow: inp.trim() && canUseAI ? "0 4px 16px rgba(37,99,235,.32)" : "none" }}
           >
-            {loading ? <Loader2 size={16} color="var(--p)" style={{ animation: "spin360 .7s linear infinite" }} /> : <Send size={16} color={inp.trim() && hasKey && profileLoaded ? "#fff" : t3} />}
+            {loading ? <Loader2 size={16} color="var(--p)" style={{ animation: "spin360 .7s linear infinite" }} /> : <Send size={16} color={inp.trim() && canUseAI && profileLoaded ? "#fff" : t3} />}
           </button>
         </div>
         <p style={{ color: t3, fontSize: 10.5, marginTop: 7, textAlign: "center" }}>Enter to send · Shift+Enter for new line</p>

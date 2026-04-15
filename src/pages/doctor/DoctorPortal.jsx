@@ -1,26 +1,33 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, Calendar, LogOut, Moon, Sun, Menu, X, Plus, Send,
   Clock, Check, AlertCircle, Loader2, Bell, BellOff, User, ArrowRight,
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
-  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText,
+  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck,
   Sparkles, ChevronRight
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
+import { callOpenAIChat, OPENAI_CHAT_MODEL } from "../../lib/openaiChat";
+import { pickPatientRow, searchPatientsForProvider } from "../../lib/patientSearch";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import ErrBanner from "../../components/common/ErrBanner";
 import OkBanner from "../../components/common/OkBanner";
 import NicknameModal from "../../components/modals/NicknameModal";
 import PrescribeModal from "../../components/modals/PrescribeModal";
 import RescheduleRequestRow from "../../components/appointments/RescheduleRequestRow";
+import { normalizeRescheduleRequest, needsDoctorRescheduleAction, STAGE } from "../../lib/appointmentReschedule";
+import { buildPharmacyReferralSnapshot } from "../../lib/pharmacyReferralPayload";
+import PharmacyPatientReferralCard from "../../components/pharmacy/PharmacyPatientReferralCard";
 export default function DoctorPortal({ user, light, setLight, userName, setDisplayName }) {
   const [page,setPage]=useState("dashboard");
   const [patients,setPatients]=useState([]);
   const [search,setSearch]=useState("");
   const [selPat,setSelPat]=useState(null);
+  const selPatRef=useRef(null);
+  useEffect(()=>{ selPatRef.current=selPat; },[selPat]);
   const [patProfile,setPatProfile]=useState(null);
   const [patMeds,setPatMeds]=useState([]);
   const [note,setNote]=useState("");
@@ -39,10 +46,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [vitalsBusy,setVitalsBusy]=useState(false);
   const [vitalsSaved,setVitalsSaved]=useState(false);
   const [appointments,setAppointments]=useState([]);
+  const rescheduleQueue=useMemo(()=>appointments.filter(a=>{
+    if(a.status!=="rescheduled"||!a.reschedule_request)return false;
+    const n=normalizeRescheduleRequest(a.reschedule_request);
+    return needsDoctorRescheduleAction(n)&&n.stage!==STAGE.RECEPTIONIST;
+  }),[appointments]);
+  const receptionistQueue=useMemo(()=>appointments.filter(a=>normalizeRescheduleRequest(a.reschedule_request)?.stage===STAGE.RECEPTIONIST),[appointments]);
   const [allAppointments,setAllAppointments]=useState([]);
   const [apptForm,setApptForm]=useState({date:"",time:"",type:"Follow-up",notes:""});
   const [apptBusy,setApptBusy]=useState(false);
-  const [rescheduleReqs,setRescheduleReqs]=useState([]);
   const [calView,setCalView]=useState("week");
   const [calDate,setCalDate]=useState(new Date());
   const [addPatientEmail,setAddPatientEmail]=useState("");
@@ -68,6 +80,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [showSendToPharmacy,setShowSendToPharmacy]=useState(false);
   const [sendToPharmacyBusy,setSendToPharmacyBusy]=useState(false);
   const [sendToPharmacyDone,setSendToPharmacyDone]=useState(false);
+  const [referralPreview,setReferralPreview]=useState(null);
+  const [referralPreviewLoading,setReferralPreviewLoading]=useState(false);
   const [selRxChat,setSelRxChat]=useState(null);
   // Notifications
   const [docNotifs,setDocNotifs]=useState([]);
@@ -102,9 +116,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
 
   function sortMsgs(arr){ return [...arr].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)); }
 
+  const lastMsgId=messages.length?messages[messages.length-1]?.id:null;
+  const chatScrollKey=useMemo(
+    ()=>`${messages.length}:${lastMsgId ?? ""}:${peerTyping}`,
+    [messages.length,lastMsgId,peerTyping]
+  );
+
   const doScroll=useCallback(()=>{
-    // Run immediately and again after next paint to catch any layout shifts
-    if(msgListRef.current) msgListRef.current.scrollTop=msgListRef.current.scrollHeight;
+    const el=msgListRef.current;
+    if(!el) return;
+    el.scrollTop=el.scrollHeight;
     requestAnimationFrame(()=>{
       if(msgListRef.current) msgListRef.current.scrollTop=msgListRef.current.scrollHeight;
     });
@@ -116,6 +137,27 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   useEffect(()=>{ if(userName) setLocalName(userName); },[userName]);
   const name=localName||userName||user?.displayName||user?.email?.split("@")[0]||"Doctor";
   const saveName=(n)=>{ setLocalName(n); if(setDisplayName) setDisplayName(n); };
+
+  useEffect(()=>{
+    if(!showSendToPharmacy||!selPat?.id||!user?.id){
+      setReferralPreview(null);
+      setReferralPreviewLoading(false);
+      return;
+    }
+    let cancelled=false;
+    setReferralPreviewLoading(true);
+    (async()=>{
+      try{
+        const payload=await buildPharmacyReferralSnapshot(supabase,{ patientId:selPat.id, doctorId:user.id, selPat, patProfile, patMeds, doctorDisplayName:name });
+        if(!cancelled) setReferralPreview(payload);
+      }catch{
+        if(!cancelled) setReferralPreview(null);
+      }finally{
+        if(!cancelled) setReferralPreviewLoading(false);
+      }
+    })();
+    return ()=>{ cancelled=true; };
+  },[showSendToPharmacy,selPat?.id,user?.id,patProfile,patMeds,name]);
   async function handleSignOut(){
     setOnlineUsers(prev=>{const n={...prev};delete n[user.id];return n;});
     await supabase.from("user_presence").upsert({user_id:user.id,is_online:false,last_seen:new Date().toISOString()},{onConflict:"user_id"});
@@ -199,20 +241,28 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     channels.push(
       supabase.channel(`doc-appt-${user.id}`)
         .on("postgres_changes",{event:"*",schema:"public",table:"appointments",filter:`doctor_id=eq.${user.id}`},(payload)=>{
+          const selId=selPatRef.current?.id;
+          const mergeAll=(prev,newRow)=>{
+            if(newRow.status==="cancelled") return prev.filter(a=>a.id!==newRow.id);
+            const has=prev.some(a=>a.id===newRow.id);
+            if(has) return prev.map(a=>a.id===newRow.id?{...a,...newRow}:a);
+            return [...prev,newRow].sort((a,b)=>a.date.localeCompare(b.date)||String(a.time).localeCompare(String(b.time)));
+          };
+          const mergePat=(prev,newRow)=>{
+            if(!selId||newRow.patient_id!==selId) return prev.filter(a=>a.id!==newRow.id);
+            if(newRow.status==="cancelled") return prev.filter(a=>a.id!==newRow.id);
+            const has=prev.some(a=>a.id===newRow.id);
+            if(has) return prev.map(a=>a.id===newRow.id?{...a,...newRow}:a);
+            return [...prev,newRow].sort((a,b)=>a.date.localeCompare(b.date)||String(a.time).localeCompare(String(b.time)));
+          };
           if(payload.eventType==="INSERT"){
             if(payload.new.status!=="cancelled"){
-              setAllAppointments(prev=>prev.some(a=>a.id===payload.new.id)?prev:[...prev,payload.new]);
-              setAppointments(prev=>prev.some(a=>a.id===payload.new.id)?prev:[...prev,payload.new]);
+              setAllAppointments(prev=>mergeAll(prev,payload.new));
+              setAppointments(prev=>mergePat(prev,payload.new));
             }
           } else if(payload.eventType==="UPDATE"){
-            const updater=a=>a.id===payload.new.id?{...a,...payload.new}:a;
-            setAllAppointments(prev=>payload.new.status==="cancelled"?prev.filter(a=>a.id!==payload.new.id):prev.map(updater));
-            setAppointments(prev=>payload.new.status==="cancelled"?prev.filter(a=>a.id!==payload.new.id):prev.map(updater));
-            if(payload.new.status==="rescheduled"&&payload.new.reschedule_request){
-              setRescheduleReqs(prev=>prev.some(r=>r.id===payload.new.id)?prev:[...prev,payload.new]);
-            } else {
-              setRescheduleReqs(prev=>prev.filter(r=>r.id!==payload.new.id));
-            }
+            setAllAppointments(prev=>mergeAll(prev,payload.new));
+            setAppointments(prev=>mergePat(prev,payload.new));
           } else if(payload.eventType==="DELETE"){
             setAllAppointments(prev=>prev.filter(a=>a.id!==payload.old.id));
             setAppointments(prev=>prev.filter(a=>a.id!==payload.old.id));
@@ -257,10 +307,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     loadMessages(selChat.id);
   },[selChat?.id]);
 
-  // Scroll to bottom whenever messages or typing indicator changes AND user is at bottom
+  // Scroll only when list shape changes (new/last message or typing), not on read_at-only updates
   useLayoutEffect(()=>{
     if(atBottomRef.current) doScroll();
-  },[messages,peerTyping,doScroll]);
+  },[chatScrollKey,doScroll]);
 
   // Also scroll after selChat changes - chat just opened, always go to bottom
   useEffect(()=>{
@@ -278,6 +328,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   }
   useEffect(()=>{
     if(page!=="messages"||!selChat||!user?.id) return;
+    let lastPollSig="";
     const interval=setInterval(()=>{
       const chat=selChatRef.current;
       if(!chat) return;
@@ -286,17 +337,23 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         .order("created_at",{ascending:true})
         .then(({data})=>{
           if(!data) return;
+          const sig=data.map(m=>`${m.id}:${m.read_at||""}`).join("|");
+          if(sig===lastPollSig) return;
+          lastPollSig=sig;
           setMessages(prev=>{
-            const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
-            const lastPrevId=realPrev[realPrev.length-1]?.id;
-            const lastNewId=data[data.length-1]?.id;
-            if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-            if(lastPrevId!==lastNewId&&data.length>0){
-              const ts=data[data.length-1].created_at;
-              setChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
-            }
-            return sortMsgs(data);
+            const temps=prev.filter(m=>String(m.id).startsWith("temp-"));
+            const byId=new Map();
+            [...temps,...data].forEach(m=>{byId.set(m.id,m);});
+            return sortMsgs([...byId.values()]);
           });
+          if(data.length>0){
+            const ts=data[data.length-1].created_at;
+            setChatContacts(prev=>{
+              const cur=prev.find(c=>c.id===chat.id);
+              if(cur?.lastMessageAt===ts) return prev;
+              return sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c));
+            });
+          }
         });
     },2000);
     return ()=>clearInterval(interval);
@@ -316,6 +373,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             const currentChat=selChatRef.current;
             setChatContacts(prev=>[...prev].map(c=>c.id===msg.pharmacist_id?{...c,lastMessageAt:msg.created_at}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
             if(currentChat&&msg.pharmacist_id===currentChat.id){
+              atBottomRef.current=true;
               setMessages(prev=>{
                 if(prev.some(m=>m.id===msg.id)) return prev;
                 return sortMsgs([...prev,msg]);
@@ -340,6 +398,20 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 return prev;
               });
             }
+          }
+        )
+        .on("postgres_changes",{event:"UPDATE",schema:"public",table:"chat_messages",filter:`doctor_id=eq.${user.id}`},
+          (payload)=>{
+            const u=payload.new;
+            const currentChat=selChatRef.current;
+            if(!currentChat||u.pharmacist_id!==currentChat.id) return;
+            setMessages(prev=>{
+              const i=prev.findIndex(m=>m.id===u.id);
+              if(i<0) return prev;
+              const cur=prev[i];
+              if(cur.read_at===u.read_at&&cur.body===u.body) return prev;
+              return prev.map(m=>m.id===u.id?{...m,...u}:m);
+            });
           }
         )
         .subscribe((status,err)=>{
@@ -417,16 +489,20 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         .order("created_at",{ascending:true});
       if(error){ console.error("Load msgs:",error.message); return; }
       atBottomRef.current=true;
-      setMessages(sortMsgs(data||[]));
+      const rows=sortMsgs(data||[]);
+      const unreadIds=rows.filter(m=>m.sender_id===pharmacistId&&!m.read_at).map(m=>m.id);
+      const readTs=new Date().toISOString();
       setUnreadPerContact(prev=>{ const n={...prev}; delete n[pharmacistId]; return n; });
       if(data&&data.length>0){
         const ts=data[data.length-1].created_at;
         setChatContacts(prev=>[...prev].map(c=>c.id===pharmacistId?{...c,lastMessageAt:ts}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
       }
-      const unreadIds=(data||[]).filter(m=>m.sender_id===pharmacistId&&!m.read_at).map(m=>m.id);
       if(unreadIds.length>0){
-        supabase.from("chat_messages").update({read_at:new Date().toISOString()}).in("id",unreadIds).then(()=>{});
+        supabase.from("chat_messages").update({read_at:readTs}).in("id",unreadIds).then(()=>{});
         setUnreadCount(prev=>Math.max(0,prev-unreadIds.length));
+        setMessages(rows.map(m=>unreadIds.includes(m.id)?{...m,read_at:readTs}:m));
+      }else{
+        setMessages(rows);
       }
     }catch(e){console.error("loadMessages:",e);}
   }
@@ -442,6 +518,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const now=new Date().toISOString();
     const tempId=`temp-${Date.now()}`;
     const tempMsg={id:tempId,doctor_id:user.id,pharmacist_id:selChat.id,sender_id:user.id,body,created_at:now,read_at:null};
+    atBottomRef.current=true;
     setMessages(prev=>sortMsgs([...prev,tempMsg]));
     setChatContacts(prev=>[...prev].map(c=>c.id===selChat.id?{...c,lastMessageAt:now}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
     try{
@@ -465,18 +542,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     if(!selPat||sendToPharmacyBusy) return;
     setSendToPharmacyBusy(true);
     try{
-      const payload={
-        id:selPat.id,
-        name:selPat.fullName,
-        email:selPat.email||"",
-        dob:patProfile?.dob||selPat.dob||null,
-        blood:patProfile?.blood_type||selPat.bloodType||null,
-        allergies:patProfile?.allergies||selPat.allergies||[],
-        conditions:patProfile?.medical_conditions||selPat.conditions||[],
-        meds:patMeds.map(m=>({name:m.medicationName,dosage:m.dosage,freq:m.freq})).slice(0,6),
-        sentBy:name,
-        sentAt:new Date().toISOString(),
-      };
+      const payload=referralPreview||await buildPharmacyReferralSnapshot(supabase,{ patientId:selPat.id, doctorId:user.id, selPat, patProfile, patMeds, doctorDisplayName:name });
       const body="PATREF:"+JSON.stringify(payload);
       // ensure pharmacist is in chatContacts, add if not
       let pharmContact=chatContacts.find(c=>c.id===pharmacist.id);
@@ -520,26 +586,63 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     await supabase.from("notifications").update({read_at:new Date().toISOString()}).in("id",ids);
   }
 
-  // Doctor AI chat
-  const OPENAI_KEY=import.meta.env.VITE_OPENAI_API_KEY;
+  async function handleDoctorNotifClick(n){
+    await markNotifRead(n.id);
+    setShowNotifPanel(false);
+    const rid=n.related_id;
+    const tl=(n.title||"").toLowerCase();
+    if(!rid){
+      if(tl.includes("message")&&!tl.includes("prescription")) setPage("messages");
+      return;
+    }
+    async function openPatientById(patientId){
+      if(!patientId) return;
+      let pat=patients.find(p=>p.id===patientId);
+      if(!pat){
+        const{data:prof}=await supabase.from("profiles").select("id,first_name,last_name,email").eq("id",patientId).maybeSingle();
+        if(prof) pat={id:prof.id,fullName:[prof.first_name,prof.last_name].filter(Boolean).join(" ")||prof.email||"Patient",email:prof.email||""};
+        else pat={id:patientId,fullName:"Patient",email:""};
+      }
+      setPage("patients");
+      await openPatient(pat);
+    }
+    const{data:apptRow}=await supabase.from("appointments").select("id,patient_id").eq("id",rid).maybeSingle();
+    if(apptRow?.patient_id){
+      await openPatientById(apptRow.patient_id);
+      setActiveTab("appointments");
+      return;
+    }
+    const{data:rx}=await supabase.from("prescriptions").select("id,patient_id").eq("id",rid).maybeSingle();
+    if(rx?.patient_id){
+      await openPatientById(rx.patient_id);
+      setActiveTab("prescriptions");
+      setSelRxChat(rx.id);
+    }
+  }
+
+  // Doctor Clinical Assistant — free offline tips; OpenAI Edge only if VITE_ENABLE_OPENAI_EDGE=true
   async function sendDocAI(){
     if(!aiInput.trim()||aiLoading) return;
     const msg={role:"user",content:aiInput.trim()};
-    setAiMessages(prev=>[...prev,msg]);
+    const thread=[...aiMessages,msg];
+    setAiMessages(thread);
     setAiInput("");
     setAiLoading(true);
     try{
       const todayAppts=allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()).length;
-      const system=`You are a clinical assistant for Dr. ${name}. They have ${patients.length} patients and ${todayAppts} appointments today. Provide concise, evidence-based clinical guidance. Always recommend consulting specialist or references for critical decisions. Do not replace clinical judgment.`;
-      const res=await fetch("https://api.openai.com/v1/chat/completions",{
-        method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${OPENAI_KEY}`},
-        body:JSON.stringify({model:"gpt-4o-mini",messages:[{role:"system",content:system},...aiMessages,msg],max_tokens:600})
+      const system=`You are a knowledgeable clinical assistant chatting with Dr. ${name} (about ${patients.length} patients on their panel; ${todayAppts} appointments today). Reply in a natural, conversational tone—like a thoughtful colleague, not a brochure. Use short paragraphs; use bullets only when they make scanning easier. Be practical and evidence-aware; say when something needs an in-person exam, specialist input, or the chart. Do not invent patient-specific facts you were not given. For emergencies, direct them to appropriate urgent care. This is decision support, not a substitute for clinical judgment.`;
+      const data=await callOpenAIChat({
+        model:OPENAI_CHAT_MODEL,
+        messages:[{role:"system",content:system},...thread],
+        max_tokens:600,
       });
-      const data=await res.json();
-      const reply=data.choices?.[0]?.message?.content||"Unable to respond.";
+      const reply=(data.choices?.[0]?.message?.content||"").trim()||"Unable to respond.";
       setAiMessages(prev=>[...prev,{role:"assistant",content:reply}]);
-    }catch(e){ setAiMessages(prev=>[...prev,{role:"assistant",content:"Error contacting AI. Check API key."}]); }
-    finally{ setAiLoading(false); }
+    }catch(e){
+      setAiMessages(prev=>[...prev,{role:"assistant",content:`Error: ${e?.message||"Network error"}`}]);
+    }finally{
+      setAiLoading(false);
+    }
   }
   useEffect(()=>{ aiEndRef.current?.scrollIntoView({behavior:"smooth"}); },[aiMessages]);
 
@@ -560,12 +663,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       const{data:msg,error}=await supabase.from("prescription_messages").insert({prescription_id:selRxChat,sender_id:user.id,body}).select("*").single();
       if(error) throw error;
       setRxMessages(prev=>prev.map(m=>m.id===tempId?msg:m));
-      // Notify pharmacist of new rx chat message
       const rx=patRx.find(r=>r.id===selRxChat);
+      const rows=[];
       if(rx?.pharmacist_id){
-        try{
-          await supabase.from("notifications").insert({user_id:rx.pharmacist_id,type:"general",title:"New prescription message",body:`Dr. ${name} sent a message about a prescription.`,related_id:selRxChat});
-        }catch{}
+        rows.push({user_id:rx.pharmacist_id,type:"general",title:"New prescription message",body:`Dr. ${name} sent a message about a prescription.`,related_id:selRxChat});
+      }
+      if(rx?.patient_id){
+        rows.push({user_id:rx.patient_id,type:"general",title:"Prescription updated",body:"Your care team added an update. Open Prescriptions to view the thread.",related_id:selRxChat});
+      }
+      if(rows.length){
+        try{await supabase.from("notifications").insert(rows);}catch{}
       }
     }catch{
       setRxMessages(prev=>prev.filter(m=>m.id!==tempId));
@@ -609,21 +716,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     finally{setChatSearchBusy(false);}
   }
   async function addPatientByEmail(){
-    const email=addPatientEmail.trim().toLowerCase();
-    if(!email||addPatientBusy)return;
+    const q=addPatientEmail.trim();
+    if(!q||addPatientBusy)return;
     setAddPatientBusy(true);setAddPatientMsg(null);
     try{
-      console.log("🔍 Searching for email:", email);
-      const{data:rows,error}=await supabase
-        .from("profiles")
-        .select("id,first_name,last_name,email,dob,blood_type,allergies,medical_conditions,role")
-        .eq("email",email)
-        .limit(1);
-      console.log("📦 Supabase result:", {rows, error, rowCount: rows?.length});
-      if(error){console.error("❌ Search error:",error);setAddPatientMsg({type:"err",text:"Search failed: "+error.message});return;}
-      const prof=rows&&rows.length>0?rows[0]:null;
-      console.log("👤 Profile found:", prof);
-      if(!prof){setAddPatientMsg({type:"err",text:`No account found with email: ${email}`});return;}
+      const{rows,error}=await searchPatientsForProvider(q);
+      if(error){setAddPatientMsg({type:"err",text:"Search failed: "+error.message});return;}
+      const prof=pickPatientRow(rows,q);
+      if(!prof){setAddPatientMsg({type:"err",text:`No patient found matching: ${q}`});return;}
       if(prof.role==="doctor"){setAddPatientMsg({type:"err",text:"That account belongs to a doctor."});return;}
       if(prof.role==="pharmacist"){setAddPatientMsg({type:"err",text:"That account belongs to a pharmacist."});return;}
       if(patients.find(p=>p.id===prof.id)){setAddPatientMsg({type:"err",text:"Patient already in your list."});return;}
@@ -640,13 +740,13 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   async function openPatient(pat){
     setSelPat(pat);setLoading(true);setPatProfile(null);setPatMeds([]);setNotes([]);setPatRx([]);
     setActiveTab("overview");setPatFlag("none");setVitals({bp:"",hr:"",temp:"",weight:"",o2:"",notes:""});
-    setAppointments([]);setRescheduleReqs([]);
+    setAppointments([]);
     try{
       const[profRes,medsRes,notesRes,rxRes,apptRes]=await Promise.all([
         supabase.from("profiles").select("*").eq("id",pat.id).single(),
         supabase.from("user_medications").select("*").eq("user_id",pat.id),
         supabase.from("doctor_notes").select("*").eq("doctor_id",user.id).eq("patient_id",pat.id).order("created_at",{ascending:false}),
-        supabase.from("prescriptions").select("id,status,notes,created_at").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
+        supabase.from("prescriptions").select("id,status,notes,created_at,patient_id,doctor_id,pharmacist_id").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
         supabase.from("appointments").select("*").eq("patient_id",pat.id).eq("doctor_id",user.id).order("date",{ascending:true}),
       ]);
       setPatProfile(profRes.data||{});
@@ -654,7 +754,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       setNotes((notesRes.data||[]).map(d=>({id:d.id,note:d.note,createdAt:d.created_at})));
       setPatRx(rxRes.data||[]);
       const appts=apptRes.data||[];setAppointments(appts);
-      setRescheduleReqs(appts.filter(a=>a.status==="rescheduled"&&a.reschedule_request));
       const key=`doc_${user.id}_pat_${pat.id}`;
       try{const s=JSON.parse(localStorage.getItem(key)||"{}");if(s.flag)setPatFlag(s.flag);if(s.vitals)setVitals(s.vitals);}catch{}
     }catch(e){}finally{setLoading(false);}
@@ -668,8 +767,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       const{data:appt,error}=await supabase.from("appointments").insert({patient_id:selPat.id,doctor_id:user.id,date:apptForm.date,time:apptForm.time,type:apptForm.type,notes:apptForm.notes||null,status:"scheduled"}).select("*").single();
       if(error)throw error;
       setAppointments(prev=>[...prev,appt]);setAllAppointments(prev=>[...prev,appt]);
+      const slotLine=`Scheduled on ${new Date(appt.date+"T"+appt.time).toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}.`;
       setApptForm({date:"",time:"",type:"Follow-up",notes:""});
-      await supabase.from("notifications").insert({user_id:selPat.id,type:"general",title:`Appointment: ${apptForm.type}`,body:`Scheduled on ${new Date(apptForm.date+"T"+apptForm.time).toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}.`});
+      await supabase.from("notifications").insert({user_id:selPat.id,type:"general",title:`Appointment: ${appt.type}`,body:slotLine,related_id:appt.id});
     }catch(e){}finally{setApptBusy(false);}
   }
   async function deleteAppointment(id){
@@ -681,16 +781,35 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const updater=a=>a.id===appt.id?{...a,date:newDate,time:newTime,status:"scheduled",reschedule_request:null}:a;
     setAppointments(p=>p.map(updater));
     setAllAppointments(p=>p.map(updater));
-    setRescheduleReqs(p=>p.filter(r=>r.id!==appt.id));
-    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Appointment Approved",body:`Your reschedule was approved. New time: ${new Date(newDate+"T"+newTime).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}.`}).catch(()=>{});
+    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Appointment Approved",body:`Your reschedule was approved. New time: ${new Date(newDate+"T"+newTime).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}.`,related_id:appt.id}).catch(()=>{});
   }
   async function rejectReschedule(appt,message){
     await supabase.from("appointments").update({status:"scheduled",reschedule_request:null,updated_at:new Date().toISOString()}).eq("id",appt.id);
     const updater=a=>a.id===appt.id?{...a,status:"scheduled",reschedule_request:null}:a;
     setAppointments(p=>p.map(updater));
     setAllAppointments(p=>p.map(updater));
-    setRescheduleReqs(p=>p.filter(r=>r.id!==appt.id));
-    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Reschedule Request Denied",body:message}).catch(()=>{});
+    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Reschedule Request Denied",body:message,related_id:appt.id}).catch(()=>{});
+  }
+  async function suggestRescheduleAlt(appt,newDate,newTime,message){
+    const prev=normalizeRescheduleRequest(appt.reschedule_request);
+    const payload={
+      v:2,
+      stage:STAGE.AWAITING_PATIENT,
+      patient:prev?.patient||null,
+      patientMessage:prev?.patientMessage||"",
+      doctorProposal:{date:newDate,time:newTime,message:message||""},
+    };
+    await supabase.from("appointments").update({reschedule_request:payload,status:"rescheduled",updated_at:new Date().toISOString()}).eq("id",appt.id);
+    const updater=a=>a.id===appt.id?{...a,reschedule_request:payload,status:"rescheduled"}:a;
+    setAppointments(p=>p.map(updater));
+    setAllAppointments(p=>p.map(updater));
+    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Alternative appointment time",body:`Your doctor suggested ${new Date(newDate+"T"+newTime).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}. Open the app to accept or decline.`,related_id:appt.id}).catch(()=>{});
+  }
+  async function acknowledgeReceptionistRequest(appt){
+    await supabase.from("appointments").update({reschedule_request:null,updated_at:new Date().toISOString()}).eq("id",appt.id);
+    const updater=a=>a.id===appt.id?{...a,reschedule_request:null}:a;
+    setAppointments(p=>p.map(updater));
+    setAllAppointments(p=>p.map(updater));
   }
   async function addNote(){
     if(!note.trim()||!selPat)return;setNoteBusy(true);
@@ -816,7 +935,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     )}
                   </AnimatePresence>
                 </div>
-                <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
+                <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",touchAction:"pan-y"}}>
                   {chatContacts.length===0?(
                     <div style={{padding:"30px 16px",textAlign:"center"}}>
                       <Search size={22} color={t3} style={{opacity:.2,margin:"0 auto 10px",display:"block"}}/>
@@ -885,7 +1004,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         ))}
                       </div>
                     )}
-                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{flex:1,minHeight:0,overflowY:"auto",overscrollBehavior:"contain",WebkitOverflowScrolling:"touch",padding:"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
+                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{flex:1,minHeight:0,overflowY:"auto",WebkitOverflowScrolling:"touch",touchAction:"pan-y",padding:"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
                       {messages.length===0&&(<div style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:8,padding:"60px 0"}}><Send size={22} color={t3} style={{opacity:.2}}/><p style={{color:t3,fontSize:13}}>No messages yet — send the first one</p></div>)}
                       {messages.map((msg,i)=>{
                         const isMe=msg.sender_id===user.id;
@@ -900,25 +1019,22 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         const bodyLines=msg.body.split("\n");
                         const isPatRef=bodyLines[0]?.startsWith("📋 Re:");
                         const isNewPatRef=msg.body.startsWith("PATREF:");
-                        let patCard=null;
-                        // Handle new PATREF:{JSON} format
+                        let referralCardData=null;
                         if(isNewPatRef){
-                          try{
-                            const json=JSON.parse(msg.body.slice(7));
-                            patCard={name:json.name,dob:json.dob,blood:json.blood,allergies:Array.isArray(json.allergies)?json.allergies.join(", "):json.allergies,conditions:Array.isArray(json.conditions)?json.conditions.join(", "):json.conditions};
-                          }catch{}
+                          try{ referralCardData=JSON.parse(msg.body.slice(7)); }catch{}
                         }
-                        // Handle legacy 📋 Re: format
-                        if(isPatRef&&!patCard){
+                        if(isPatRef&&!referralCardData){
                           const refLine=bodyLines[0].replace("📋 Re:","").trim();
                           const nameMatch=refLine.match(/^([^(·]+)/);
                           const dobMatch=refLine.match(/DOB:\s*([^·)]+)/);
                           const bloodMatch=refLine.match(/Blood:\s*([^·]+)/);
                           const allergyMatch=refLine.match(/Allergies:\s*([^·]+)/);
                           const condMatch=refLine.match(/Conditions:\s*([^·]+)/);
-                          patCard={name:nameMatch?.[1]?.replace(/\(.*$/,"").trim(),dob:dobMatch?.[1]?.trim(),blood:bloodMatch?.[1]?.trim(),allergies:allergyMatch?.[1]?.trim(),conditions:condMatch?.[1]?.trim()};
+                          const nm=nameMatch?.[1]?.replace(/\(.*$/,"").trim();
+                          if(nm) referralCardData={name:nm,dob:dobMatch?.[1]?.trim()||null,blood:bloodMatch?.[1]?.trim()||null,allergies:allergyMatch?.[1]?.trim()||null,conditions:condMatch?.[1]?.trim()||null};
                         }
-                        const displayBody=(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():msg.body;
+                        const showReferralCard=!!referralCardData&&(isNewPatRef||isPatRef);
+                        const displayBody=isNewPatRef?"":isPatRef?bodyLines.slice(1).join("\n").trim():msg.body;
                         return (
                           <div key={msg.id} style={{display:"block",width:"100%",marginTop:groupTop?14:3}}>
                             {showDate&&(<div style={{textAlign:"center",margin:"16px 0 14px"}}><span style={{padding:"4px 16px",borderRadius:99,fontSize:10,background:"var(--s2)",border:"1px solid var(--b0)",color:t3,fontWeight:700,letterSpacing:".03em"}}>{new Date(msg.created_at).toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"})}</span></div>)}
@@ -932,19 +1048,13 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                               </div>
                               <div style={{maxWidth:isMob?"min(82%,320px)":"72%",minWidth:0,display:"flex",flexDirection:"column",alignItems:isMe?"flex-end":"flex-start"}}>
                                 {groupTop&&!isMe&&<p style={{color:t3,fontSize:10,marginBottom:4,fontWeight:600,paddingLeft:2}}>{selChat.name}</p>}
-                                {(isPatRef||isNewPatRef)&&patCard&&(
-                                  <div style={{marginBottom:6,width:"100%",background:"var(--s1)",border:"1.5px solid rgba(14,116,144,.25)",borderRadius:12,overflow:"hidden",boxShadow:"0 2px 8px rgba(14,116,144,.08)"}}>
-                                    <div style={{padding:"7px 12px",background:"rgba(14,116,144,.08)",borderBottom:"1px solid rgba(14,116,144,.15)",display:"flex",alignItems:"center",gap:6}}>
-                                      <FileText size={12} color={DocAC}/>
-                                      <span style={{color:DocAC,fontSize:11,fontWeight:700}}>Patient Reference</span>
-                                    </div>
-                                    <div style={{padding:"8px 12px",display:"flex",flexDirection:"column",gap:5}}>
-                                      {patCard.name&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Patient</span><span style={{color:t1,fontSize:12,fontWeight:700}}>{patCard.name}</span></div>}
-                                      {patCard.dob&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>DOB</span><span style={{color:t1,fontSize:12}}>{patCard.dob}</span></div>}
-                                      {patCard.blood&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Blood Type</span><span style={{color:"var(--ro)",fontSize:12,fontWeight:700}}>{patCard.blood}</span></div>}
-                                      {patCard.allergies&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Allergies</span><span style={{color:"var(--ro)",fontSize:12}}>{patCard.allergies}</span></div>}
-                                      {patCard.conditions&&<div style={{display:"flex",alignItems:"baseline",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",minWidth:72}}>Conditions</span><span style={{color:"var(--am)",fontSize:12}}>{patCard.conditions}</span></div>}
-                                    </div>
+                                {showReferralCard&&(
+                                  <div style={{marginBottom:6,width:"100%",maxWidth:"100%"}}>
+                                    <PharmacyPatientReferralCard
+                                      data={referralCardData}
+                                      headerLabel={isMe?"Patient reference sent":"Patient reference"}
+                                      accent="14,116,144"
+                                    />
                                   </div>
                                 )}
                                 {displayBody&&(
@@ -955,7 +1065,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                 {groupBottom&&(
                                   <div style={{display:"flex",alignItems:"center",gap:4,marginTop:4,flexDirection:isMe?"row-reverse":"row"}}>
                                     <p style={{color:t3,fontSize:9,textAlign:isMe?"right":"left",paddingLeft:isMe?0:2,paddingRight:isMe?2:0,margin:0}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>
-                                    {isMe&&<CheckCheck size={14} color={isRead?"#22c55e":t3} strokeWidth={isRead?2.5:2}/>}
+                                    {isMe&&<CheckCheck size={14} color={isRead?"#2563eb":t3} strokeWidth={isRead?2.5:2}/>}
                                   </div>
                                 )}
                               </div>
@@ -1256,7 +1366,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     <h4 style={{color:t1,fontSize:13,fontWeight:700,marginBottom:4,display:"flex",alignItems:"center",gap:8}}><UserPlus size={15} color={DocAC}/> Add patient by email</h4>
                     <p style={{color:t3,fontSize:12,marginBottom:12,lineHeight:1.45}}>Enter the patient's registered email address to add them to your list.</p>
                     <div className={`flex gap-2 ${isMob?"flex-col":"flex-row flex-wrap"}`}>
-                      <input className="inp min-w-0" type="email" value={addPatientEmail} onChange={e=>setAddPatientEmail(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addPatientByEmail();}} placeholder="patient@email.com" style={{flex:1,minWidth:0,borderRadius:12,fontSize:16}}/>
+                      <input className="inp min-w-0" type="text" autoComplete="off" value={addPatientEmail} onChange={e=>setAddPatientEmail(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addPatientByEmail();}} placeholder="Name or email" style={{flex:1,minWidth:0,borderRadius:12,fontSize:16}}/>
                       <motion.button whileHover={{scale:1.03}} whileTap={{scale:.97}} onClick={addPatientByEmail} disabled={addPatientBusy||!addPatientEmail.trim()} className={`btn-doc justify-center ${isMob?"w-full py-2.5":""}`} style={{display:"flex",alignItems:"center",gap:7,padding:"10px 20px",fontSize:13,borderRadius:12,flexShrink:0}}>
                         {addPatientBusy?<Loader2 size={14} style={{animation:"spin360 .7s linear infinite"}}/>:<><UserPlus size={13}/> Add Patient</>}
                       </motion.button>
@@ -1404,7 +1514,31 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       )}
                       {activeTab==="appointments"&&(
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="min-w-0" style={{display:"flex",flexDirection:"column",gap:14}}>
-                          {rescheduleReqs.length>0&&(<div className="min-w-0 overflow-hidden" style={{background:"rgba(217,119,6,.07)",border:"1px solid rgba(217,119,6,.25)",borderRadius:16,padding:isMob?"14px 14px":"16px 18px"}}><p style={{color:"var(--am)",fontSize:13,fontWeight:700,marginBottom:12}}>{rescheduleReqs.length} reschedule request{rescheduleReqs.length>1?"s":""}</p>{rescheduleReqs.map(appt=>(<RescheduleRequestRow key={appt.id} appt={appt} onConfirm={(nd,nt)=>confirmReschedule(appt,nd,nt)} onCancel={()=>deleteAppointment(appt.id)} onReject={(msg)=>rejectReschedule(appt,msg)} t1={t1} t3={t3}/>))}</div>)}
+                          {receptionistQueue.length>0&&(
+                            <div className="min-w-0 overflow-hidden" style={{background:"rgba(37,99,235,.06)",border:"1px solid rgba(37,99,235,.22)",borderRadius:16,padding:isMob?"14px 14px":"16px 18px",marginBottom:12}}>
+                              <p style={{color:"var(--p)",fontSize:13,fontWeight:700,marginBottom:10}}>Reception follow-up</p>
+                              {receptionistQueue.map(appt=>(
+                                <div key={appt.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:8}}>
+                                  <p style={{color:t1,fontSize:12.5,margin:0}}>{appt.type} — patient prefers to speak with reception.</p>
+                                  <button type="button" onClick={()=>acknowledgeReceptionistRequest(appt)} style={{padding:"6px 12px",borderRadius:9,border:"1px solid var(--b1)",background:"var(--s2)",cursor:"pointer",fontSize:11.5,fontWeight:600,color:t3}}>Dismiss</button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {rescheduleQueue.length>0&&(
+                            <div className="min-w-0 overflow-hidden" style={{background:"rgba(217,119,6,.07)",border:"1px solid rgba(217,119,6,.25)",borderRadius:16,padding:isMob?"14px 14px":"16px 18px"}}>
+                              <p style={{color:"var(--am)",fontSize:13,fontWeight:700,marginBottom:12}}>{rescheduleQueue.length} reschedule request{rescheduleQueue.length>1?"s":""}</p>
+                              {rescheduleQueue.map(appt=>(
+                                <RescheduleRequestRow key={appt.id} appt={appt}
+                                  onConfirmPatientSlot={confirmReschedule}
+                                  onSuggestAlternative={suggestRescheduleAlt}
+                                  onCancel={()=>deleteAppointment(appt.id)}
+                                  onReject={(msg)=>rejectReschedule(appt,msg)}
+                                  t1={t1} t3={t3}
+                                />
+                              ))}
+                            </div>
+                          )}
                           <div className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"20px 22px"}}>
                             <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:16}}>Schedule Appointment</h4>
                             <div style={{display:"grid",gridTemplateColumns:isMob?"1fr":"1fr 1fr",gap:10,marginBottom:10}}>
@@ -1532,7 +1666,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               <div style={{flex:1,overflowY:"auto"}}>
                 {docNotifs.length===0&&<p style={{color:t3,fontSize:13,textAlign:"center",padding:"28px 16px"}}>No notifications yet.</p>}
                 {docNotifs.map(n=>(
-                  <div key={n.id} onClick={()=>markNotifRead(n.id)} style={{padding:"12px 16px",borderBottom:`1px solid ${b1}`,cursor:"pointer",background:n.read_at?"transparent":"rgba(14,116,144,.04)",display:"flex",gap:10,alignItems:"flex-start"}} onMouseEnter={e=>e.currentTarget.style.background="var(--s2)"} onMouseLeave={e=>e.currentTarget.style.background=n.read_at?"transparent":"rgba(14,116,144,.04)"}>
+                  <div key={n.id} onClick={()=>handleDoctorNotifClick(n)} style={{padding:"12px 16px",borderBottom:`1px solid ${b1}`,cursor:"pointer",background:n.read_at?"transparent":"rgba(14,116,144,.04)",display:"flex",gap:10,alignItems:"flex-start"}} onMouseEnter={e=>e.currentTarget.style.background="var(--s2)"} onMouseLeave={e=>e.currentTarget.style.background=n.read_at?"transparent":"rgba(14,116,144,.04)"}>
                     <div style={{width:8,height:8,borderRadius:"50%",background:n.read_at?"transparent":DocAC,flexShrink:0,marginTop:5}}/>
                     <div style={{flex:1,minWidth:0}}>
                       <p style={{color:t1,fontSize:13,fontWeight:n.read_at?500:700,margin:0}}>{n.title}</p>
@@ -1555,7 +1689,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               <div style={{width:34,height:34,borderRadius:10,background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Sparkles size={15} color={DocAC}/></div>
               <div style={{flex:1}}>
                 <p style={{color:t1,fontSize:14,fontWeight:700,margin:0}}>Clinical Assistant</p>
-                <p style={{color:t3,fontSize:11,margin:0}}>AI-powered clinical guidance</p>
+                <p style={{color:t3,fontSize:11,margin:0}}>Free clinical tips (optional paid AI if you enable it)</p>
               </div>
               <button onClick={()=>setShowDocAI(false)} style={{width:30,height:30,borderRadius:9,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3}}><X size={13}/></button>
             </div>
@@ -1563,7 +1697,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               {aiMessages.length===0&&(
                 <div style={{textAlign:"center",padding:"40px 16px"}}>
                   <Sparkles size={28} color={t3} style={{opacity:.2,margin:"0 auto 12px",display:"block"}}/>
-                  <p style={{color:t2,fontSize:14,fontWeight:600,marginBottom:6}}>Clinical AI Assistant</p>
+                  <p style={{color:t2,fontSize:14,fontWeight:600,marginBottom:6}}>Clinical Assistant</p>
                   <p style={{color:t3,fontSize:12,lineHeight:1.6}}>Ask about drug interactions, clinical guidelines, dosing, or patient management.</p>
                   <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:16}}>
                     {["Drug interactions for metformin + lisinopril","Signs of serotonin syndrome","Hypertension management guidelines","When to refer for cardiology"].map(s=>(
@@ -1617,15 +1751,21 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       <AnimatePresence>
         {showSendToPharmacy&&selPat&&(
           <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setShowSendToPharmacy(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",zIndex:80,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-            <motion.div initial={{y:20,opacity:0,scale:.97}} animate={{y:0,opacity:1,scale:1}} exit={{y:16,opacity:0}} transition={{type:"spring",damping:26,stiffness:300}} onClick={e=>e.stopPropagation()} style={{background:"var(--bg)",borderRadius:20,padding:24,width:"100%",maxWidth:400,border:`1px solid ${b1}`,boxShadow:"0 20px 60px rgba(0,0,0,.2)"}}>
-              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+            <motion.div initial={{y:20,opacity:0,scale:.97}} animate={{y:0,opacity:1,scale:1}} exit={{y:16,opacity:0}} transition={{type:"spring",damping:26,stiffness:300}} onClick={e=>e.stopPropagation()} style={{background:"var(--bg)",borderRadius:20,padding:24,width:"100%",maxWidth:480,border:`1px solid ${b1}`,boxShadow:"0 20px 60px rgba(0,0,0,.2)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
                 <div style={{width:40,height:40,borderRadius:12,background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><User size={18} color={DocAC}/></div>
                 <div><h3 style={{color:t1,fontSize:16,fontWeight:700,margin:0}}>Send to Pharmacy</h3><p style={{color:t3,fontSize:12,margin:0}}>{selPat.fullName}</p></div>
               </div>
-              <div style={{padding:"10px 14px",background:"var(--s2)",borderRadius:12,marginBottom:16,display:"flex",flexDirection:"column",gap:5}}>
-                {[["Patient",selPat.fullName],[patProfile?.dob&&"DOB",patProfile?.dob],[patProfile?.blood_type&&"Blood Type",patProfile?.blood_type],[(patProfile?.allergies?.length>0)&&"Allergies",(patProfile?.allergies||[]).join(", ")],[(patProfile?.medical_conditions?.length>0)&&"Conditions",(patProfile?.medical_conditions||[]).join(", ")],[patMeds.length>0&&"Medications",patMeds.map(m=>m.medicationName).join(", ")]].filter(([k])=>k).map(([k,v])=>(
-                  <div key={k} style={{display:"flex",gap:8}}><span style={{color:t3,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".06em",minWidth:76,paddingTop:1,flexShrink:0}}>{k}</span><span style={{color:t1,fontSize:12}}>{v||"—"}</span></div>
-                ))}
+              <div style={{maxHeight:"min(48vh,440px)",overflowY:"auto",marginBottom:16,borderRadius:12,border:`1px solid ${b1}`}}>
+                {referralPreviewLoading&&(
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,padding:28,color:t3,fontSize:13}}><Loader2 size={16} style={{animation:"spin360 .7s linear infinite"}}/> Loading transfer summary…</div>
+                )}
+                {!referralPreviewLoading&&referralPreview&&(
+                  <PharmacyPatientReferralCard data={referralPreview} headerLabel="Information to send" accent="14,116,144" subheader="Review this summary before sending it to the pharmacy. It is not transmitted until you choose a recipient below." />
+                )}
+                {!referralPreviewLoading&&!referralPreview&&(
+                  <p style={{color:t3,fontSize:13,padding:20,textAlign:"center",margin:0}}>Could not load patient summary. You can still try sending after selecting a pharmacy.</p>
+                )}
               </div>
               {sendToPharmacyDone?(
                 <div style={{display:"flex",alignItems:"center",gap:8,color:"var(--gr)",fontSize:13,fontWeight:600,justifyContent:"center",padding:"8px 0"}}><CheckCircle2 size={16}/> Sent to pharmacy.</div>

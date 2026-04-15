@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, LogOut, Moon, Sun, Menu, X, Plus, Send,
@@ -6,13 +6,16 @@ import {
   ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText
 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { pickPatientRow, searchPatientsForProvider } from "../../lib/patientSearch";
 import { PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import NicknameModal from "../../components/modals/NicknameModal";
+import PharmacyPatientReferralCard from "../../components/pharmacy/PharmacyPatientReferralCard";
 export default function PharmacistPortal({ user, light, setLight, userName, setDisplayName }) {
   const [page, setPage] = useState("dashboard");
   const [prescriptions, setPrescriptions] = useState([]);
   const [patientNames, setPatientNames] = useState({});
+  const [patientEmails, setPatientEmails] = useState({});
   const [search, setSearch] = useState("");
   const [selRx, setSelRx] = useState(null);
   const [rxMeds, setRxMeds] = useState([]);
@@ -50,10 +53,18 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
 
   function sortMsgs(arr){ return [...arr].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)); }
 
+  const lastMsgId = messages.length ? messages[messages.length - 1]?.id : null;
+  const chatScrollKey = useMemo(
+    () => `${messages.length}:${lastMsgId ?? ""}:${peerTyping}`,
+    [messages.length, lastMsgId, peerTyping]
+  );
+
   const doScroll = useCallback(() => {
-    if(msgListRef.current) msgListRef.current.scrollTop = msgListRef.current.scrollHeight;
+    const el = msgListRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
     requestAnimationFrame(() => {
-      if(msgListRef.current) msgListRef.current.scrollTop = msgListRef.current.scrollHeight;
+      if (msgListRef.current) msgListRef.current.scrollTop = msgListRef.current.scrollHeight;
     });
   }, []);
   const [mobMenu, setMobMenu] = useState(false);
@@ -108,22 +119,17 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   function changeSoundType(val) { setSoundType(val); localStorage.setItem("mt_sound_type", val); playNotifSound(val, soundVolume); }
   function changeSoundVolume(val) { setSoundVolume(val); localStorage.setItem("mt_sound_vol", String(val)); playNotifSound(soundType, val); }
   async function findPatientByEmail() {
-    const email = patSearchEmail.trim().toLowerCase();
-    if (!email || patSearchBusy) return;
+    const q = patSearchEmail.trim();
+    if (!q || patSearchBusy) return;
     setPatSearchBusy(true); setPatSearchMsg(null);
     try {
-      const { data: rows, error } = await supabase
-        .from("profiles")
-        .select("id,first_name,last_name,email,role")
-        .eq("email", email)
-        .limit(1);
+      const { rows, error } = await searchPatientsForProvider(q);
       if (error) { setPatSearchMsg({ type: "err", text: "Search failed: " + error.message }); return; }
-      const prof = rows && rows.length > 0 ? rows[0] : null;
-      if (!prof) { setPatSearchMsg({ type: "err", text: `No account found with email: ${email}` }); return; }
-      if (prof.role === "doctor") { setPatSearchMsg({ type: "err", text: "That account belongs to a doctor." }); return; }
-      if (prof.role === "pharmacist") { setPatSearchMsg({ type: "err", text: "That account belongs to a pharmacist." }); return; }
+      const prof = pickPatientRow(rows, q);
+      if (!prof) { setPatSearchMsg({ type: "err", text: `No patient found matching: ${q}` }); return; }
       const fullName = [prof.first_name, prof.last_name].filter(Boolean).join(" ") || prof.email || "Patient";
       setPatientNames(prev => ({ ...prev, [prof.id]: fullName }));
+      setPatientEmails(prev => ({ ...prev, [prof.id]: prof.email || "" }));
       setPatSearchEmail("");
       setPatSearchMsg({ type: "ok", text: `Found: ${fullName} — their prescriptions will now show below.` });
       setSearch(fullName);
@@ -134,11 +140,11 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   async function loadPrescriptions() {
     try {
       const { data: mine } = await supabase.from("prescriptions")
-        .select("id,patient_id,status,notes,created_at,pharmacist_id")
+        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id")
         .eq("pharmacist_id", user.id)
         .order("created_at", { ascending: false });
       const { data: unassigned } = await supabase.from("prescriptions")
-        .select("id,patient_id,status,notes,created_at,pharmacist_id")
+        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id")
         .is("pharmacist_id", null)
         .eq("status", "pending_pharmacist")
         .order("created_at", { ascending: false });
@@ -147,10 +153,15 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       setPrescriptions(combined);
       const ids = [...new Set(combined.map(p => p.patient_id))];
       if (ids.length) {
-        const { data: profs } = await supabase.from("profiles").select("id,first_name,last_name").in("id", ids);
+        const { data: profs } = await supabase.from("profiles").select("id,first_name,last_name,email").in("id", ids);
         const map = {};
-        (profs || []).forEach(p => { map[p.id] = [p.first_name, p.last_name].filter(Boolean).join(" ") || "Patient"; });
+        const emap = {};
+        (profs || []).forEach(p => {
+          map[p.id] = [p.first_name, p.last_name].filter(Boolean).join(" ") || "Patient";
+          emap[p.id] = p.email || "";
+        });
         setPatientNames(map);
+        setPatientEmails(emap);
       }
     } catch (e) { console.error("loadPrescriptions:", e); }
   }
@@ -217,7 +228,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
 
   useLayoutEffect(() => {
     if(atBottomRef.current) doScroll();
-  }, [messages, peerTyping, doScroll]);
+  }, [chatScrollKey, doScroll]);
 
   useEffect(() => {
     if (!selChat) return;
@@ -234,6 +245,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   }
   useEffect(() => {
     if (page !== "messages" || !selChat || !user?.id) return;
+    let lastPollSig = "";
     const interval = setInterval(() => {
       const chat = selChatRef.current;
       if (!chat) return;
@@ -242,17 +254,23 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         .order("created_at", { ascending: true })
         .then(({ data }) => {
           if (!data) return;
+          const sig = data.map(m => `${m.id}:${m.read_at || ""}`).join("|");
+          if (sig === lastPollSig) return;
+          lastPollSig = sig;
           setMessages(prev => {
-            const realPrev = prev.filter(m => !String(m.id).startsWith("temp-"));
-            const lastPrevId = realPrev[realPrev.length - 1]?.id;
-            const lastNewId = data[data.length - 1]?.id;
-            if (lastPrevId === lastNewId && realPrev.length === data.length) return prev;
-            if (lastPrevId !== lastNewId && data.length > 0) {
-              const ts = data[data.length - 1].created_at;
-              setChatContacts(prev => [...prev].map(c => c.id === chat.id ? { ...c, lastMessageAt: ts } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
-            }
-            return sortMsgs(data);
+            const temps = prev.filter(m => String(m.id).startsWith("temp-"));
+            const byId = new Map();
+            [...temps, ...data].forEach(m => { byId.set(m.id, m); });
+            return sortMsgs([...byId.values()]);
           });
+          if (data.length > 0) {
+            const ts = data[data.length - 1].created_at;
+            setChatContacts(prev => {
+              const cur = prev.find(c => c.id === chat.id);
+              if (cur?.lastMessageAt === ts) return prev;
+              return [...prev].map(c => c.id === chat.id ? { ...c, lastMessageAt: ts } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || ""));
+            });
+          }
         });
     }, 2000);
     return () => clearInterval(interval);
@@ -272,6 +290,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
             const currentChat = selChatRef.current;
             setChatContacts(prev => [...prev].map(c => c.id === msg.doctor_id ? { ...c, lastMessageAt: msg.created_at } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
             if (currentChat && msg.doctor_id === currentChat.id) {
+              atBottomRef.current = true;
               setMessages(prev => {
                 if (prev.some(m => m.id === msg.id)) return prev;
                 return sortMsgs([...prev, msg]);
@@ -281,6 +300,20 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
               setUnreadCount(prev => prev + 1);
               setUnreadPerContact(prev => ({ ...prev, [msg.doctor_id]: (prev[msg.doctor_id] || 0) + 1 }));
             }
+          }
+        )
+        .on("postgres_changes", { event: "UPDATE", schema: "public", table: "chat_messages", filter: `pharmacist_id=eq.${user.id}` },
+          (payload) => {
+            const u = payload.new;
+            const currentChat = selChatRef.current;
+            if (!currentChat || u.doctor_id !== currentChat.id) return;
+            setMessages(prev => {
+              const i = prev.findIndex(m => m.id === u.id);
+              if (i < 0) return prev;
+              const cur = prev[i];
+              if (cur.read_at === u.read_at && cur.body === u.body) return prev;
+              return prev.map(m => m.id === u.id ? { ...m, ...u } : m);
+            });
           }
         )
         .subscribe((status) => {
@@ -379,16 +412,20 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         .order("created_at", { ascending: true });
       if (error) { console.error("Load messages error:", error.message); return; }
       atBottomRef.current = true;
-      setMessages(sortMsgs(data || []));
+      const rows = sortMsgs(data || []);
+      const unreadIds = rows.filter(m => m.sender_id === doctorId && !m.read_at).map(m => m.id);
+      const readTs = new Date().toISOString();
       setUnreadPerContact(prev => { const n = { ...prev }; delete n[doctorId]; return n; });
       if (data && data.length > 0) {
         const ts = data[data.length - 1].created_at;
         setChatContacts(prev => [...prev].map(c => c.id === doctorId ? { ...c, lastMessageAt: ts } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
       }
-      const unreadIds = (data || []).filter(m => m.sender_id === doctorId && !m.read_at).map(m => m.id);
       if (unreadIds.length > 0) {
-        supabase.from("chat_messages").update({ read_at: new Date().toISOString() }).in("id", unreadIds).then(() => {});
+        supabase.from("chat_messages").update({ read_at: readTs }).in("id", unreadIds).then(() => {});
         setUnreadCount(prev => Math.max(0, prev - unreadIds.length));
+        setMessages(rows.map(m => unreadIds.includes(m.id) ? { ...m, read_at: readTs } : m));
+      } else {
+        setMessages(rows);
       }
     } catch (e) { console.error("Load messages:", e); }
   }
@@ -400,6 +437,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     const now = new Date().toISOString();
     const tempId = `temp-${Date.now()}`;
     const tempMsg = { id: tempId, doctor_id: selChat.id, pharmacist_id: user.id, sender_id: user.id, body, created_at: now, read_at: null };
+    atBottomRef.current = true;
     setMessages(prev => sortMsgs([...prev, tempMsg]));
     setChatContacts(prev => [...prev].map(c => c.id === selChat.id ? { ...c, lastMessageAt: now } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
     try {
@@ -514,6 +552,24 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     await supabase.from("notifications").update({ read_at: new Date().toISOString() }).in("id", ids);
   }
 
+  async function handlePhaNotifClick(n) {
+    await markNotifRead(n.id);
+    setShowNotifPanel(false);
+    const rid = n.related_id;
+    const tl = (n.title || "").toLowerCase();
+    if (!rid) {
+      if (tl.includes("message") && !tl.includes("prescription")) setPage("messages");
+      return;
+    }
+    if (n.type === "prescription_ready" || tl.includes("prescription") || tl.includes("new prescription") || tl.includes("claimed")) {
+      const { data: rx, error } = await supabase.from("prescriptions").select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id").eq("id", rid).maybeSingle();
+      if (error || !rx) return;
+      setPage("prescriptions");
+      await loadPrescriptions();
+      openPrescription(rx);
+    }
+  }
+
   const [rxMessages, setRxMessages] = useState([]);
   const [rxMsgInput, setRxMsgInput] = useState("");
   const [rxMsgSending, setRxMsgSending] = useState(false);
@@ -536,11 +592,16 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       const { data: msg, error } = await supabase.from("prescription_messages").insert({ prescription_id: selRx.id, sender_id: user.id, body }).select("*").single();
       if (error) throw error;
       setRxMessages(prev => prev.map(m => m.id === tempId ? msg : m));
-      // Notify doctor of new rx chat message
+      const patLabel = patientNames[selRx.patient_id] || "a patient";
+      const rows = [];
       if (selRx.doctor_id) {
-        try {
-          await supabase.from("notifications").insert({ user_id: selRx.doctor_id, type: "general", title: "New prescription message", body: `${name} sent a message about a prescription for ${patientNames[selRx.patient_id] || "a patient"}.`, related_id: selRx.id });
-        } catch {}
+        rows.push({ user_id: selRx.doctor_id, type: "general", title: "New prescription message", body: `${name} sent a message about a prescription for ${patLabel}.`, related_id: selRx.id });
+      }
+      if (selRx.patient_id) {
+        rows.push({ user_id: selRx.patient_id, type: "general", title: "Prescription updated", body: "Your care team added an update. Open Prescriptions to view the thread.", related_id: selRx.id });
+      }
+      if (rows.length) {
+        try { await supabase.from("notifications").insert(rows); } catch {}
       }
     } catch {
       setRxMessages(prev => prev.filter(m => m.id !== tempId));
@@ -560,7 +621,11 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   }, [selRx?.id]);
   const pendingCount = prescriptions.filter(p => p.status === "pending_pharmacist" || p.status === "pending_fill").length;
   const readyCount = prescriptions.filter(p => p.status === "ready" || p.status === "filled" || p.status === "picked_up").length;
-  const filtered = prescriptions.filter(p => !search || (patientNames[p.patient_id] || "").toLowerCase().includes(search.toLowerCase()));
+  const filtered = prescriptions.filter(p => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return (patientNames[p.patient_id] || "").toLowerCase().includes(q) || (patientEmails[p.patient_id] || "").toLowerCase().includes(q);
+  });
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
       {}
@@ -661,7 +726,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                     )}
                   </AnimatePresence>
                 </div>
-                <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
+                <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y" }}>
                   {chatContacts.length === 0 ? (
                     <div style={{ padding: "30px 16px", textAlign: "center" }}>
                       <Search size={22} color={t3} style={{ opacity: .2, margin: "0 auto 10px", display: "block" }} />
@@ -739,7 +804,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                       </div>
                     )}
                     {}
-                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
+                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y", padding: "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
                       {messages.length === 0 && (
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8, padding: "60px 0" }}>
                           <Send size={22} color={t3} style={{ opacity: .2 }} />
@@ -780,21 +845,15 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                           return (
                             <div key={msg.id} style={{ display: "block", width: "100%", marginTop: 16, marginBottom: 4 }}>
                               {showDate && <div style={{ textAlign: "center", margin: "16px 0 14px" }}><span style={{ padding: "4px 16px", borderRadius: 99, fontSize: 10, background: "var(--s2)", border: "1px solid var(--b0)", color: t3, fontWeight: 700, letterSpacing: ".03em" }}>{new Date(msg.created_at).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</span></div>}
-                              <div style={{ background: "var(--s1)", border: "1.5px solid rgba(14,116,144,.3)", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 16px rgba(14,116,144,.1)", maxWidth: isMob ? "95%" : "80%" }}>
-                                <div style={{ padding: "10px 16px", background: "rgba(14,116,144,.09)", borderBottom: "1px solid rgba(14,116,144,.2)", display: "flex", alignItems: "center", gap: 8 }}>
-                                  <FileText size={14} color="var(--doc-p)" />
-                                  <span style={{ color: "var(--doc-p)", fontSize: 12, fontWeight: 700, flex: 1 }}>Patient Referral from Dr. {selChat.name}</span>
-                                  <span style={{ color: t3, fontSize: 10 }}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                                </div>
-                                <div style={{ padding: "10px 16px", display: "flex", flexDirection: "column", gap: 6, borderBottom: "1px solid var(--b0)" }}>
-                                  {[["Patient", newPatData.name], ["DOB", newPatData.dob], ["Blood Type", newPatData.blood], ["Allergies", (newPatData.allergies||[]).join(", ")], ["Conditions", (newPatData.conditions||[]).join(", ")], ["Medications", (newPatData.meds||[]).map(m=>m.name).join(", ")]].filter(([,v])=>v).map(([k,v])=>(
-                                    <div key={k} style={{ display: "flex", gap: 10 }}>
-                                      <span style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", minWidth: 80, flexShrink: 0, paddingTop: 1 }}>{k}</span>
-                                      <span style={{ color: k==="Allergies"||k==="Blood Type" ? "var(--ro)" : k==="Conditions" ? "var(--am)" : t1, fontSize: 12, fontWeight: k==="Patient" ? 700 : 400, wordBreak: "break-word" }}>{v}</span>
-                                    </div>
-                                  ))}
-                                </div>
-                                <div style={{ padding: "10px 16px" }}>
+                              <div style={{ maxWidth: isMob ? "95%" : "82%", width: "100%" }}>
+                                <PharmacyPatientReferralCard
+                                  data={newPatData}
+                                  headerLabel={`Patient referral — Dr. ${selChat.name}`}
+                                  timeLabel={new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                  accent="14,116,144"
+                                  subheader="Transferred from the prescribing physician. Confirm patient identifiers and clinical details against your records."
+                                />
+                                <div style={{ padding: "10px 16px", marginTop: 8, background: "var(--s1)", border: "1px solid var(--b0)", borderRadius: 12 }}>
                                   <p style={{ color: t3, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>Action</p>
                                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                                     {[
@@ -870,7 +929,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                                 {groupBottom && (
                                   <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, flexDirection: isMe ? "row-reverse" : "row" }}>
                                     <p style={{ color: t3, fontSize: 9, textAlign: isMe ? "right" : "left", paddingLeft: isMe ? 0 : 2, paddingRight: isMe ? 2 : 0, margin: 0 }}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
-                                    {isMe && <CheckCheck size={14} color={isRead ? "#22c55e" : t3} strokeWidth={isRead ? 2.5 : 2} />}
+                                    {isMe && <CheckCheck size={14} color={isRead ? "#2563eb" : t3} strokeWidth={isRead ? 2.5 : 2} />}
                                   </div>
                                 )}
                               </div>
@@ -1040,10 +1099,10 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                       <User size={14} color={PhAC}/> Find Patient by Email
                     </p>
                     <div className={`flex gap-2 ${isMob ? "flex-col sm:flex-row" : "flex-row"}`}>
-                      <input className="inp min-w-0" type="email" value={patSearchEmail}
+                      <input className="inp min-w-0" type="text" autoComplete="off" value={patSearchEmail}
                         onChange={e => setPatSearchEmail(e.target.value)}
                         onKeyDown={e => { if (e.key === "Enter") findPatientByEmail(); }}
-                        placeholder="patient@email.com"
+                        placeholder="Name or email"
                         style={{ flex: 1, borderRadius: 10, fontSize: 16 }}
                       />
                       <motion.button type="button" whileTap={{ scale: .93 }} onClick={findPatientByEmail}
@@ -1061,7 +1120,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                   </div>
                   <div style={{ position: "relative", marginBottom: 16 }}>
                     <Search size={14} color={t3} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
-                    <input className="inp w-full min-w-0" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by patient name…" style={{ paddingLeft: 40, fontSize: 16 }} />
+                    <input className="inp w-full min-w-0" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or email…" style={{ paddingLeft: 40, fontSize: 16 }} />
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {filtered.map(rx => (
@@ -1208,7 +1267,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
               <div style={{ flex: 1, overflowY: "auto" }}>
                 {phaNotifs.length === 0 && <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: "28px 16px" }}>No notifications yet.</p>}
                 {phaNotifs.map(n => (
-                  <div key={n.id} onClick={() => markNotifRead(n.id)} style={{ padding: "12px 16px", borderBottom: `1px solid ${b1}`, cursor: "pointer", background: n.read_at ? "transparent" : "rgba(124,58,237,.04)", display: "flex", gap: 10, alignItems: "flex-start" }} onMouseEnter={e => e.currentTarget.style.background = "var(--s2)"} onMouseLeave={e => e.currentTarget.style.background = n.read_at ? "transparent" : "rgba(124,58,237,.04)"}>
+                  <div key={n.id} onClick={() => handlePhaNotifClick(n)} style={{ padding: "12px 16px", borderBottom: `1px solid ${b1}`, cursor: "pointer", background: n.read_at ? "transparent" : "rgba(124,58,237,.04)", display: "flex", gap: 10, alignItems: "flex-start" }} onMouseEnter={e => e.currentTarget.style.background = "var(--s2)"} onMouseLeave={e => e.currentTarget.style.background = n.read_at ? "transparent" : "rgba(124,58,237,.04)"}>
                     <div style={{ width: 8, height: 8, borderRadius: "50%", background: n.read_at ? "transparent" : PhAC, flexShrink: 0, marginTop: 5 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <p style={{ color: t1, fontSize: 13, fontWeight: n.read_at ? 500 : 700, margin: 0 }}>{n.title}</p>

@@ -1,46 +1,41 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Calendar, Pill, Pencil, Trash2, Clock, CheckCircle2, AlertCircle, Loader2, ChevronLeft, ChevronRight } from "lucide-react";
+import { Calendar, Pill, Pencil, Trash2, Clock, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { COLS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
-import { logMedicationTaken, unlogMedicationTaken, loadTakenForDate, localDateStr, getWeekStartForDate } from "../../lib/adherence";
+import {
+  logMedicationTaken,
+  unlogMedicationTaken,
+  requiredDosesFromFrequency,
+  loadTodaysDoseCounts,
+  saveTodaysDoseCounts,
+} from "../../lib/adherence";
 import { supabase } from "../../supabase";
+import { useClock } from "../../hooks/useClock";
+import PatientRescheduleStatus from "../../components/appointments/PatientRescheduleStatus";
+import {
+  buildPatientReschedulePayload,
+  normalizeRescheduleRequest,
+  needsPatientRescheduleAction,
+  STAGE,
+} from "../../lib/appointmentReschedule";
 
 export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }) {
+  const now = useClock();
+  const dayKey = useMemo(
+    () => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`,
+    [now]
+  );
   const isMob = useIsMobile();
-  const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
-  const sorted = [...meds].filter(m => m.active !== false).sort((a, b) => a.time.localeCompare(b.time));
-
-  const [viewDate, setViewDate] = useState(() => new Date());
-  const [takenForView, setTakenForView] = useState(() => new Set());
-  const [logErr, setLogErr] = useState("");
-
-  const dateStr = localDateStr(viewDate);
-  const weekStartD = getWeekStartForDate(viewDate);
-  const weekDays = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(weekStartD);
-    d.setDate(weekStartD.getDate() + i);
-    return d;
+  const t1 = "var(--t1)", t2 = "var(--t2)", t3 = "var(--t3)", b1 = "var(--b1)";
+  const [doseCounts, setDoseCounts] = useState({});
+  const medsWithProgress = meds.map((m) => {
+    const required = requiredDosesFromFrequency(m.freq);
+    const completed = Math.min(required, Math.max(0, Number(doseCounts[m.id] || 0)));
+    return { ...m, requiredDoses: required, completedDoses: completed, taken: completed >= required };
   });
-
-  useEffect(() => {
-    if (!userId) return;
-    let cancelled = false;
-    setLogErr("");
-    loadTakenForDate(userId, dateStr).then((s) => {
-      if (!cancelled) setTakenForView(s);
-    });
-    return () => { cancelled = true; };
-  }, [userId, dateStr]);
-
-  useEffect(() => {
-    if (!userId) return;
-    const ch = supabase.channel(`sched-ml-${userId}`).on("postgres_changes", { event: "*", schema: "public", table: "medication_logs", filter: `user_id=eq.${userId}` }, () => {
-      loadTakenForDate(userId, dateStr).then(setTakenForView);
-    }).subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [userId, dateStr]);
+  const sorted = [...medsWithProgress].sort((a, b) => a.time.localeCompare(b.time));
 
   const [appointments, setAppointments] = useState([]);
   const [apptLoading, setApptLoading] = useState(false);
@@ -49,6 +44,14 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
   const [rescheduleBusy, setRescheduleBusy] = useState(false);
   const [rescheduleDone, setRescheduleDone] = useState(false);
   const [doctorNames, setDoctorNames] = useState({});
+
+  useEffect(() => {
+    if (!userId) {
+      setDoseCounts({});
+      return;
+    }
+    setDoseCounts(loadTodaysDoseCounts(userId));
+  }, [userId, dayKey]);
 
   useEffect(() => {
     if (!userId) return;
@@ -83,7 +86,13 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
           if (payload.new.status === "cancelled") {
             setAppointments(prev => prev.filter(a => a.id !== payload.new.id));
           } else {
-            setAppointments(prev => prev.map(a => a.id === payload.new.id ? { ...a, ...payload.new } : a));
+            const row = payload.new;
+            setAppointments(prev => {
+              if (!["scheduled", "rescheduled"].includes(row.status)) return prev.filter(a => a.id !== row.id);
+              const has = prev.some(a => a.id === row.id);
+              if (has) return prev.map(a => a.id === row.id ? { ...a, ...row } : a);
+              return [...prev, row].sort((a, b) => a.date.localeCompare(b.date));
+            });
           }
         } else if (payload.eventType === "DELETE") {
           setAppointments(prev => prev.filter(a => a.id !== payload.old.id));
@@ -96,12 +105,22 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
   async function requestReschedule() {
     if (!rescheduleAppt || !rescheduleForm.date || !rescheduleForm.time || rescheduleBusy) return;
     setRescheduleBusy(true);
+    const payload = buildPatientReschedulePayload({ date: rescheduleForm.date, time: rescheduleForm.time, message: "" });
     await supabase.from("appointments").update({
       status: "rescheduled",
-      reschedule_request: { date: rescheduleForm.date, time: rescheduleForm.time },
+      reschedule_request: payload,
       updated_at: new Date().toISOString(),
     }).eq("id", rescheduleAppt.id);
-    setAppointments(prev => prev.map(a => a.id === rescheduleAppt.id ? { ...a, status: "rescheduled", reschedule_request: rescheduleForm } : a));
+    if (rescheduleAppt.doctor_id) {
+      await supabase.from("notifications").insert({
+        user_id: rescheduleAppt.doctor_id,
+        type: "general",
+        title: "Reschedule requested",
+        body: `A patient requested a new time for "${rescheduleAppt.type}". Open their chart to review.`,
+        related_id: rescheduleAppt.id,
+      }).catch(() => {});
+    }
+    setAppointments(prev => prev.map(a => a.id === rescheduleAppt.id ? { ...a, status: "rescheduled", reschedule_request: payload } : a));
     setRescheduleBusy(false);
     setRescheduleDone(true);
     setTimeout(() => { setRescheduleAppt(null); setRescheduleDone(false); setRescheduleForm({ date: "", time: "" }); }, 2000);
@@ -109,32 +128,23 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
 
   const toggle = useCallback(async (id) => {
     const med = meds.find(m => m.id === id);
-    if (!med || med.active === false || !userId) return;
-    const was = takenForView.has(id);
-    setLogErr("");
-    setTakenForView((prev) => {
-      const n = new Set(prev);
-      if (was) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-    const ok = was
-      ? await unlogMedicationTaken(userId, id, dateStr)
-      : await logMedicationTaken(userId, id, dateStr);
-    if (!ok) {
-      setTakenForView((prev) => {
-        const n = new Set(prev);
-        if (was) n.add(id);
-        else n.delete(id);
-        return n;
-      });
-      setLogErr("Could not save. Check your connection and try again.");
-      return;
+    if (!med) return;
+    const required = requiredDosesFromFrequency(med.freq);
+    const current = Math.max(0, Number(doseCounts[id] || 0));
+    const next = current >= required ? Math.max(0, current - 1) : Math.min(required, current + 1);
+    const prevWasComplete = current >= required;
+    const nextIsComplete = next >= required;
+
+    const nextCounts = { ...doseCounts, [id]: next };
+    setDoseCounts(nextCounts);
+    if (userId) saveTodaysDoseCounts(userId, nextCounts);
+    setMeds(ms => ms.map(m => m.id === id ? { ...m, taken: nextIsComplete } : m));
+
+    if (userId) {
+      if (!prevWasComplete && nextIsComplete) await logMedicationTaken(userId, id);
+      if (prevWasComplete && !nextIsComplete) await unlogMedicationTaken(userId, id);
     }
-    if (dateStr === localDateStr(new Date())) {
-      setMeds((ms) => ms.map((m) => (m.id === id ? { ...m, taken: !was } : m)));
-    }
-  }, [meds, userId, setMeds, dateStr, takenForView]);
+  }, [meds, userId, setMeds, doseCounts]);
 
   const periods = [
     { l: "Morning", r: "6 AM – 12 PM", fn: m => m.time >= "06:00" && m.time < "12:00" },
@@ -145,7 +155,8 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
 
   const STATUS_CONFIG = {
     scheduled: { label: "Confirmed", color: "var(--gr)", bg: "rgba(5,150,105,.1)", border: "rgba(5,150,105,.25)", icon: CheckCircle2 },
-    rescheduled: { label: "Reschedule Pending", color: "var(--am)", bg: "rgba(217,119,6,.1)", border: "rgba(217,119,6,.25)", icon: AlertCircle },
+    rescheduled: { label: "Reschedule pending", color: "var(--am)", bg: "rgba(217,119,6,.1)", border: "rgba(217,119,6,.25)", icon: AlertCircle },
+    awaitingYou: { label: "Action needed", color: "var(--p)", bg: "rgba(37,99,235,.1)", border: "rgba(37,99,235,.22)", icon: AlertCircle },
   };
 
   return (
@@ -168,11 +179,14 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
               {appointments.map(appt => {
-                const cfg = STATUS_CONFIG[appt.status] || STATUS_CONFIG.scheduled;
+                const norm = normalizeRescheduleRequest(appt.reschedule_request);
+                const pendingPatient = needsPatientRescheduleAction(norm);
+                const cfg = (pendingPatient ? STATUS_CONFIG.awaitingYou : STATUS_CONFIG[appt.status]) || STATUS_CONFIG.scheduled;
                 const StatusIcon = cfg.icon;
                 const apptDate = new Date(appt.date + "T12:00:00");
                 const isPast = apptDate < new Date();
                 const isPending = appt.status === "rescheduled";
+                const blockReschedule = pendingPatient || norm?.stage === STAGE.RECEPTIONIST;
                 return (
                   <motion.div key={appt.id} className="card" style={{ padding: isMob ? "12px 14px" : "14px 18px", opacity: isPast ? 0.6 : 1 }}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
@@ -193,13 +207,20 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
                           {doctorNames[appt.doctor_id] && <><span>·</span><span>Dr. {doctorNames[appt.doctor_id]}</span></>}
                         </div>
                         {appt.notes && <p style={{ color: t3, fontSize: 11, margin: "4px 0 0" }}>{appt.notes}</p>}
-                        {isPending && appt.reschedule_request && (
-                          <p style={{ color: "var(--am)", fontSize: 11, margin: "4px 0 0", fontWeight: 600 }}>
-                            Requested: {new Date(appt.reschedule_request.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} at {new Date("2000-01-01T" + appt.reschedule_request.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                          </p>
-                        )}
+                        <PatientRescheduleStatus
+                          appt={appt}
+                          t1={t1}
+                          t2={t2}
+                          t3={t3}
+                          onApptUpdate={(id, partial) => setAppointments((prev) => prev.map((a) => (a.id === id ? { ...a, ...partial } : a)))}
+                          onOpenReschedule={(a) => {
+                            setRescheduleAppt(a);
+                            setRescheduleForm({ date: "", time: "" });
+                            setRescheduleDone(false);
+                          }}
+                        />
                       </div>
-                      {!isPast && !isPending && (
+                      {!isPast && !isPending && !blockReschedule && (
                         <button onClick={() => { setRescheduleAppt(appt); setRescheduleForm({ date: "", time: "" }); }} style={{ flexShrink: 0, padding: "5px 10px", borderRadius: 8, border: `1px solid ${b1}`, background: "var(--s2)", color: t3, cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
                           <Pencil size={11} /> Reschedule
                         </button>
@@ -245,56 +266,9 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
           )}
         </AnimatePresence>
 
-        <motion.div className="au card" style={{ padding: "14px 16px", marginBottom: 18, marginTop: 28 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-            <button type="button" aria-label="Previous week" onClick={() => setViewDate((d) => { const x = new Date(d); x.setDate(x.getDate() - 7); return x; })} style={{ width: 36, height: 36, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}>
-              <ChevronLeft size={18} />
-            </button>
-            <div style={{ textAlign: "center", flex: 1, padding: "0 8px" }}>
-              <p style={{ color: t3, fontSize: 10, fontWeight: 800, letterSpacing: ".1em", textTransform: "uppercase", margin: "0 0 4px" }}>Doses for</p>
-              <p style={{ color: t1, fontSize: 15, fontWeight: 700, margin: 0 }}>{viewDate.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</p>
-            </div>
-            <button type="button" aria-label="Next week" onClick={() => setViewDate((d) => { const x = new Date(d); x.setDate(x.getDate() + 7); return x; })} style={{ width: 36, height: 36, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}>
-              <ChevronRight size={18} />
-            </button>
-          </div>
-          <div style={{ display: "flex", gap: 5, justifyContent: "space-between" }}>
-            {weekDays.map((d) => {
-              const ds = localDateStr(d);
-              const sel = ds === dateStr;
-              const isToday = ds === localDateStr(new Date());
-              return (
-                <button
-                  key={ds}
-                  type="button"
-                  onClick={() => setViewDate(new Date(d.getFullYear(), d.getMonth(), d.getDate()))}
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    padding: "7px 2px",
-                    borderRadius: 10,
-                    border: sel ? "1px solid rgba(37,99,235,.45)" : `1px solid ${b1}`,
-                    background: sel ? "var(--pd)" : "var(--s1)",
-                    cursor: "pointer",
-                    fontFamily: "inherit",
-                  }}
-                >
-                  <div style={{ fontSize: 9, fontWeight: 700, color: t3, textTransform: "uppercase" }}>{d.toLocaleDateString("en-US", { weekday: "narrow" })}</div>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: t1, fontVariantNumeric: "tabular-nums" }}>{d.getDate()}</div>
-                  {isToday && <div style={{ fontSize: 7, fontWeight: 800, color: "var(--p)", marginTop: 1 }}>now</div>}
-                </button>
-              );
-            })}
-          </div>
-          <button type="button" onClick={() => setViewDate(new Date())} style={{ marginTop: 12, width: "100%", padding: "9px", borderRadius: 11, border: `1px solid ${b1}`, background: "var(--s2)", color: "var(--p)", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-            Jump to today
-          </button>
-          {logErr ? <p style={{ color: "var(--ro)", fontSize: 12, marginTop: 10, marginBottom: 0 }}>{logErr}</p> : null}
-        </motion.div>
-
-        <motion.div className="au" style={{ marginBottom: 16 }}>
+        <motion.div className="au" style={{ marginBottom: 16, marginTop: 28 }}>
           <h2 style={{ color: t1, fontSize: 24, fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", fontWeight: 600, letterSpacing: "-.3px", marginBottom: 4 }}>Medications</h2>
-          <p style={{ color: t3, fontSize: 13, lineHeight: 1.6, marginBottom: 4 }}>Mark doses for the selected day. Past and future days are saved for your analytics.</p>
+          <p style={{ color: t3, fontSize: 13, lineHeight: 1.6, marginBottom: 4 }}>Your medications organised by time of day.</p>
         </motion.div>
         {periods.map((p, pi) => {
           const list = sorted.filter(p.fn);
@@ -304,7 +278,7 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 11 }}>
                 <span style={{ color: t1, fontSize: 13, fontWeight: 600 }}>{p.l}</span>
                 <span style={{ color: t3, fontSize: 12 }}>· {p.r}</span>
-                <span style={{ marginLeft: "auto", color: t3, fontSize: 11 }}>{list.filter(m => takenForView.has(m.id)).length}/{list.length}</span>
+                <span style={{ marginLeft: "auto", color: t3, fontSize: 11 }}>{list.filter(m => m.taken).length}/{list.length}</span>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                 {list.map(med => {
@@ -319,14 +293,17 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
                       <div style={{ flex: 1 }}>
                         <p style={{ color: t1, fontSize: 13, fontWeight: 600 }}>{med.name}</p>
                         <p style={{ color: t3, fontSize: 11, marginTop: 1 }}>{med.dosage} · {med.freq}</p>
+                        <p style={{ color: med.taken ? "var(--gr)" : t3, fontSize: 10.5, marginTop: 2, fontWeight: 600 }}>
+                          {med.completedDoses}/{med.requiredDoses} dose{med.requiredDoses > 1 ? "s" : ""} complete
+                        </p>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
                         <span className="hidden sm:flex items-center gap-1.5">
                           <button onClick={() => onEdit && onEdit(med)} title="Edit" style={{ width: 30, height: 30, borderRadius: 9, border: "1px solid var(--b1)", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, transition: "all .15s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--p)"; e.currentTarget.style.color = "var(--p)"; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--b1)"; e.currentTarget.style.color = t3; }}><Pencil size={12} /></button>
                           <button onClick={() => onDelete && onDelete(med.id)} title="Delete" style={{ width: 30, height: 30, borderRadius: 9, border: "1px solid var(--b1)", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, transition: "all .15s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--ro)"; e.currentTarget.style.color = "var(--ro)"; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--b1)"; e.currentTarget.style.color = t3; }}><Trash2 size={12} /></button>
                         </span>
-                        <button className="whitespace-nowrap" onClick={() => toggle(med.id)} style={{ padding: "5px 14px", borderRadius: 99, fontSize: 11, fontWeight: 600, border: "none", cursor: "pointer", transition: "all .18s", background: takenForView.has(med.id) ? "rgba(16,185,129,.12)" : "var(--s2)", color: takenForView.has(med.id) ? "var(--gr)" : "var(--t3)" }}>
-                          {takenForView.has(med.id) ? "Taken ✓" : "Mark taken"}
+                        <button className="whitespace-nowrap" onClick={() => toggle(med.id)} style={{ padding: "5px 14px", borderRadius: 99, fontSize: 11, fontWeight: 600, border: "none", cursor: "pointer", transition: "all .18s", background: med.taken ? "rgba(16,185,129,.12)" : "var(--s2)", color: med.taken ? "var(--gr)" : "var(--t3)" }}>
+                          {med.taken ? "Taken ✓" : `Dose ${Math.min(med.requiredDoses, med.completedDoses + 1)}/${med.requiredDoses}`}
                         </button>
                       </div>
                     </div>
