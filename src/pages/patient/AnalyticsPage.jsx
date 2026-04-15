@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Pill, Loader2 } from "lucide-react";
+import { supabase } from "../../supabase";
 import { COLS } from "../../lib/constants";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import Ring from "../../components/common/Ring";
-import { getDailyAdherence, getAdherenceStreak, getMedicationAdherence, getWeekStart, dayLabel } from "../../lib/adherence";
+import { getDailyAdherence, getAdherenceStreak, getMedicationAdherence, getWeekStart, dayLabel, localDateStr } from "../../lib/adherence";
 
 export default function AnalyticsPage({ meds, userId }) {
   const isMob = useIsMobile();
@@ -15,15 +16,16 @@ export default function AnalyticsPage({ meds, userId }) {
   const [medAdherence, setMedAdherence] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const taken = meds.filter(m => m.taken).length;
-  const todayPct = meds.length ? Math.round(taken / meds.length * 100) : 0;
+  const activeMeds = meds.filter(m => m.active !== false);
+  const taken = activeMeds.filter(m => m.taken).length;
+  const todayPct = activeMeds.length ? Math.round(taken / activeMeds.length * 100) : 0;
 
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
 
-    async function load() {
-      setLoading(true);
+    async function load(background) {
+      if (!background) setLoading(true);
       const weekStart = getWeekStart();
       const today = new Date();
 
@@ -35,21 +37,30 @@ export default function AnalyticsPage({ meds, userId }) {
 
       if (cancelled) return;
 
-      // Build week array from DB data, override today with live pct
-      const todayStr = today.toISOString().slice(0, 10);
-      const week = (daily || []).map(d => ({
-        d: dayLabel(d.log_date),
-        v: d.log_date === todayStr ? todayPct : d.adherence_pct,
-        isToday: d.log_date === todayStr,
-      }));
+      // Build week array from DB data, override today with live pct (use local date, not UTC)
+      const todayStr = localDateStr(today);
+      const week = (daily || []).map(d => {
+        const logDate = typeof d.log_date === "string" ? d.log_date.slice(0, 10) : localDateStr(d.log_date);
+        return {
+          d: dayLabel(logDate),
+          v: logDate === todayStr ? todayPct : d.adherence_pct,
+          isToday: logDate === todayStr,
+        };
+      });
       setWeekData(week);
       setStreak(str);
       setMedAdherence(perMed || []);
       setLoading(false);
     }
 
-    load();
-    return () => { cancelled = true; };
+    load(false);
+    const ch = supabase.channel(`analytics-ml-${userId}`).on("postgres_changes", { event: "*", schema: "public", table: "medication_logs", filter: `user_id=eq.${userId}` }, () => {
+      load(true);
+    }).subscribe();
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(ch);
+    };
   }, [userId, todayPct]);
 
   const avg = weekData.length

@@ -34,6 +34,7 @@ export async function loadMedications(userId) {
       .from("user_medications")
       .select("*")
       .eq("user_id", userId)
+      .or("active.eq.true,active.is.null")
       .order("created_at", { ascending: false });
     if (error) throw error;
     return (data || []).map((d) => ({
