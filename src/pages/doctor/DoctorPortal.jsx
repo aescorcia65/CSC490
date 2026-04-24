@@ -1,10 +1,10 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Pill, Calendar, LogOut, Moon, Sun, Menu, X, Plus, Send,
+  Pill, Calendar, LogOut, Moon, Sun, X, Plus, Send,
   Clock, Check, AlertCircle, Loader2, Bell, BellOff, User, ArrowRight,
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
-  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip,
+  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip, MoreHorizontal,
   Sparkles, ChevronRight
 } from "lucide-react";
 import { supabase } from "../../supabase";
@@ -1095,7 +1095,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         <header className="tb">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             {isMob&&(
-              <button onClick={()=>setMobMenu(true)} style={{width:34,height:34,borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3,flexShrink:0}}><Menu size={16}/></button>
+              <button
+                type="button"
+                aria-label="Open portal menu"
+                onClick={()=>setMobMenu(true)}
+                style={{width:34,height:34,borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3,flexShrink:0}}
+              >
+                <MoreHorizontal size={16}/>
+              </button>
             )}
             <Stethoscope size={16} color={DocAC}/>
             <span style={{color:t1,fontSize:15,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700}}>Dr. {name}</span>
@@ -1117,7 +1124,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             </button>
           </div>
         </header>
-        <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
+        <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden",paddingBottom:isMob&&!(page==="messages"&&selChat)?"calc(66px + env(safe-area-inset-bottom, 0px))":0}}>
           {}
           {page==="messages"&&(
             <div style={{flex:1,display:"flex",overflow:"hidden",flexDirection:isMob?"column":"row",minHeight:0}}>
@@ -1151,16 +1158,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   <p style={{color:t3,fontSize:11,margin:"6px 0 0",lineHeight:1.45}}>Secure chat with pharmacists about prescriptions and fills.</p>
                   ):null}
                   {msgMode==="pharmacy"?(
-                  <div style={{marginTop:10,display:"flex",gap:7}}>
-                    <input className="inp" type="email" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPharmacistByEmail();}} placeholder="Find pharmacist by email…" style={{flex:1,padding:"7px 11px",borderRadius:10,fontSize:12}}/>
+                  <div style={{marginTop:10,display:"flex",flexDirection:isMob?"column":"row",gap:7}}>
+                    <input className="inp" type="email" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPharmacistByEmail();}} placeholder="Find pharmacist by email…" style={{flex:1,padding:"7px 11px",borderRadius:10,fontSize:isMob?16:12}}/>
                     <motion.button whileTap={{scale:.93}} onClick={findPharmacistByEmail} disabled={chatSearchBusy||!chatSearchEmail.trim()}
-                      style={{padding:"7px 12px",borderRadius:10,border:"none",background:chatSearchEmail.trim()?DocAC:"var(--b1)",color:chatSearchEmail.trim()?"#fff":t3,cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700,flexShrink:0}}>
+                      style={{padding:"7px 12px",borderRadius:10,border:"none",background:chatSearchEmail.trim()?DocAC:"var(--b1)",color:chatSearchEmail.trim()?"#fff":t3,cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700,flexShrink:0,width:isMob?"100%":"auto"}}>
                       {chatSearchBusy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<Search size={13}/>}
                     </motion.button>
                   </div>
                   ):(
                   <div style={{marginTop:10}}>
-                    <input className="inp" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} placeholder="Search patients by name or email…" style={{width:"100%",padding:"7px 11px",borderRadius:10,fontSize:12,boxSizing:"border-box"}}/>
+                    <input className="inp" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} placeholder="Search patients by name or email…" style={{width:"100%",padding:"7px 11px",borderRadius:10,fontSize:isMob?16:12,boxSizing:"border-box"}}/>
                   </div>
                   )}
                   <AnimatePresence>

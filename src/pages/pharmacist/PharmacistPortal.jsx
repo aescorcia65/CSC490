@@ -1,9 +1,9 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Pill, LogOut, Moon, Sun, Menu, X, Plus, Send,
+  Pill, LogOut, Moon, Sun, X, Plus, Send,
   Loader2, User, ArrowRight, Pencil, HeartPulse, Stethoscope,
-  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Trash2, ClipboardList
+  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Trash2, ClipboardList, MoreHorizontal
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib/portalWebAudio";
@@ -1023,7 +1023,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         <header className="tb">
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             {isMob && (
-              <button type="button" onClick={() => setMobMenu(true)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0 }}><Menu size={16} /></button>
+              <button type="button" aria-label="Open portal menu" onClick={() => setMobMenu(true)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0 }}><MoreHorizontal size={16} /></button>
             )}
             <ShieldCheck size={16} color={PhAC} className="shrink-0" />
             <span className="min-w-0 truncate text-sm sm:text-[15px]" style={{ color: t1, fontFamily: "'Playfair Display',serif", fontStyle: "italic", fontWeight: 600 }} title={name}>{name}</span>
