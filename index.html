@@ -2,6 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M6 16 Q8 10 12 14 L14 16 L16 10 L18 22 L20 16 L22 18 L26 16' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>MedTrack</title>
@@ -11,12 +14,36 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <script>
       (function () {
-        try {
-          var saved = localStorage.getItem('mt_theme');
-          document.body.className = (saved === 'dark') ? '' : 'light';
-        } catch (e) {
-          document.body.className = 'light';
+        function explicit() {
+          try {
+            var ex = localStorage.getItem('mt_theme_explicit');
+            if (ex === 'light' || ex === 'dark') return ex;
+            var leg = localStorage.getItem('mt_theme');
+            if (leg === 'light' || leg === 'dark') {
+              localStorage.setItem('mt_theme_explicit', leg);
+              localStorage.removeItem('mt_theme');
+              return leg;
+            }
+          } catch (e) {}
+          return null;
         }
+        var ex = explicit();
+        var dark = false;
+        if (ex === 'dark') dark = true;
+        else if (ex === 'light') dark = false;
+        else {
+          try {
+            dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          } catch (e) {}
+        }
+        document.documentElement.classList.toggle('theme-dark', dark);
+        document.documentElement.classList.toggle('theme-light', !dark);
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        document.body.className = dark ? '' : 'light';
+        try {
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', dark ? '#1e293b' : '#2563eb');
+        } catch (e) {}
       })();
     </script>
   </head>

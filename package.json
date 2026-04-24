@@ -7,12 +7,13 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "cap:sync": "vite build && npx cap sync",
-    "cap:ios": "vite build && npx cap sync ios && npx cap open ios",
-    "cap:android": "vite build && npx cap sync android && npx cap open android"
+    "cap:sync": "vite build --mode capacitor && npx cap sync",
+    "cap:ios": "vite build --mode capacitor && npx cap sync ios && npx cap open ios",
+    "cap:android": "vite build --mode capacitor && npx cap sync android && npx cap open android"
   },
   "dependencies": {
     "@capacitor/android": "^7.6.0",
+    "@capacitor/browser": "^7.0.2",
     "@capacitor/cli": "^7.6.0",
     "@capacitor/core": "^7.6.0",
     "@capacitor/haptics": "^7.0.4",

@@ -1,14 +1,19 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, LogOut, Moon, Sun, Menu, X, Plus, Send,
-  Loader2, User, ArrowRight, Pencil, HeartPulse,
-  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText
+  Loader2, User, ArrowRight, Pencil, HeartPulse, Stethoscope,
+  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Trash2, ClipboardList
 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib/portalWebAudio";
+import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
+import { notificationSuggestsPrescription, notificationSuggestsChat } from "../../lib/notificationNavigation";
+import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
 import { PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import NicknameModal from "../../components/modals/NicknameModal";
+import RefillRequestsPage from "./RefillRequestsPage";
 export default function PharmacistPortal({ user, light, setLight, userName, setDisplayName }) {
   const [page, setPage] = useState("dashboard");
   const [prescriptions, setPrescriptions] = useState([]);
@@ -28,6 +33,13 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const [msgSending, setMsgSending] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [unreadPerContact, setUnreadPerContact] = useState({});
+  const [msgMode, setMsgMode] = useState("doctors");
+  const [patientChatContacts, setPatientChatContacts] = useState([]);
+  const [unreadPatientCount, setUnreadPatientCount] = useState(0);
+  const [unreadPerPatient, setUnreadPerPatient] = useState({});
+  const [patientChatSearchEmail, setPatientChatSearchEmail] = useState("");
+  const [patientChatSearchBusy, setPatientChatSearchBusy] = useState(false);
+  const [patientChatSearchMsg, setPatientChatSearchMsg] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState({});
   const [chatSearchEmail, setChatSearchEmail] = useState("");
   const [chatSearchBusy, setChatSearchBusy] = useState(false);
@@ -43,10 +55,29 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     return isNaN(v) ? 0.7 : Math.min(1, Math.max(0.1, v));
   });
   const [showSoundSettings, setShowSoundSettings] = useState(false);
+  const soundEnabledRef = useRef(soundEnabled);
+  const soundTypeRef = useRef(soundType);
+  const soundVolumeRef = useRef(soundVolume);
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+  useEffect(() => { soundTypeRef.current = soundType; }, [soundType]);
+  useEffect(() => { soundVolumeRef.current = soundVolume; }, [soundVolume]);
   const msgEndRef = useRef(null);
   const msgListRef = useRef(null);
   const atBottomRef = useRef(true);
+  const typingBroadcastRef = useRef(null);
   const [peerTyping, setPeerTyping] = useState(false);
+
+  useEffect(() => {
+    const unlock = () => { void ensurePortalAudioContext(); };
+    window.addEventListener("pointerdown", unlock, { passive: true });
+    window.addEventListener("touchstart", unlock, { passive: true });
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("touchstart", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
 
   function sortMsgs(arr){ return [...arr].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)); }
 
@@ -67,7 +98,12 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const [localName, setLocalName] = useState(userName);
   useEffect(() => { if (userName) setLocalName(userName); }, [userName]);
   const name = localName || userName || user?.displayName || user?.email?.split("@")[0] || "Pharmacist";
+  const totalChatUnread = unreadCount + unreadPatientCount;
   const saveName = (n) => { setLocalName(n); if (setDisplayName) setDisplayName(n); };
+
+  function sortContacts(list) {
+    return [...list].sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || ""));
+  }
 
   const SOUND_PROFILES = {
     standard: { label: "Standard", desc: "Clear double-tone", tones: [[880, "sine", 0, 0.06], [1320, "sine", 0.07, 0.18]] },
@@ -87,26 +123,14 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   }
 
   function playNotifSound(type, vol) {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const gain = vol !== undefined ? vol : soundVolume;
-      const profile = SOUND_PROFILES[type] || SOUND_PROFILES.standard;
-      profile.tones.forEach(([freq, wave, delay, dur]) => {
-        const o = ctx.createOscillator(), g = ctx.createGain();
-        o.connect(g); g.connect(ctx.destination);
-        o.frequency.value = freq;
-        o.type = wave || "sine";
-        g.gain.setValueAtTime(0, ctx.currentTime + delay);
-        g.gain.linearRampToValueAtTime(gain, ctx.currentTime + delay + 0.015);
-        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + dur);
-        o.start(ctx.currentTime + delay); o.stop(ctx.currentTime + delay + dur + 0.02);
-      });
-    } catch (e) {}
+    const gain = vol !== undefined ? vol : soundVolume;
+    const profile = SOUND_PROFILES[type] || SOUND_PROFILES.standard;
+    void playPortalNotificationSound(profile.tones, gain);
   }
 
   function toggleSound(val) { setSoundEnabled(val); localStorage.setItem("mt_sound_on", String(val)); }
-  function changeSoundType(val) { setSoundType(val); localStorage.setItem("mt_sound_type", val); playNotifSound(val, soundVolume); }
-  function changeSoundVolume(val) { setSoundVolume(val); localStorage.setItem("mt_sound_vol", String(val)); playNotifSound(soundType, val); }
+  function changeSoundType(val) { setSoundType(val); localStorage.setItem("mt_sound_type", val); void playNotifSound(val, soundVolume); }
+  function changeSoundVolume(val) { setSoundVolume(val); localStorage.setItem("mt_sound_vol", String(val)); void playNotifSound(soundType, val); }
   async function findPatientByEmail() {
     const email = patSearchEmail.trim().toLowerCase();
     if (!email || patSearchBusy) return;
@@ -134,11 +158,11 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   async function loadPrescriptions() {
     try {
       const { data: mine } = await supabase.from("prescriptions")
-        .select("id,patient_id,status,notes,created_at,pharmacist_id")
+        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id")
         .eq("pharmacist_id", user.id)
         .order("created_at", { ascending: false });
       const { data: unassigned } = await supabase.from("prescriptions")
-        .select("id,patient_id,status,notes,created_at,pharmacist_id")
+        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id")
         .is("pharmacist_id", null)
         .eq("status", "pending_pharmacist")
         .order("created_at", { ascending: false });
@@ -198,7 +222,106 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     })();
   }, [user?.id]);
   const selChatRef = useRef(selChat);
+  const msgModeRef = useRef(msgMode);
+  const chatContactsRef = useRef(chatContacts);
+  const patientChatContactsRef = useRef(patientChatContacts);
   useEffect(() => { selChatRef.current = selChat; }, [selChat]);
+  useEffect(() => { msgModeRef.current = msgMode; }, [msgMode]);
+  useEffect(() => { chatContactsRef.current = chatContacts; }, [chatContacts]);
+  useEffect(() => { patientChatContactsRef.current = patientChatContacts; }, [patientChatContacts]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const docIds = new Set((chatContactsRef.current || []).map(c => c.id));
+        const patientIdSet = new Set(prescriptions.map(r => r.patient_id).filter(Boolean));
+        const { data: pmAll } = await supabase
+          .from("patient_messages")
+          .select("sender_id,recipient_id,created_at,read_at")
+          .or(`sender_id.eq.${user.id},recipient_id.eq.${user.id}`)
+          .order("created_at", { ascending: false })
+          .limit(800);
+        const lastByPatient = {};
+        const unreadMap = {};
+        let unreadPt = 0;
+        const seenLatest = {};
+        (pmAll || []).forEach((m) => {
+          const other = m.sender_id === user.id ? m.recipient_id : m.sender_id;
+          if (!other || other === user.id || docIds.has(other)) return;
+          if (!seenLatest[other]) {
+            seenLatest[other] = true;
+            lastByPatient[other] = m.created_at;
+          }
+          if (m.recipient_id === user.id && !m.read_at) {
+            unreadPt += 1;
+            unreadMap[other] = (unreadMap[other] || 0) + 1;
+          }
+        });
+        const allPatIds = new Set([...patientIdSet, ...Object.keys(lastByPatient)]);
+        docIds.forEach((id) => allPatIds.delete(id));
+        if (allPatIds.size === 0) {
+          if (!cancelled) {
+            setPatientChatContacts([]);
+            setUnreadPerPatient({});
+            setUnreadPatientCount(0);
+          }
+          return;
+        }
+        const { data: profs } = await supabase
+          .from("profiles")
+          .select("id,first_name,last_name,email,role")
+          .in("id", [...allPatIds]);
+        const contacts = (profs || [])
+          .filter((p) => p.role === "patient")
+          .map((p) => ({
+            id: p.id,
+            name: [p.first_name, p.last_name].filter(Boolean).join(" ") || p.email || "Patient",
+            email: p.email || "",
+            lastMessageAt: lastByPatient[p.id] || null,
+          }));
+        if (!cancelled) {
+          setPatientChatContacts(sortContacts(contacts));
+          setUnreadPerPatient(unreadMap);
+          setUnreadPatientCount(unreadPt);
+        }
+      } catch (e) {
+        console.error("Patient chat contacts:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id, prescriptions]);
+
+  useEffect(() => {
+    setChatSearchEmail("");
+    setChatSearchMsg(null);
+    setPatientChatSearchEmail("");
+    setPatientChatSearchMsg(null);
+  }, [msgMode]);
+
+  useEffect(() => {
+    if (!selChat?.id) return;
+    const inPat = patientChatContacts.some(c => c.id === selChat.id);
+    const inDoc = chatContacts.some(c => c.id === selChat.id);
+    if (inPat && !inDoc) setMsgMode("patients");
+    else if (inDoc && !inPat) setMsgMode("doctors");
+  }, [selChat?.id, patientChatContacts, chatContacts]);
+
+  useEffect(() => {
+    if (page !== "messages") return;
+    setSelChat(prev => {
+      if (msgMode === "doctors") {
+        if (!chatContacts.length) return null;
+        if (prev && chatContacts.some(c => c.id === prev.id)) return chatContacts.find(c => c.id === prev.id);
+        return chatContacts[0];
+      }
+      if (!patientChatContacts.length) return null;
+      if (prev && patientChatContacts.some(c => c.id === prev.id)) return patientChatContacts.find(c => c.id === prev.id);
+      return patientChatContacts[0];
+    });
+  }, [msgMode, page, chatContacts, patientChatContacts]);
+
   useEffect(() => {
     if (!selChat) return;
     setChatContacts(prev => {
@@ -210,10 +333,27 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     });
   }, [chatContacts]);
   useEffect(() => {
+    if (msgMode !== "patients" || !selChat) return;
+    setPatientChatContacts(prev => {
+      const updated = prev.find(c => c.id === selChat.id);
+      if (updated && updated.lastMessageAt !== selChat.lastMessageAt) {
+        setSelChat(updated);
+      }
+      return prev;
+    });
+  }, [patientChatContacts, msgMode, selChat?.id, selChat?.lastMessageAt]);
+
+  useEffect(() => {
     if (!selChat || !user?.id) return;
     atBottomRef.current = true;
     loadMessages(selChat.id);
   }, [selChat?.id]);
+
+  const peerIsPatient = useMemo(() => !!selChat && (
+    patientChatContacts.some(c => c.id === selChat.id) ||
+    (!chatContacts.some(c => c.id === selChat.id) && msgMode === "patients")
+  ), [selChat?.id, patientChatContacts, chatContacts, msgMode]);
+  const peerAvatarBg = useMemo(() => (peerIsPatient ? "linear-gradient(135deg,#7c3aed,#6d28d9)" : "linear-gradient(135deg,#0e7490,#155e75)"), [peerIsPatient]);
 
   useLayoutEffect(() => {
     if(atBottomRef.current) doScroll();
@@ -237,6 +377,31 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     const interval = setInterval(() => {
       const chat = selChatRef.current;
       if (!chat) return;
+      let pollPatient = patientChatContactsRef.current.some(c => c.id === chat.id);
+      if (!pollPatient && !chatContactsRef.current.some(c => c.id === chat.id)) {
+        pollPatient = msgModeRef.current === "patients";
+      } else if (chatContactsRef.current.some(c => c.id === chat.id) && !patientChatContactsRef.current.some(c => c.id === chat.id)) {
+        pollPatient = false;
+      }
+      if (pollPatient) {
+        const q = `and(sender_id.eq.${user.id},recipient_id.eq.${chat.id}),and(sender_id.eq.${chat.id},recipient_id.eq.${user.id})`;
+        supabase.from("patient_messages").select("*").or(q).order("created_at", { ascending: true }).limit(200)
+          .then(({ data }) => {
+            if (!data) return;
+            setMessages(prev => {
+              const realPrev = prev.filter(m => !String(m.id).startsWith("temp-"));
+              const lastPrevId = realPrev[realPrev.length - 1]?.id;
+              const lastNewId = data[data.length - 1]?.id;
+              if (lastPrevId === lastNewId && realPrev.length === data.length) return prev;
+              if (lastPrevId !== lastNewId && data.length > 0) {
+                const ts = data[data.length - 1].created_at;
+                setPatientChatContacts(prev => sortContacts([...prev].map(c => c.id === chat.id ? { ...c, lastMessageAt: ts } : c)));
+              }
+              return sortMsgs(data);
+            });
+          });
+        return;
+      }
       supabase.from("chat_messages").select("*")
         .eq("pharmacist_id", user.id).eq("doctor_id", chat.id)
         .order("created_at", { ascending: true })
@@ -268,7 +433,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
           (payload) => {
             const msg = payload.new;
             if (msg.sender_id === user.id) return;
-            if (soundEnabled) playNotifSound(soundType);
+            if (soundEnabledRef.current) playNotifSound(soundTypeRef.current, soundVolumeRef.current);
             const currentChat = selChatRef.current;
             setChatContacts(prev => [...prev].map(c => c.id === msg.doctor_id ? { ...c, lastMessageAt: msg.created_at } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
             if (currentChat && msg.doctor_id === currentChat.id) {
@@ -294,6 +459,76 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     subscribe();
     return () => { if (channel) supabase.removeChannel(channel); };
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    function handlePatientThreadInsert(payload) {
+      const msg = payload.new;
+      if (!msg) return;
+      const other = msg.sender_id === user.id ? msg.recipient_id : msg.sender_id;
+      if (chatContactsRef.current.some(c => c.id === other)) return;
+      const currentChat = selChatRef.current;
+      const mode = msgModeRef.current;
+      setPatientChatContacts(prev => {
+        if (!prev.some(c => c.id === other)) {
+          void supabase.from("profiles").select("id,first_name,last_name,email,role").eq("id", other).maybeSingle().then(({ data }) => {
+            if (!data || data.role !== "patient") return;
+            const nc = {
+              id: data.id,
+              name: [data.first_name, data.last_name].filter(Boolean).join(" ") || data.email || "Patient",
+              email: data.email || "",
+              lastMessageAt: msg.created_at,
+            };
+            setPatientChatContacts(p => {
+              if (p.some(c => c.id === other)) {
+                return sortContacts([...p].map(c => c.id === other ? { ...c, lastMessageAt: msg.created_at } : c));
+              }
+              return sortContacts([...p, nc]);
+            });
+          });
+          return prev;
+        }
+        return sortContacts([...prev].map(c => c.id === other ? { ...c, lastMessageAt: msg.created_at } : c));
+      });
+      if (msg.sender_id !== user.id && soundEnabledRef.current) playNotifSound(soundTypeRef.current, soundVolumeRef.current);
+      if (mode === "patients" && currentChat && currentChat.id === other) {
+        const pair = new Set([msg.sender_id, msg.recipient_id]);
+        if (pair.has(user.id) && pair.has(other)) {
+          setMessages(prev => {
+            if (prev.some(m => m.id === msg.id)) return prev;
+            return sortMsgs([...prev, msg]);
+          });
+          if (msg.recipient_id === user.id && !msg.read_at) {
+            supabase.from("patient_messages").update({ read_at: new Date().toISOString() }).eq("id", msg.id).then(() => {});
+            setUnreadPatientCount(prev => Math.max(0, prev - 1));
+            setUnreadPerPatient(prev => {
+              const n = { ...prev };
+              if (n[other]) n[other] = Math.max(0, n[other] - 1);
+              if (!n[other]) delete n[other];
+              return n;
+            });
+          }
+        }
+      } else if (msg.recipient_id === user.id && !msg.read_at && msg.sender_id !== user.id) {
+        setUnreadPatientCount(prev => prev + 1);
+        setUnreadPerPatient(prev => ({ ...prev, [other]: (prev[other] || 0) + 1 }));
+      }
+    }
+    function onPatientMsgInsert(payload) {
+      const msg = payload.new;
+      if (!msg) return;
+      if (msg.recipient_id !== user.id && msg.sender_id !== user.id) return;
+      handlePatientThreadInsert(payload);
+    }
+    const ch = supabase
+      .channel(`pha-pt-msgs-${user.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "patient_messages" }, onPatientMsgInsert)
+      .subscribe();
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [user?.id]);
+
   useEffect(() => {
     if (!user?.id) return;
     supabase.from("user_presence")
@@ -353,39 +588,71 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   useEffect(() => {
     if (!selChat?.id || !user?.id) return;
     setPeerTyping(false);
-    const ch = supabase.channel(`typing-doc-${selChat.id}-${user.id}`);
+    typingBroadcastRef.current = null;
+    const thread = [user.id, selChat.id].sort().join("-");
+    const chName = peerIsPatient ? `pm-typing-${thread}` : `typing-doc-${selChat.id}-${user.id}`;
+    const ch = supabase.channel(chName, { config: { broadcast: { ack: false } } });
     ch.on("broadcast", { event: "typing" }, (payload) => {
       if (payload.payload?.sender_id !== user.id) {
         setPeerTyping(true);
         clearTimeout(ch._typingTimer);
         ch._typingTimer = setTimeout(() => setPeerTyping(false), 2500);
       }
-    }).subscribe();
-    return () => { clearTimeout(ch._typingTimer); supabase.removeChannel(ch); };
-  }, [selChat?.id, user?.id]);
+    }).subscribe((status) => {
+      if (status === "SUBSCRIBED") typingBroadcastRef.current = ch;
+    });
+    return () => {
+      typingBroadcastRef.current = null;
+      clearTimeout(ch._typingTimer);
+      supabase.removeChannel(ch);
+    };
+  }, [selChat?.id, user?.id, peerIsPatient]);
 
   function emitTyping() {
     if (!selChat?.id || !user?.id) return;
-    const chName = `typing-doc-${selChat.id}-${user.id}`;
-    supabase.channel(chName).send({ type: "broadcast", event: "typing", payload: { sender_id: user.id } }).catch(() => {});
+    typingBroadcastRef.current?.send({ type: "broadcast", event: "typing", payload: { sender_id: user.id } }).catch(() => {});
   }
 
-  async function loadMessages(doctorId) {
+  async function loadMessages(peerId) {
     try {
+      let usePatientMsgs = patientChatContacts.some(c => c.id === peerId);
+      if (!usePatientMsgs && !chatContacts.some(c => c.id === peerId)) {
+        usePatientMsgs = msgModeRef.current === "patients";
+      } else if (chatContacts.some(c => c.id === peerId) && !patientChatContacts.some(c => c.id === peerId)) {
+        usePatientMsgs = false;
+      }
+      if (usePatientMsgs) {
+        const q = `and(sender_id.eq.${user.id},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${user.id})`;
+        const { data, error } = await supabase.from("patient_messages").select("*").or(q).order("created_at", { ascending: true }).limit(200);
+        if (error) { console.error("Load patient msgs:", error.message); return; }
+        atBottomRef.current = true;
+        setMessages(sortMsgs(data || []));
+        setUnreadPerPatient(prev => { const n = { ...prev }; delete n[peerId]; return n; });
+        if (data && data.length > 0) {
+          const ts = data[data.length - 1].created_at;
+          setPatientChatContacts(prev => sortContacts([...prev].map(c => c.id === peerId ? { ...c, lastMessageAt: ts } : c)));
+        }
+        const unreadIds = (data || []).filter(m => m.recipient_id === user.id && m.sender_id === peerId && !m.read_at).map(m => m.id);
+        if (unreadIds.length > 0) {
+          supabase.from("patient_messages").update({ read_at: new Date().toISOString() }).in("id", unreadIds).then(() => {});
+          setUnreadPatientCount(prev => Math.max(0, prev - unreadIds.length));
+        }
+        return;
+      }
       const { data, error } = await supabase.from("chat_messages")
         .select("*")
         .eq("pharmacist_id", user.id)
-        .eq("doctor_id", doctorId)
+        .eq("doctor_id", peerId)
         .order("created_at", { ascending: true });
       if (error) { console.error("Load messages error:", error.message); return; }
       atBottomRef.current = true;
       setMessages(sortMsgs(data || []));
-      setUnreadPerContact(prev => { const n = { ...prev }; delete n[doctorId]; return n; });
+      setUnreadPerContact(prev => { const n = { ...prev }; delete n[peerId]; return n; });
       if (data && data.length > 0) {
         const ts = data[data.length - 1].created_at;
-        setChatContacts(prev => [...prev].map(c => c.id === doctorId ? { ...c, lastMessageAt: ts } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
+        setChatContacts(prev => [...prev].map(c => c.id === peerId ? { ...c, lastMessageAt: ts } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
       }
-      const unreadIds = (data || []).filter(m => m.sender_id === doctorId && !m.read_at).map(m => m.id);
+      const unreadIds = (data || []).filter(m => m.sender_id === peerId && !m.read_at).map(m => m.id);
       if (unreadIds.length > 0) {
         supabase.from("chat_messages").update({ read_at: new Date().toISOString() }).in("id", unreadIds).then(() => {});
         setUnreadCount(prev => Math.max(0, prev - unreadIds.length));
@@ -395,10 +662,46 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   async function sendMessage() {
     if (!msgInput.trim() || !selChat || msgSending) return;
     setMsgSending(true);
-    const body = msgInput.trim();
+    const userText = msgInput.trim();
+    const sid = selChat.id;
+    let sendPatientMsgs = patientChatContacts.some(c => c.id === sid);
+    if (!sendPatientMsgs && !chatContacts.some(c => c.id === sid)) {
+      sendPatientMsgs = msgMode === "patients";
+    } else if (chatContacts.some(c => c.id === sid) && !patientChatContacts.some(c => c.id === sid)) {
+      sendPatientMsgs = false;
+    }
+    const body = userText;
     setMsgInput("");
     const now = new Date().toISOString();
     const tempId = `temp-${Date.now()}`;
+    if (sendPatientMsgs) {
+      const tempMsg = { id: tempId, sender_id: user.id, recipient_id: selChat.id, body, created_at: now, read_at: null };
+      setMessages(prev => sortMsgs([...prev, tempMsg]));
+      setPatientChatContacts(prev => sortContacts([...prev].map(c => c.id === selChat.id ? { ...c, lastMessageAt: now } : c)));
+      try {
+        const { data: msg, error } = await supabase.from("patient_messages")
+          .insert({ sender_id: user.id, recipient_id: selChat.id, body })
+          .select("*").single();
+        if (error) {
+          console.error("Send error:", error.message);
+          setMessages(prev => prev.filter(m => m.id !== tempId));
+          setMsgInput(body);
+          return;
+        }
+        setMessages(prev => sortMsgs(prev.map(m => m.id === tempId ? msg : m)));
+        notifyRecipientNewChatMessage({
+          recipientId: selChat.id,
+          senderName: name,
+          messageText: userText,
+          relatedMessageId: msg?.id,
+        });
+      } catch (e) {
+        console.error("Send:", e);
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+        setMsgInput(body);
+      } finally { setMsgSending(false); }
+      return;
+    }
     const tempMsg = { id: tempId, doctor_id: selChat.id, pharmacist_id: user.id, sender_id: user.id, body, created_at: now, read_at: null };
     setMessages(prev => sortMsgs([...prev, tempMsg]));
     setChatContacts(prev => [...prev].map(c => c.id === selChat.id ? { ...c, lastMessageAt: now } : c).sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || "")));
@@ -416,6 +719,12 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         return;
       }
       setMessages(prev => sortMsgs(prev.map(m => m.id === tempId ? msg : m)));
+      notifyRecipientNewChatMessage({
+        recipientId: selChat.id,
+        senderName: name,
+        messageText: body,
+        relatedMessageId: msg?.id,
+      });
     } catch (e) {
       console.error("Send:", e);
       setMessages(prev => prev.filter(m => m.id !== tempId));
@@ -454,6 +763,44 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     } catch (e) { setChatSearchMsg({ type: "err", text: "Something went wrong. Please try again." }); }
     finally { setChatSearchBusy(false); }
   }
+
+  async function findPatientForChatByEmail() {
+    const email = patientChatSearchEmail.trim().toLowerCase();
+    if (!email || patientChatSearchBusy) return;
+    setPatientChatSearchBusy(true);
+    setPatientChatSearchMsg(null);
+    try {
+      const { data: rows, error } = await supabase.from("profiles")
+        .select("id,first_name,last_name,email,role")
+        .eq("email", email)
+        .limit(1);
+      if (error) { setPatientChatSearchMsg({ type: "err", text: "Search failed: " + error.message }); return; }
+      const prof = rows && rows.length > 0 ? rows[0] : null;
+      if (!prof) { setPatientChatSearchMsg({ type: "err", text: "No account found with that email." }); return; }
+      if (prof.role !== "patient") { setPatientChatSearchMsg({ type: "err", text: "That account is not a patient." }); return; }
+      const fullName = [prof.first_name, prof.last_name].filter(Boolean).join(" ") || prof.email || "Patient";
+      setPatientNames(prev => ({ ...prev, [prof.id]: fullName }));
+      if (patientChatContacts.find(c => c.id === prof.id)) {
+        const ex = patientChatContacts.find(c => c.id === prof.id);
+        setMsgMode("patients");
+        setSelChat(ex);
+        setPatientChatSearchEmail("");
+        setPatientChatSearchMsg({ type: "ok", text: `Messaging ${fullName}.` });
+        setTimeout(() => setPatientChatSearchMsg(null), 2000);
+        return;
+      }
+      const nc = { id: prof.id, name: fullName, email: prof.email || "", lastMessageAt: null };
+      setPatientChatContacts(prev => sortContacts([...prev, nc]));
+      setMsgMode("patients");
+      setSelChat(nc);
+      setPatientChatSearchEmail("");
+      setPatientChatSearchMsg({ type: "ok", text: `${fullName} added — say hello below.` });
+      setTimeout(() => setPatientChatSearchMsg(null), 2500);
+    } catch (e) {
+      setPatientChatSearchMsg({ type: "err", text: "Something went wrong. Please try again." });
+    } finally { setPatientChatSearchBusy(false); }
+  }
+
   async function openPrescription(rx) {
     setSelRx(rx); setLoading(true); setRxMeds([]);
     try { const { data } = await supabase.from("prescription_medications").select("*").eq("prescription_id", rx.id); setRxMeds(data || []); }
@@ -490,28 +837,76 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     } catch (e) { console.error("updateStatus:", e); } finally { setActionBusy(false); }
   }
 
-  // Load pharmacist notifications + poll every 15s as fallback
+  // Load pharmacist notifications + poll fallback; realtime keeps read/delete in sync
   useEffect(() => {
     if (!user?.id) return;
     const load = () => supabase.from("notifications").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(40).then(({ data }) => setPhaNotifs(data || []));
     load();
     const poll = setInterval(load, 15000);
     const ch = supabase.channel(`pha-notifs-${user.id}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, (p) => {
-        setPhaNotifs(prev => prev.some(n => n.id === p.new.id) ? prev : [p.new, ...prev]);
+      .on("postgres_changes", { event: "*", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, (p) => {
+        setPhaNotifs(prev => mergeNotificationRows(prev, p, 40));
       }).subscribe();
     return () => { clearInterval(poll); supabase.removeChannel(ch); };
   }, [user?.id]);
 
   async function markNotifRead(id) {
-    setPhaNotifs(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
-    await supabase.from("notifications").update({ read_at: new Date().toISOString() }).eq("id", id);
+    if (!user?.id) return;
+    const snapshot = phaNotifs;
+    const now = new Date().toISOString();
+    setPhaNotifs(prev => prev.map(n => n.id === id ? { ...n, read_at: now } : n));
+    const { error } = await supabase.from("notifications").update({ read_at: now }).eq("id", id).eq("user_id", user.id);
+    if (error) { console.error("notifications.mark read:", error.message); setPhaNotifs(snapshot); }
   }
   async function markAllNotifsRead() {
+    if (!user?.id) return;
     const ids = phaNotifs.filter(n => !n.read_at).map(n => n.id);
     if (!ids.length) return;
-    setPhaNotifs(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
-    await supabase.from("notifications").update({ read_at: new Date().toISOString() }).in("id", ids);
+    const snapshot = phaNotifs;
+    const now = new Date().toISOString();
+    setPhaNotifs(prev => prev.map(n => ({ ...n, read_at: n.read_at || now })));
+    const { error } = await supabase.from("notifications").update({ read_at: now }).in("id", ids).eq("user_id", user.id);
+    if (error) { console.error("notifications.mark all read:", error.message); setPhaNotifs(snapshot); }
+  }
+  async function removeNotif(id) {
+    if (!user?.id) return;
+    const snapshot = phaNotifs;
+    setPhaNotifs(prev => prev.filter(n => n.id !== id));
+    const { error } = await supabase.from("notifications").delete().eq("id", id).eq("user_id", user.id);
+    if (error) { console.error("notifications.delete:", error.message); setPhaNotifs(snapshot); }
+  }
+  async function clearAllNotifs() {
+    if (!phaNotifs.length || !user?.id) return;
+    const snapshot = phaNotifs;
+    const ids = phaNotifs.map(n => n.id);
+    setPhaNotifs([]);
+    const { error } = await supabase.from("notifications").delete().in("id", ids).eq("user_id", user.id);
+    if (error) { console.error("notifications.delete all:", error.message); setPhaNotifs(snapshot); }
+  }
+
+  async function openNotificationTarget(n) {
+    if (!n?.id || !user?.id) return;
+    if (!n.read_at) await markNotifRead(n.id);
+    setShowNotifPanel(false);
+    const rxId = n.related_id;
+    if (rxId && notificationSuggestsPrescription(n)) {
+      let rx = prescriptions.find(r => r.id === rxId);
+      if (!rx) {
+        const { data, error } = await supabase.from("prescriptions").select("*").eq("id", rxId).maybeSingle();
+        if (error) console.error("openNotificationTarget:", error.message);
+        rx = data;
+      }
+      if (rx) {
+        setPage("prescriptions");
+        openPrescription(rx);
+        return;
+      }
+    }
+    if (notificationSuggestsChat(n)) {
+      setPage("messages");
+      return;
+    }
+    setPage("dashboard");
   }
 
   const [rxMessages, setRxMessages] = useState([]);
@@ -536,11 +931,25 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       const { data: msg, error } = await supabase.from("prescription_messages").insert({ prescription_id: selRx.id, sender_id: user.id, body }).select("*").single();
       if (error) throw error;
       setRxMessages(prev => prev.map(m => m.id === tempId ? msg : m));
-      // Notify doctor of new rx chat message
-      if (selRx.doctor_id) {
-        try {
-          await supabase.from("notifications").insert({ user_id: selRx.doctor_id, type: "general", title: "New prescription message", body: `${name} sent a message about a prescription for ${patientNames[selRx.patient_id] || "a patient"}.`, related_id: selRx.id });
-        } catch {}
+      let doctorId = selRx.doctor_id;
+      let patientId = selRx.patient_id;
+      if (!doctorId || !patientId) {
+        const { data: rxRow } = await supabase.from("prescriptions").select("doctor_id,patient_id").eq("id", selRx.id).maybeSingle();
+        if (rxRow) {
+          if (!doctorId) doctorId = rxRow.doctor_id;
+          if (!patientId) patientId = rxRow.patient_id;
+        }
+      }
+      const patLabel = patientNames[patientId] || "a patient";
+      const rows = [];
+      if (doctorId) {
+        rows.push({ user_id: doctorId, type: "general", title: "New prescription message", body: `${name} sent a message about a prescription for ${patLabel}.`, related_id: selRx.id });
+      }
+      if (patientId) {
+        rows.push({ user_id: patientId, type: "general", title: "Prescription updated", body: "Your care team added an update. Open Prescriptions to view the thread.", related_id: selRx.id });
+      }
+      if (rows.length) {
+        try { await supabase.from("notifications").insert(rows); } catch {}
       }
     } catch {
       setRxMessages(prev => prev.filter(m => m.id !== tempId));
@@ -561,6 +970,10 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const pendingCount = prescriptions.filter(p => p.status === "pending_pharmacist" || p.status === "pending_fill").length;
   const readyCount = prescriptions.filter(p => p.status === "ready" || p.status === "filled" || p.status === "picked_up").length;
   const filtered = prescriptions.filter(p => !search || (patientNames[p.patient_id] || "").toLowerCase().includes(search.toLowerCase()));
+  const patientChatFilter = patientChatSearchEmail.trim().toLowerCase();
+  const filteredPatientChats = patientChatFilter
+    ? patientChatContacts.filter(c => (c.name || "").toLowerCase().includes(patientChatFilter) || (c.email || "").toLowerCase().includes(patientChatFilter))
+    : patientChatContacts;
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
       {}
@@ -581,11 +994,11 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
           </div>
           <div style={{ height: 1, background: "var(--b0)", margin: "0 12px 10px" }} />
           <nav style={{ flex: 1, padding: "0 7px", display: "flex", flexDirection: "column", gap: 1 }}>
-            {[["dashboard", "Dashboard", HeartPulse], ["prescriptions", "Prescriptions", Pill], ["messages", "Messages", MessageSquare]].map(([id, l, I]) => (
+            {[["dashboard", "Dashboard", HeartPulse], ["refills", "Refill requests", ClipboardList], ["prescriptions", "Prescriptions", Pill], ["messages", "Messages", MessageSquare]].map(([id, l, I]) => (
               <div key={id} className={`nl ${page === id ? "pha-on" : ""}`} onClick={() => { setPage(id); setSelRx(null); }}>
                 <I size={15} />{l}
-                {id === "messages" && unreadCount > 0 && (
-                  <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{unreadCount}</span>
+                {id === "messages" && totalChatUnread > 0 && (
+                  <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{totalChatUnread > 99 ? "99+" : totalChatUnread}</span>
                 )}
               </div>
             ))}
@@ -629,6 +1042,18 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         </header>
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", paddingBottom: isMob && !(page === "messages" && selChat) ? "calc(66px + env(safe-area-inset-bottom, 0px))" : 0 }}>
           {}
+          {page === "refills" && (
+            <RefillRequestsPage
+              userId={user?.id}
+              patientNames={patientNames}
+              setPatientNames={setPatientNames}
+              isMob={isMob}
+              PhAC={PhAC}
+              t1={t1}
+              t3={t3}
+              b1={b1}
+            />
+          )}
           {page === "messages" && (
             <div style={{ flex: 1, display: "flex", overflow: "hidden", flexDirection: isMob ? "column" : "row", minHeight: 0 }}>
               {}
@@ -636,55 +1061,151 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
               <div style={{ width: isMob ? "100%" : 280, flexShrink: 0, borderRight: isMob ? "none" : `1px solid ${b1}`, borderBottom: isMob ? `1px solid ${b1}` : "none", display: "flex", flexDirection: "column", background: "var(--s1)", minHeight: 0 }}>
                 <div style={{ padding: isMob ? "12px 12px" : "14px 16px", borderBottom: `1px solid ${b1}` }}>
                   <h2 className="text-sm sm:text-[15px]" style={{ color: t1, fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-                    <MessageSquare size={14} color={PhAC} className="shrink-0" /> Doctor Chat
+                    <MessageSquare size={14} color={PhAC} className="shrink-0" /> Messages
                   </h2>
-                  {}
-                  <div className={`mt-2.5 flex gap-2 ${isMob ? "flex-col sm:flex-row" : ""}`}>
-                    <input className="inp min-w-0" type="email" value={chatSearchEmail}
-                      onChange={e => setChatSearchEmail(e.target.value)}
-                      onKeyDown={e => { if (e.key === "Enter") findDoctorByEmail(); }}
-                      placeholder="Find doctor by email…"
-                      style={{ flex: 1, padding: "8px 11px", borderRadius: 10, fontSize: 16 }} />
-                    <motion.button type="button" whileTap={{ scale: .93 }} onClick={findDoctorByEmail}
-                      disabled={chatSearchBusy || !chatSearchEmail.trim()}
-                      className={isMob ? "w-full sm:w-auto" : ""}
-                      style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: chatSearchEmail.trim() ? PhAC : "var(--b1)", color: chatSearchEmail.trim() ? "#fff" : t3, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
-                      {chatSearchBusy ? <Loader2 size={13} style={{ animation: "spin360 .7s linear infinite" }} /> : <Search size={13} />}
-                    </motion.button>
+                  <div className="mt-2.5 flex gap-1.5" style={{ marginTop: 10 }}>
+                    {[
+                      ["doctors", "Doctors", unreadCount],
+                      ["patients", "Patients", unreadPatientCount],
+                    ].map(([id, label, ur]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => {
+                          setMsgMode(id);
+                          if (id === "doctors") setSelChat(chatContacts[0] || null);
+                          else setSelChat(patientChatContacts[0] || null);
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          border: msgMode === id ? `2px solid ${PhAC}` : `1px solid ${b1}`,
+                          background: msgMode === id ? "var(--pha-pd)" : "var(--s2)",
+                          cursor: "pointer",
+                          fontFamily: "inherit",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: t1,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 6,
+                        }}
+                      >
+                        {id === "doctors" ? <Stethoscope size={13} color={PhAC} /> : <User size={13} color={PhAC} />}
+                        {label}
+                        {ur > 0 && (
+                          <span style={{ background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 9, fontWeight: 800, padding: "1px 6px" }}>{ur > 99 ? "99+" : ur}</span>
+                        )}
+                      </button>
+                    ))}
                   </div>
+                  <p style={{ color: t3, fontSize: 11, margin: "10px 0 0", lineHeight: 1.45 }}>
+                    {msgMode === "doctors" ? "Secure chat with prescribers about prescriptions." : "Message patients about refills, pickup, and medication questions."}
+                  </p>
+                  {msgMode === "doctors" ? (
+                    <div className={`mt-2.5 flex gap-2 ${isMob ? "flex-col sm:flex-row" : ""}`}>
+                      <input className="inp min-w-0" type="email" value={chatSearchEmail}
+                        onChange={e => setChatSearchEmail(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") findDoctorByEmail(); }}
+                        placeholder="Find doctor by email…"
+                        style={{ flex: 1, padding: "8px 11px", borderRadius: 10, fontSize: 16 }} />
+                      <motion.button type="button" whileTap={{ scale: .93 }} onClick={findDoctorByEmail}
+                        disabled={chatSearchBusy || !chatSearchEmail.trim()}
+                        className={isMob ? "w-full sm:w-auto" : ""}
+                        style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: chatSearchEmail.trim() ? PhAC : "var(--b1)", color: chatSearchEmail.trim() ? "#fff" : t3, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+                        {chatSearchBusy ? <Loader2 size={13} style={{ animation: "spin360 .7s linear infinite" }} /> : <Search size={13} />}
+                      </motion.button>
+                    </div>
+                  ) : (
+                    <div className={`mt-2.5 flex gap-2 ${isMob ? "flex-col sm:flex-row" : ""}`}>
+                      <input className="inp min-w-0" type="email" value={patientChatSearchEmail}
+                        onChange={e => setPatientChatSearchEmail(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") findPatientForChatByEmail(); }}
+                        placeholder="Find patient by email…"
+                        style={{ flex: 1, padding: "8px 11px", borderRadius: 10, fontSize: 16 }} />
+                      <motion.button type="button" whileTap={{ scale: .93 }} onClick={findPatientForChatByEmail}
+                        disabled={patientChatSearchBusy || !patientChatSearchEmail.trim()}
+                        className={isMob ? "w-full sm:w-auto" : ""}
+                        style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: patientChatSearchEmail.trim() ? PhAC : "var(--b1)", color: patientChatSearchEmail.trim() ? "#fff" : t3, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+                        {patientChatSearchBusy ? <Loader2 size={13} style={{ animation: "spin360 .7s linear infinite" }} /> : <Search size={13} />}
+                      </motion.button>
+                    </div>
+                  )}
                   <AnimatePresence>
-                    {chatSearchMsg && (
+                    {msgMode === "doctors" && chatSearchMsg && (
                       <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
                         style={{ fontSize: 11.5, marginTop: 6, color: chatSearchMsg.type === "ok" ? "var(--gr)" : "var(--ro)", fontWeight: 600 }}>
                         {chatSearchMsg.text}
                       </motion.p>
                     )}
+                    {msgMode === "patients" && patientChatSearchMsg && (
+                      <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                        style={{ fontSize: 11.5, marginTop: 6, color: patientChatSearchMsg.type === "ok" ? "var(--gr)" : "var(--ro)", fontWeight: 600 }}>
+                        {patientChatSearchMsg.text}
+                      </motion.p>
+                    )}
                   </AnimatePresence>
                 </div>
                 <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
-                  {chatContacts.length === 0 ? (
+                  {msgMode === "doctors" ? (
+                    chatContacts.length === 0 ? (
+                      <div style={{ padding: "30px 16px", textAlign: "center" }}>
+                        <Search size={22} color={t3} style={{ opacity: .2, margin: "0 auto 10px", display: "block" }} />
+                        <p style={{ color: t3, fontSize: 12 }}>Search for a doctor by email above to start chatting.</p>
+                      </div>
+                    ) : chatContacts.map(contact => {
+                      const isActive = selChat?.id === contact.id;
+                      const unread = unreadPerContact[contact.id] || 0;
+                      const isOnline = !!onlineUsers[contact.id];
+                      return (
+                        <div key={contact.id} onClick={() => { setMsgMode("doctors"); setSelChat(contact); }}
+                          style={{ padding: "12px 16px", cursor: "pointer", borderBottom: "1px solid var(--b0)", background: isActive ? "rgba(124,58,237,.07)" : unread > 0 ? "rgba(124,58,237,.03)" : "transparent", borderLeft: `3px solid ${isActive ? PhAC : unread > 0 ? "var(--pha-p)" : "transparent"}`, transition: "all .15s" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ position: "relative", flexShrink: 0 }}>
+                              <div style={{ width: 38, height: 38, borderRadius: "50%", background: peerAvatarBg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                <span style={{ color: "#fff", fontSize: 14, fontWeight: 800 }}>{contact.name[0]?.toUpperCase() || "D"}</span>
+                              </div>
+                              <div style={{ position: "absolute", bottom: 1, right: 1, width: 9, height: 9, borderRadius: "50%", background: isOnline ? "#22c55e" : "var(--b1)", border: "2px solid var(--s1)", transition: "background .4s" }} />
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <p className="truncate" style={{ color: t1, fontSize: 13, fontWeight: unread > 0 ? 800 : 700, margin: 0 }} title={`Dr. ${contact.name}`}>Dr. {contact.name}</p>
+                              <p style={{ color: unread > 0 ? PhAC : t3, fontSize: 11, margin: "2px 0 0", fontWeight: unread > 0 ? 700 : 400 }}>
+                                {isOnline ? "Online now" : contact.lastMessageAt ? new Date(contact.lastMessageAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : contact.specialty}
+                              </p>
+                            </div>
+                            {unread > 0 && (
+                              <span style={{ background: PhAC, color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "2px 7px", flexShrink: 0, minWidth: 20, textAlign: "center" }}>{unread}</span>
+                            )}
+                            {isActive && !unread && <div style={{ width: 7, height: 7, borderRadius: "50%", background: PhAC, flexShrink: 0 }} />}
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : filteredPatientChats.length === 0 ? (
                     <div style={{ padding: "30px 16px", textAlign: "center" }}>
-                      <Search size={22} color={t3} style={{ opacity: .2, margin: "0 auto 10px", display: "block" }} />
-                      <p style={{ color: t3, fontSize: 12 }}>Search for a doctor by email above to start chatting.</p>
+                      <User size={22} color={t3} style={{ opacity: .2, margin: "0 auto 10px", display: "block" }} />
+                      <p style={{ color: t3, fontSize: 12 }}>{patientChatContacts.length === 0 ? "Patients appear here from your prescriptions, or search by email to add one." : "No patients match your search."}</p>
                     </div>
-                  ) : chatContacts.map(contact => {
+                  ) : filteredPatientChats.map(contact => {
                     const isActive = selChat?.id === contact.id;
-                    const unread = unreadPerContact[contact.id] || 0;
+                    const unread = unreadPerPatient[contact.id] || 0;
                     const isOnline = !!onlineUsers[contact.id];
                     return (
-                      <div key={contact.id} onClick={() => setSelChat(contact)}
+                      <div key={contact.id} onClick={() => { setMsgMode("patients"); setSelChat(contact); }}
                         style={{ padding: "12px 16px", cursor: "pointer", borderBottom: "1px solid var(--b0)", background: isActive ? "rgba(124,58,237,.07)" : unread > 0 ? "rgba(124,58,237,.03)" : "transparent", borderLeft: `3px solid ${isActive ? PhAC : unread > 0 ? "var(--pha-p)" : "transparent"}`, transition: "all .15s" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                           <div style={{ position: "relative", flexShrink: 0 }}>
-                            <div style={{ width: 38, height: 38, borderRadius: "50%", background: "linear-gradient(135deg,#0e7490,#155e75)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                              <span style={{ color: "#fff", fontSize: 14, fontWeight: 800 }}>{contact.name[0]?.toUpperCase() || "D"}</span>
+                            <div style={{ width: 38, height: 38, borderRadius: "50%", background: "linear-gradient(135deg,#7c3aed,#6d28d9)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                              <span style={{ color: "#fff", fontSize: 14, fontWeight: 800 }}>{contact.name[0]?.toUpperCase() || "P"}</span>
                             </div>
                             <div style={{ position: "absolute", bottom: 1, right: 1, width: 9, height: 9, borderRadius: "50%", background: isOnline ? "#22c55e" : "var(--b1)", border: "2px solid var(--s1)", transition: "background .4s" }} />
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <p className="truncate" style={{ color: t1, fontSize: 13, fontWeight: unread > 0 ? 800 : 700, margin: 0 }} title={`Dr. ${contact.name}`}>Dr. {contact.name}</p>
+                            <p className="truncate" style={{ color: t1, fontSize: 13, fontWeight: unread > 0 ? 800 : 700, margin: 0 }} title={contact.name}>{contact.name}</p>
                             <p style={{ color: unread > 0 ? PhAC : t3, fontSize: 11, margin: "2px 0 0", fontWeight: unread > 0 ? 700 : 400 }}>
-                              {isOnline ? "Online now" : contact.lastMessageAt ? new Date(contact.lastMessageAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : contact.specialty}
+                              {isOnline ? "Online now" : contact.lastMessageAt ? new Date(contact.lastMessageAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Patient"}
                             </p>
                           </div>
                           {unread > 0 && (
@@ -704,35 +1225,90 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                 {!selChat ? (
                   <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12 }}>
                     <MessageSquare size={32} color={t3} style={{ opacity: .2 }} />
-                    <p style={{ color: t2, fontSize: 14, fontWeight: 600 }}>Select a doctor to start chatting.</p>
+                    <p style={{ color: t2, fontSize: 14, fontWeight: 600 }}>{msgMode === "doctors" ? "Select a doctor to start chatting." : "Select a patient to start messaging."}</p>
                   </div>
                 ) : (
                   <>
                     {}
-                    <div style={{ padding: isMob ? "10px 12px" : "13px 20px", borderBottom: `1px solid ${b1}`, background: "var(--s1)", display: "flex", alignItems: "center", gap: isMob ? 10 : 13, flexShrink: 0, minWidth: 0 }}>
-                      {isMob && (
-                        <button type="button" onClick={() => setSelChat(null)} style={{ width: 32, height: 32, borderRadius: 9, border: `1px solid ${b1}`, background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0 }}><ArrowRight size={14} style={{ transform: "rotate(180deg)" }} /></button>
-                      )}
-                      <div style={{ width: isMob ? 38 : 42, height: isMob ? 38 : 42, borderRadius: "50%", background: "linear-gradient(135deg,#0e7490,#155e75)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                        <span style={{ color: "#fff", fontSize: isMob ? 14 : 16, fontWeight: 800 }}>{selChat.name[0]?.toUpperCase()}</span>
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate" style={{ color: t1, fontSize: isMob ? 13 : 14, fontWeight: 700, margin: 0 }}>Dr. {selChat.name}</p>
-                        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
-                          <div style={{ width: 7, height: 7, borderRadius: "50%", background: onlineUsers[selChat.id] ? "#22c55e" : "var(--b1)", boxShadow: onlineUsers[selChat.id] ? "0 0 5px #22c55e" : "none", transition: "all .4s", flexShrink: 0 }} />
-                          <p style={{ color: onlineUsers[selChat.id] ? "#22c55e" : t3, fontSize: 11, margin: 0, fontWeight: onlineUsers[selChat.id] ? 600 : 400 }}>
-                            {onlineUsers[selChat.id] ? "Online now" : "Offline"}
-                          </p>
+                    <div style={{ padding: isMob ? "10px 12px" : "13px 20px", borderBottom: `1px solid ${b1}`, background: "var(--s1)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexShrink: 0, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: isMob ? 10 : 13, flex: 1, minWidth: 0 }}>
+                        {isMob && (
+                          <button type="button" onClick={() => setSelChat(null)} style={{ width: 32, height: 32, borderRadius: 9, border: `1px solid ${b1}`, background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0 }}><ArrowRight size={14} style={{ transform: "rotate(180deg)" }} /></button>
+                        )}
+                        <div style={{ width: isMob ? 38 : 42, height: isMob ? 38 : 42, borderRadius: "50%", background: peerAvatarBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          <span style={{ color: "#fff", fontSize: isMob ? 14 : 16, fontWeight: 800 }}>{selChat.name[0]?.toUpperCase()}</span>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate" style={{ color: t1, fontSize: isMob ? 13 : 14, fontWeight: 700, margin: 0 }}>{peerIsPatient ? selChat.name : `Dr. ${selChat.name}`}</p>
+                          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
+                            <div style={{ width: 7, height: 7, borderRadius: "50%", background: onlineUsers[selChat.id] ? "#22c55e" : "var(--b1)", boxShadow: onlineUsers[selChat.id] ? "0 0 5px #22c55e" : "none", transition: "all .4s", flexShrink: 0 }} />
+                            <p style={{ color: onlineUsers[selChat.id] ? "#22c55e" : t3, fontSize: 11, margin: 0, fontWeight: onlineUsers[selChat.id] ? 600 : 400 }}>
+                              {onlineUsers[selChat.id] ? "Online now" : "Offline"}
+                            </p>
+                          </div>
                         </div>
                       </div>
-                      {!isMob && <span className="role-badge role-doctor">Doctor</span>}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          onClick={() => setShowSoundSettings(p => !p)}
+                          title={soundEnabled ? "Message sounds on" : "Message sounds off"}
+                          style={{
+                            width: isMob ? 44 : 40,
+                            height: isMob ? 44 : 40,
+                            borderRadius: 10,
+                            border: `1px solid ${b1}`,
+                            background: showSoundSettings ? "rgba(124,58,237,.12)" : "var(--s1)",
+                            color: soundEnabled ? PhAC : t3,
+                            display: "grid",
+                            placeItems: "center",
+                            cursor: "pointer",
+                            fontFamily: "inherit",
+                          }}
+                          aria-expanded={showSoundSettings}
+                          aria-label="Message notification sounds"
+                        >
+                          {soundEnabled ? <Bell size={18} /> : <BellOff size={18} />}
+                        </button>
+                        {!isMob ? <span className={peerIsPatient ? "role-badge role-patient" : "role-badge role-doctor"}>{peerIsPatient ? "Patient" : "Doctor"}</span> : null}
+                      </div>
                     </div>
+                    {showSoundSettings ? (
+                      <div style={{ padding: "12px 14px", borderBottom: `1px solid ${b1}`, background: "var(--s2)" }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                          <span style={{ color: t1, fontSize: 12, fontWeight: 700 }}>New message sounds</span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ color: soundEnabled ? "#16a34a" : t3, fontSize: 11, fontWeight: 600 }}>{soundEnabled ? "On" : "Off"}</span>
+                            <div className={`sw ${soundEnabled ? "on" : ""}`} onClick={() => toggleSound(!soundEnabled)} role="switch" aria-checked={soundEnabled} style={{ cursor: "pointer" }} />
+                          </div>
+                        </div>
+                        {soundEnabled ? (
+                          <>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                              {Object.entries(SOUND_PROFILES).map(([key, prof]) => (
+                                <button key={key} type="button" onClick={() => changeSoundType(key)} style={{ padding: "4px 10px", borderRadius: 99, fontSize: 10.5, fontWeight: 600, border: `1.5px solid ${soundType === key ? PhAC : b1}`, background: soundType === key ? "var(--pha-pd)" : "transparent", color: soundType === key ? PhAC : t3, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }} title={prof.desc}>{prof.label}{key === "urgent" && <AlertTriangle size={9} color="var(--ro)" />}</button>
+                              ))}
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <Volume1 size={13} color={t3} style={{ flexShrink: 0 }} />
+                              <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e => changeSoundVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: PhAC, cursor: "pointer" }} />
+                              <Volume2 size={13} color={t3} style={{ flexShrink: 0 }} />
+                              <span style={{ color: t3, fontSize: 10, flexShrink: 0, minWidth: 32 }}>{Math.round(soundVolume * 100)}%</span>
+                            </div>
+                            {SOUND_PROFILES[soundType] ? <p style={{ color: t3, fontSize: 10, margin: "8px 0 0", fontStyle: "italic" }}>{SOUND_PROFILES[soundType].desc}</p> : null}
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {}
                     {messages.length > 0 && (
                       <div style={{ padding: isMob ? "8px 12px" : "7px 20px", borderBottom: "1px solid var(--b0)", background: "var(--s2)" }}>
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="w-full shrink-0 sm:w-auto" style={{ color: t3, fontSize: 10, fontWeight: 700 }}>Quick reply:</span>
-                          {["Received — processing now", "Ready for pickup", "Out of stock — ordering now", "Please confirm patient's allergies"].map(qt => (
+                          {(peerIsPatient
+                            ? ["Your refill is being processed", "Ready for pickup — ask at the counter", "We’ll text when your order is ready", "Let us know if you have side effects or questions"]
+                            : ["Received — processing now", "Ready for pickup", "Out of stock — ordering now", "Please confirm patient's allergies"]
+                          ).map(qt => (
                             <button key={qt} type="button" onClick={() => setMsgInput(qt)} className="max-w-full text-left" style={{ padding: "5px 10px", borderRadius: 99, fontSize: 10.5, fontWeight: 600, border: `1px solid ${b1}`, background: "var(--s1)", color: t2, cursor: "pointer", fontFamily: "inherit", lineHeight: 1.3 }}>{qt}</button>
                           ))}
                         </div>
@@ -783,7 +1359,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                               <div style={{ background: "var(--s1)", border: "1.5px solid rgba(14,116,144,.3)", borderRadius: 16, overflow: "hidden", boxShadow: "0 4px 16px rgba(14,116,144,.1)", maxWidth: isMob ? "95%" : "80%" }}>
                                 <div style={{ padding: "10px 16px", background: "rgba(14,116,144,.09)", borderBottom: "1px solid rgba(14,116,144,.2)", display: "flex", alignItems: "center", gap: 8 }}>
                                   <FileText size={14} color="var(--doc-p)" />
-                                  <span style={{ color: "var(--doc-p)", fontSize: 12, fontWeight: 700, flex: 1 }}>Patient Referral from Dr. {selChat.name}</span>
+                                  <span style={{ color: "var(--doc-p)", fontSize: 12, fontWeight: 700, flex: 1 }}>Patient Referral from Dr. {!peerIsPatient ? selChat.name : "prescriber"}</span>
                                   <span style={{ color: t3, fontSize: 10 }}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                                 </div>
                                 <div style={{ padding: "10px 16px", display: "flex", flexDirection: "column", gap: 6, borderBottom: "1px solid var(--b0)" }}>
@@ -843,7 +1419,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                             <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexDirection: isMe ? "row-reverse" : "row", width: "100%" }}>
                               <div style={{ width: 28, flexShrink: 0, display: "flex", justifyContent: "center" }}>
                                 {!isMe && groupBottom && (
-                                  <div style={{ width: 26, height: 26, borderRadius: "50%", background: "linear-gradient(135deg,#0e7490,#155e75)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                  <div style={{ width: 26, height: 26, borderRadius: "50%", background: peerAvatarBg, display: "flex", alignItems: "center", justifyContent: "center" }}>
                                     <span style={{ color: "#fff", fontSize: 10, fontWeight: 800 }}>{selChat.name[0]?.toUpperCase()}</span>
                                   </div>
                                 )}
@@ -880,7 +1456,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                       })}
                       {peerTyping && (
                         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginTop: 10 }}>
-                          <div style={{ width: 26, height: 26, borderRadius: "50%", background: "linear-gradient(135deg,#0e7490,#155e75)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          <div style={{ width: 26, height: 26, borderRadius: "50%", background: peerAvatarBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                             <span style={{ color: "#fff", fontSize: 10, fontWeight: 800 }}>{selChat.name[0]?.toUpperCase()}</span>
                           </div>
                           <div style={{ padding: "10px 14px", borderRadius: "18px 18px 18px 3px", background: "var(--s1)", border: `1px solid ${b1}`, display: "flex", alignItems: "center", gap: 4 }}>
@@ -892,35 +1468,6 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                     </div>
                     {}
                     <div style={{ flexShrink: 0, borderTop: `1px solid ${b1}`, background: "var(--s1)", position: "relative", zIndex: 10 }}>
-                      <AnimatePresence>
-                        {showSoundSettings && (
-                          <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }} style={{ maxHeight: "40vh", overflowY: "auto", borderBottom: `1px solid ${b1}`, padding: "12px 14px", background: "var(--s2)" }}>
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                              <span style={{ color: t1, fontSize: 12, fontWeight: 700 }}>Notification sounds</span>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                <span style={{ color: soundEnabled ? "var(--gr)" : "var(--ro)", fontSize: 11, fontWeight: 600 }}>{soundEnabled ? "On" : "Off"}</span>
-                                <div className={`sw ${soundEnabled ? "on" : ""}`} onClick={() => toggleSound(!soundEnabled)} />
-                              </div>
-                            </div>
-                            {soundEnabled && (
-                              <>
-                                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 }}>
-                                  {Object.entries(SOUND_PROFILES).map(([key, prof]) => (
-                                    <button key={key} onClick={() => changeSoundType(key)} style={{ padding: "4px 11px", borderRadius: 99, fontSize: 10.5, fontWeight: 600, border: `1.5px solid ${soundType === key ? PhAC : b1}`, background: soundType === key ? "var(--pha-pd)" : "transparent", color: soundType === key ? PhAC : t3, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }} title={prof.desc}>{prof.label}{key === "urgent" && <AlertTriangle size={9} color="var(--ro)" />}</button>
-                                  ))}
-                                </div>
-                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                                  <Volume1 size={13} color={t3} style={{ flexShrink: 0 }} />
-                                  <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e => changeSoundVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: PhAC, cursor: "pointer" }} />
-                                  <Volume2 size={13} color={t3} style={{ flexShrink: 0 }} />
-                                  <span style={{ color: t3, fontSize: 10, flexShrink: 0, minWidth: 28 }}>{Math.round(soundVolume * 100)}%</span>
-                                </div>
-                                {SOUND_PROFILES[soundType] && <p style={{ color: t3, fontSize: 10, margin: "6px 0 0", fontStyle: "italic" }}>{SOUND_PROFILES[soundType].desc}</p>}
-                              </>
-                            )}
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
                       <div style={{ padding: `10px 14px calc(10px + env(safe-area-inset-bottom, 0px))` }}>
                         <div style={{ display: "flex", alignItems: "flex-end", gap: 9 }}>
                           <div style={{ flex: 1, background: "var(--s2)", border: `1.5px solid ${b1}`, borderRadius: 20, padding: "10px 14px" }}
@@ -946,14 +1493,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                             {msgSending ? <Loader2 size={15} style={{ animation: "spin360 .7s linear infinite" }} /> : <Send size={15} />}
                           </button>
                         </div>
-                        {!isMob && (
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 5 }}>
-                            <p style={{ color: t3, fontSize: 10, margin: 0 }}>Enter to send · Shift+Enter for new line</p>
-                            <button onClick={() => setShowSoundSettings(p => !p)} style={{ background: "none", border: "none", cursor: "pointer", color: soundEnabled ? PhAC : t3, fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", gap: 4, padding: 0, fontFamily: "inherit" }}>
-                              {soundEnabled ? <Bell size={11} /> : <BellOff size={11} />} Sound
-                            </button>
-                          </div>
-                        )}
+                        <p style={{ color: t3, fontSize: 10, margin: "5px 0 0" }}>Enter to send · Shift+Enter for new line</p>
                       </div>
                     </div>
                   </>
@@ -1178,13 +1718,13 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       {/* ── Mobile bottom nav — hidden inside open chat so it never overlaps input ── */}
       {isMob && !(page === "messages" && selChat) && (
         <nav className="btabs">
-          {[["dashboard", HeartPulse, "Home"], ["prescriptions", Pill, "Rx"], ["messages", MessageSquare, "Msgs"]].map(([id, I, l]) => (
+          {[["dashboard", HeartPulse, "Home"], ["refills", ClipboardList, "Refills"], ["prescriptions", Pill, "Rx"], ["messages", MessageSquare, "Msgs"]].map(([id, I, l]) => (
             <button key={id} className={`bt ${page === id ? "pha-on" : ""}`}
               style={{ color: page === id ? PhAC : undefined }}
               onClick={() => { setPage(id); setSelRx(null); }}>
               <I size={19} />
-              {id === "messages" && unreadCount > 0
-                ? <span style={{ position: "relative" }}>{l}<span style={{ position: "absolute", top: -6, right: -10, background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 8, fontWeight: 800, padding: "1px 4px" }}>{unreadCount}</span></span>
+              {id === "messages" && totalChatUnread > 0
+                ? <span style={{ position: "relative" }}>{l}<span style={{ position: "absolute", top: -6, right: -10, background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 8, fontWeight: 800, padding: "1px 4px" }}>{totalChatUnread > 99 ? "99+" : totalChatUnread}</span></span>
                 : l}
             </button>
           ))}
@@ -1198,23 +1738,31 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         {showNotifPanel && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowNotifPanel(false)} style={{ position: "fixed", inset: 0, zIndex: 70 }}>
             <motion.div initial={{ opacity: 0, y: -8, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -8 }} transition={{ type: "spring", damping: 28, stiffness: 320 }} onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 58, right: isMob ? 8 : 16, width: isMob ? "calc(100vw - 16px)" : "380px", maxHeight: "72vh", display: "flex", flexDirection: "column", background: "var(--bg)", border: `1px solid ${b1}`, borderRadius: 18, boxShadow: "0 16px 48px rgba(0,0,0,.18)", overflow: "hidden", zIndex: 71 }}>
-              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${b1}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${b1}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0, flexWrap: "wrap", gap: 8 }}>
                 <h3 style={{ color: t1, fontSize: 14, fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: 7 }}>
                   <Bell size={13} color={PhAC} /> Notifications
                   {unreadNotifCount > 0 && <span style={{ background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{unreadNotifCount}</span>}
                 </h3>
-                {unreadNotifCount > 0 && <button onClick={markAllNotifsRead} style={{ fontSize: 11, fontWeight: 600, color: PhAC, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Mark all read</button>}
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  {phaNotifs.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); clearAllNotifs(); }} style={{ fontSize: 11, fontWeight: 600, color: "var(--ro)", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 4 }}><Trash2 size={12} /> Clear all</button>}
+                  {unreadNotifCount > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); markAllNotifsRead(); }} style={{ fontSize: 11, fontWeight: 600, color: PhAC, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 4 }}><CheckCheck size={12} /> Mark all read</button>}
+                </div>
               </div>
               <div style={{ flex: 1, overflowY: "auto" }}>
                 {phaNotifs.length === 0 && <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: "28px 16px" }}>No notifications yet.</p>}
                 {phaNotifs.map(n => (
-                  <div key={n.id} onClick={() => markNotifRead(n.id)} style={{ padding: "12px 16px", borderBottom: `1px solid ${b1}`, cursor: "pointer", background: n.read_at ? "transparent" : "rgba(124,58,237,.04)", display: "flex", gap: 10, alignItems: "flex-start" }} onMouseEnter={e => e.currentTarget.style.background = "var(--s2)"} onMouseLeave={e => e.currentTarget.style.background = n.read_at ? "transparent" : "rgba(124,58,237,.04)"}>
-                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: n.read_at ? "transparent" : PhAC, flexShrink: 0, marginTop: 5 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ color: t1, fontSize: 13, fontWeight: n.read_at ? 500 : 700, margin: 0 }}>{n.title}</p>
-                      {n.body && <p style={{ color: t3, fontSize: 12, margin: "3px 0 0", lineHeight: 1.5 }}>{n.body}</p>}
-                      <p style={{ color: t3, fontSize: 10, margin: "4px 0 0" }}>{new Date(n.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
+                  <div key={n.id} style={{ padding: "10px 12px", borderBottom: `1px solid ${b1}`, background: n.read_at ? "transparent" : "rgba(124,58,237,.04)", display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <div role="button" tabIndex={0} onClick={(e) => { e.stopPropagation(); void openNotificationTarget(n); }} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); void openNotificationTarget(n); } }} style={{ flex: 1, minWidth: 0, cursor: "pointer", padding: "2px 4px 2px 0", borderRadius: 8 }} onMouseEnter={e => { e.currentTarget.style.background = "var(--s2)"; }} onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
+                      <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: n.read_at ? "transparent" : PhAC, flexShrink: 0, marginTop: 5 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ color: t1, fontSize: 13, fontWeight: n.read_at ? 500 : 700, margin: 0 }}>{n.title}</p>
+                          {n.body && <p style={{ color: t3, fontSize: 12, margin: "3px 0 0", lineHeight: 1.5 }}>{n.body}</p>}
+                          <p style={{ color: t3, fontSize: 10, margin: "4px 0 0" }}>{new Date(n.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
+                        </div>
+                      </div>
                     </div>
+                    <button type="button" title="Dismiss" onClick={(e) => { e.stopPropagation(); removeNotif(n.id); }} style={{ flexShrink: 0, width: 30, height: 30, borderRadius: 8, border: `1px solid ${b1}`, background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}><X size={14} /></button>
                   </div>
                 ))}
               </div>
@@ -1254,10 +1802,10 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
               </div>
               <div style={{ height: 1, background: "var(--b0)", margin: "0 12px 8px" }} />
               <nav style={{ flex: 1, padding: "0 7px", display: "flex", flexDirection: "column", gap: 1 }}>
-                {[["dashboard", "Dashboard", HeartPulse], ["prescriptions", "Prescriptions", Pill], ["messages", "Messages", MessageSquare]].map(([id, l, I]) => (
+                {[["dashboard", "Dashboard", HeartPulse], ["refills", "Refill requests", ClipboardList], ["prescriptions", "Prescriptions", Pill], ["messages", "Messages", MessageSquare]].map(([id, l, I]) => (
                   <div key={id} className={`nl ${page === id ? "pha-on" : ""}`} onClick={() => { setPage(id); setSelRx(null); setMobMenu(false); }}>
                     <I size={15} />{l}
-                    {id === "messages" && unreadCount > 0 && <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{unreadCount}</span>}
+                    {id === "messages" && totalChatUnread > 0 && <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{totalChatUnread > 99 ? "99+" : totalChatUnread}</span>}
                   </div>
                 ))}
               </nav>

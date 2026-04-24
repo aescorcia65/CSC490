@@ -1,0 +1,2 @@
+# Netlify / similar static hosts: serve SPA for all routes so /dashboard etc. work on refresh.
+/*    /index.html   200

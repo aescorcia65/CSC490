@@ -1,16 +1,33 @@
 import { createContext, useContext, useEffect, useState, useRef } from "react";
 import { supabase } from "../supabase";
 import { loadMedications } from "../lib/medications";
-import { loadTodaysTaken } from "../lib/adherence";
+import { loadTodaysTakenSlots } from "../lib/adherence";
 
 const AuthContext = createContext({});
 export const useAuth = () => useContext(AuthContext);
+const OAUTH_SIGNUP_KEY = "mt_oauth_signup";
 
 function cacheRead(uid, key) {
   try { return localStorage.getItem(`mt_${key}_${uid}`); } catch { return null; }
 }
 function cacheWrite(uid, key, val) {
   try { localStorage.setItem(`mt_${key}_${uid}`, String(val)); } catch {}
+}
+
+function readPendingOAuthSignup() {
+  try {
+    const raw = localStorage.getItem(OAUTH_SIGNUP_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingOAuthSignup() {
+  try { localStorage.removeItem(OAUTH_SIGNUP_KEY); } catch {}
 }
 
 export function AuthProvider({ children }) {
@@ -86,14 +103,17 @@ export function AuthProvider({ children }) {
 
   async function loadUserMeds(uid) {
     try {
-      const [medsList, takenSet] = await Promise.all([
+      const [medsList, takenDetail] = await Promise.all([
         loadMedications(uid),
-        loadTodaysTaken(uid),
+        loadTodaysTakenSlots(uid),
       ]);
-      const merged = (medsList || []).map(m => ({
-        ...m,
-        taken: takenSet.has(m.id),
-      }));
+      const merged = (medsList || []).map((m) => {
+        const d = takenDetail.get(m.id);
+        const loggedAllDay = d?.all ?? false;
+        const loggedSlotTimes = d && !d.all ? [...d.slots] : [];
+        const taken = loggedAllDay || loggedSlotTimes.length > 0;
+        return { ...m, loggedAllDay, loggedSlotTimes, taken };
+      });
       setMeds(merged);
     } catch {
       setMeds([]);
@@ -102,19 +122,58 @@ export function AuthProvider({ children }) {
     }
   }
 
+  async function applyPendingOAuthSignup(uid) {
+    const pending = readPendingOAuthSignup();
+    if (!pending) return;
+    if (Date.now() - Number(pending.ts || 0) > 10 * 60 * 1000) {
+      clearPendingOAuthSignup();
+      return;
+    }
+
+    const allowed = new Set(["patient", "doctor", "pharmacist"]);
+    const desiredRole = allowed.has(pending.role) ? pending.role : null;
+    const desiredFirstName = typeof pending.firstName === "string" ? pending.firstName.trim() : "";
+
+    try {
+      const { data: profile, error: fetchError } = await supabase
+        .from("profiles")
+        .select("role, first_name, onboarding_complete")
+        .eq("id", uid)
+        .single();
+      if (fetchError || !profile) return;
+
+      const updates = {};
+      if (!profile.onboarding_complete) {
+        if (desiredRole && desiredRole !== "patient" && profile.role === "patient") {
+          updates.role = desiredRole;
+        }
+        if (desiredFirstName && !profile.first_name) {
+          updates.first_name = desiredFirstName;
+        }
+      }
+
+      if (Object.keys(updates).length) {
+        updates.updated_at = new Date().toISOString();
+        const { error: updateError } = await supabase.from("profiles").update(updates).eq("id", uid);
+        if (updateError) return;
+      }
+      clearPendingOAuthSignup();
+    } catch {}
+  }
+
   function applyUser(u) {
     setUser(u);
     if (u) {
-      // Pre-fill with cache for speed but don't mark profileLoaded until DB confirms
       const cachedRole       = cacheRead(u.id, "role");
       const cachedOnboarding = cacheRead(u.id, "onboarding");
       if (cachedRole) setUserRole(cachedRole);
       if (cachedOnboarding !== null) setOnboarding(cachedOnboarding === "true");
-      // Always fetch fresh from DB — profileLoaded stays false until fetchProfile resolves
       if (profileFetchedFor.current !== u.id) {
         profileFetchedFor.current = u.id;
-        fetchProfile(u.id);
-        loadUserMeds(u.id);
+        void (async () => {
+          await applyPendingOAuthSignup(u.id);
+          await Promise.all([fetchProfile(u.id), loadUserMeds(u.id)]);
+        })();
       }
     } else {
       profileFetchedFor.current = null;

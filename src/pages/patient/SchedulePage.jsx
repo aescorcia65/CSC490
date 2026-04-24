@@ -1,46 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Calendar, Pill, Pencil, Trash2, Clock, CheckCircle2, AlertCircle, Loader2, ChevronLeft, ChevronRight } from "lucide-react";
+import { Calendar, Pill, Pencil, Trash2, Clock, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { COLS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
-import { logMedicationTaken, unlogMedicationTaken, loadTakenForDate, localDateStr, getWeekStartForDate } from "../../lib/adherence";
+import { logMedicationTaken, unlogMedicationTaken, doseRowLogged, patchMedDoseToggle } from "../../lib/adherence";
+import { groupMedicationsByDayPeriod } from "../../lib/medScheduleGroups";
 import { supabase } from "../../supabase";
 
-export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }) {
+export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, scrollToSection }) {
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
-  const sorted = [...meds].filter(m => m.active !== false).sort((a, b) => a.time.localeCompare(b.time));
-
-  const [viewDate, setViewDate] = useState(() => new Date());
-  const [takenForView, setTakenForView] = useState(() => new Set());
-  const [logErr, setLogErr] = useState("");
-
-  const dateStr = localDateStr(viewDate);
-  const weekStartD = getWeekStartForDate(viewDate);
-  const weekDays = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(weekStartD);
-    d.setDate(weekStartD.getDate() + i);
-    return d;
-  });
-
-  useEffect(() => {
-    if (!userId) return;
-    let cancelled = false;
-    setLogErr("");
-    loadTakenForDate(userId, dateStr).then((s) => {
-      if (!cancelled) setTakenForView(s);
-    });
-    return () => { cancelled = true; };
-  }, [userId, dateStr]);
-
-  useEffect(() => {
-    if (!userId) return;
-    const ch = supabase.channel(`sched-ml-${userId}`).on("postgres_changes", { event: "*", schema: "public", table: "medication_logs", filter: `user_id=eq.${userId}` }, () => {
-      loadTakenForDate(userId, dateStr).then(setTakenForView);
-    }).subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [userId, dateStr]);
+  const periodBlocks = useMemo(() => groupMedicationsByDayPeriod(meds), [meds]);
 
   const [appointments, setAppointments] = useState([]);
   const [apptLoading, setApptLoading] = useState(false);
@@ -49,6 +20,17 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
   const [rescheduleBusy, setRescheduleBusy] = useState(false);
   const [rescheduleDone, setRescheduleDone] = useState(false);
   const [doctorNames, setDoctorNames] = useState({});
+  const apptsRef = useRef(null);
+  const medsRef = useRef(null);
+
+  useEffect(() => {
+    if (!scrollToSection) return;
+    const t = requestAnimationFrame(() => {
+      const el = scrollToSection === "meds" ? medsRef.current : scrollToSection === "appts" ? apptsRef.current : null;
+      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    return () => cancelAnimationFrame(t);
+  }, [scrollToSection]);
 
   useEffect(() => {
     if (!userId) return;
@@ -107,41 +89,16 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
     setTimeout(() => { setRescheduleAppt(null); setRescheduleDone(false); setRescheduleForm({ date: "", time: "" }); }, 2000);
   }
 
-  const toggle = useCallback(async (id) => {
-    const med = meds.find(m => m.id === id);
-    if (!med || med.active === false || !userId) return;
-    const was = takenForView.has(id);
-    setLogErr("");
-    setTakenForView((prev) => {
-      const n = new Set(prev);
-      if (was) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-    const ok = was
-      ? await unlogMedicationTaken(userId, id, dateStr)
-      : await logMedicationTaken(userId, id, dateStr);
-    if (!ok) {
-      setTakenForView((prev) => {
-        const n = new Set(prev);
-        if (was) n.add(id);
-        else n.delete(id);
-        return n;
-      });
-      setLogErr("Could not save. Check your connection and try again.");
-      return;
+  const toggle = useCallback(async (id, slotTime) => {
+    const med = meds.find((m) => m.id === id);
+    if (!med || slotTime == null || String(slotTime).trim() === "") return;
+    const wasLogged = doseRowLogged(med, slotTime);
+    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, !wasLogged) : m)));
+    if (userId) {
+      if (wasLogged) await unlogMedicationTaken(userId, id, slotTime);
+      else await logMedicationTaken(userId, id, slotTime);
     }
-    if (dateStr === localDateStr(new Date())) {
-      setMeds((ms) => ms.map((m) => (m.id === id ? { ...m, taken: !was } : m)));
-    }
-  }, [meds, userId, setMeds, dateStr, takenForView]);
-
-  const periods = [
-    { l: "Morning", r: "6 AM – 12 PM", fn: m => m.time >= "06:00" && m.time < "12:00" },
-    { l: "Afternoon", r: "12 PM – 5 PM", fn: m => m.time >= "12:00" && m.time < "17:00" },
-    { l: "Evening", r: "5 PM – 9 PM", fn: m => m.time >= "17:00" && m.time < "21:00" },
-    { l: "Night", r: "9 PM onwards", fn: m => m.time >= "21:00" || m.time < "06:00" },
-  ];
+  }, [meds, userId, setMeds]);
 
   const STATUS_CONFIG = {
     scheduled: { label: "Confirmed", color: "var(--gr)", bg: "rgba(5,150,105,.1)", border: "rgba(5,150,105,.25)", icon: CheckCircle2 },
@@ -152,7 +109,7 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
     <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}>
       <div style={{ maxWidth: 640, margin: "0 auto", padding: isMob ? "16px 14px 56px" : "26px 22px 44px" }}>
 
-        <motion.div className="au" style={{ marginBottom: 10 }}>
+        <motion.div ref={apptsRef} id="patient-schedule-appts" className="au" style={{ marginBottom: 10, scrollMarginTop: 24 }}>
           <h2 style={{ color: t1, fontSize: 24, fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", fontWeight: 600, letterSpacing: "-.3px", marginBottom: 4 }}>Appointments</h2>
           <p style={{ color: t3, fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>Your upcoming appointments with your doctor.</p>
           {apptLoading ? (
@@ -245,74 +202,30 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
           )}
         </AnimatePresence>
 
-        <motion.div className="au card" style={{ padding: "14px 16px", marginBottom: 18, marginTop: 28 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-            <button type="button" aria-label="Previous week" onClick={() => setViewDate((d) => { const x = new Date(d); x.setDate(x.getDate() - 7); return x; })} style={{ width: 36, height: 36, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}>
-              <ChevronLeft size={18} />
-            </button>
-            <div style={{ textAlign: "center", flex: 1, padding: "0 8px" }}>
-              <p style={{ color: t3, fontSize: 10, fontWeight: 800, letterSpacing: ".1em", textTransform: "uppercase", margin: "0 0 4px" }}>Doses for</p>
-              <p style={{ color: t1, fontSize: 15, fontWeight: 700, margin: 0 }}>{viewDate.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</p>
-            </div>
-            <button type="button" aria-label="Next week" onClick={() => setViewDate((d) => { const x = new Date(d); x.setDate(x.getDate() + 7); return x; })} style={{ width: 36, height: 36, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}>
-              <ChevronRight size={18} />
-            </button>
-          </div>
-          <div style={{ display: "flex", gap: 5, justifyContent: "space-between" }}>
-            {weekDays.map((d) => {
-              const ds = localDateStr(d);
-              const sel = ds === dateStr;
-              const isToday = ds === localDateStr(new Date());
-              return (
-                <button
-                  key={ds}
-                  type="button"
-                  onClick={() => setViewDate(new Date(d.getFullYear(), d.getMonth(), d.getDate()))}
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    padding: "7px 2px",
-                    borderRadius: 10,
-                    border: sel ? "1px solid rgba(37,99,235,.45)" : `1px solid ${b1}`,
-                    background: sel ? "var(--pd)" : "var(--s1)",
-                    cursor: "pointer",
-                    fontFamily: "inherit",
-                  }}
-                >
-                  <div style={{ fontSize: 9, fontWeight: 700, color: t3, textTransform: "uppercase" }}>{d.toLocaleDateString("en-US", { weekday: "narrow" })}</div>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: t1, fontVariantNumeric: "tabular-nums" }}>{d.getDate()}</div>
-                  {isToday && <div style={{ fontSize: 7, fontWeight: 800, color: "var(--p)", marginTop: 1 }}>now</div>}
-                </button>
-              );
-            })}
-          </div>
-          <button type="button" onClick={() => setViewDate(new Date())} style={{ marginTop: 12, width: "100%", padding: "9px", borderRadius: 11, border: `1px solid ${b1}`, background: "var(--s2)", color: "var(--p)", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-            Jump to today
-          </button>
-          {logErr ? <p style={{ color: "var(--ro)", fontSize: 12, marginTop: 10, marginBottom: 0 }}>{logErr}</p> : null}
-        </motion.div>
-
-        <motion.div className="au" style={{ marginBottom: 16 }}>
+        <motion.div ref={medsRef} id="patient-schedule-meds" className="au" style={{ marginBottom: 16, marginTop: 28, scrollMarginTop: 24 }}>
           <h2 style={{ color: t1, fontSize: 24, fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", fontWeight: 600, letterSpacing: "-.3px", marginBottom: 4 }}>Medications</h2>
-          <p style={{ color: t3, fontSize: 13, lineHeight: 1.6, marginBottom: 4 }}>Mark doses for the selected day. Past and future days are saved for your analytics.</p>
+          <p style={{ color: t3, fontSize: 13, lineHeight: 1.6, marginBottom: 4 }}>Your medications organised by time of day.</p>
         </motion.div>
-        {periods.map((p, pi) => {
-          const list = sorted.filter(p.fn);
-          if (!list.length) return null;
+        {periodBlocks.map((block, pi) => {
+          const { rows, label, rangeLabel } = block;
+          if (!rows.length) return null;
+          const done = rows.filter((r) => doseRowLogged(r.med, r.slotTime)).length;
           return (
-            <motion.div key={p.l} className="au" style={{ animationDelay: `${pi * .07}s`, marginBottom: 22 }}>
+            <motion.div key={block.id} className="au" style={{ animationDelay: `${pi * .07}s`, marginBottom: 22 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 11 }}>
-                <span style={{ color: t1, fontSize: 13, fontWeight: 600 }}>{p.l}</span>
-                <span style={{ color: t3, fontSize: 12 }}>· {p.r}</span>
-                <span style={{ marginLeft: "auto", color: t3, fontSize: 11 }}>{list.filter(m => takenForView.has(m.id)).length}/{list.length}</span>
+                <span style={{ color: t1, fontSize: 13, fontWeight: 600 }}>{label}</span>
+                <span style={{ color: t3, fontSize: 12 }}>· {rangeLabel}</span>
+                <span style={{ marginLeft: "auto", color: t3, fontSize: 11 }}>{done}/{rows.length}</span>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                {list.map(med => {
+                {rows.map(({ med, slotTime }) => {
                   const col = COLS[med.color] || COLS.blue;
+                  const rowKey = `${med.id}-${slotTime}`;
+                  const logged = doseRowLogged(med, slotTime);
                   return (
-                    <div key={med.id} className="card" style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, position: "relative", overflow: "hidden" }}>
+                    <div key={rowKey} className="card" style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, position: "relative", overflow: "hidden" }}>
                       <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: col.a, borderRadius: "18px 0 0 18px" }} />
-                      <span style={{ fontSize: 12, fontWeight: 700, color: col.a, width: isMob ? 46 : 54, marginLeft: 6, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{to12h(med.time)}</span>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: col.a, width: isMob ? 46 : 54, marginLeft: 6, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{to12h(slotTime)}</span>
                       <div style={{ width: 32, height: 32, borderRadius: 9, background: col.d, border: `1px solid ${col.b}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                         <Pill size={14} color={col.a} />
                       </div>
@@ -325,8 +238,8 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId }
                           <button onClick={() => onEdit && onEdit(med)} title="Edit" style={{ width: 30, height: 30, borderRadius: 9, border: "1px solid var(--b1)", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, transition: "all .15s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--p)"; e.currentTarget.style.color = "var(--p)"; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--b1)"; e.currentTarget.style.color = t3; }}><Pencil size={12} /></button>
                           <button onClick={() => onDelete && onDelete(med.id)} title="Delete" style={{ width: 30, height: 30, borderRadius: 9, border: "1px solid var(--b1)", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, transition: "all .15s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--ro)"; e.currentTarget.style.color = "var(--ro)"; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--b1)"; e.currentTarget.style.color = t3; }}><Trash2 size={12} /></button>
                         </span>
-                        <button className="whitespace-nowrap" onClick={() => toggle(med.id)} style={{ padding: "5px 14px", borderRadius: 99, fontSize: 11, fontWeight: 600, border: "none", cursor: "pointer", transition: "all .18s", background: takenForView.has(med.id) ? "rgba(16,185,129,.12)" : "var(--s2)", color: takenForView.has(med.id) ? "var(--gr)" : "var(--t3)" }}>
-                          {takenForView.has(med.id) ? "Taken ✓" : "Mark taken"}
+                        <button className="whitespace-nowrap" onClick={() => toggle(med.id, slotTime)} style={{ padding: "5px 14px", borderRadius: 99, fontSize: 11, fontWeight: 600, border: "none", cursor: "pointer", transition: "all .18s", background: logged ? "rgba(16,185,129,.12)" : "var(--s2)", color: logged ? "var(--gr)" : "var(--t3)" }}>
+                          {logged ? "Taken ✓" : "Mark taken"}
                         </button>
                       </div>
                     </div>

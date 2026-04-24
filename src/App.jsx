@@ -1,5 +1,6 @@
 import { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { ThemeProvider } from "./contexts/ThemeContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { ProtectedRoute } from "./routes/ProtectedRoute";
 import { RoleProtectedRoute } from "./routes/RoleProtectedRoute";
@@ -68,20 +69,22 @@ function RootRedirect() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <Suspense fallback={<RouteLoadingFallback />}>
-          <Routes>
-            <Route path="/" element={<RootRedirect />} />
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/onboarding" element={<ProtectedRoute requireOnboarding={false}><OnboardingPage /></ProtectedRoute>} />
-            <Route path="/dashboard" element={<ProtectedRoute><RoleProtectedRoute requiredRole="client"><PatientDashboard /></RoleProtectedRoute></ProtectedRoute>} />
-            <Route path="/doctor" element={<ProtectedRoute><RoleProtectedRoute requiredRole="doctor"><DoctorDashboardContent /></RoleProtectedRoute></ProtectedRoute>} />
-            <Route path="/pharmacist" element={<ProtectedRoute><RoleProtectedRoute requiredRole="pharmacist"><PharmacistDashboardContent /></RoleProtectedRoute></ProtectedRoute>} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Suspense>
-      </AuthProvider>
-    </BrowserRouter>
+    <ThemeProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <Suspense fallback={<RouteLoadingFallback />}>
+            <Routes>
+              <Route path="/" element={<RootRedirect />} />
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/onboarding" element={<ProtectedRoute requireOnboarding={false}><OnboardingPage /></ProtectedRoute>} />
+              <Route path="/dashboard" element={<ProtectedRoute><RoleProtectedRoute requiredRole="client"><PatientDashboard /></RoleProtectedRoute></ProtectedRoute>} />
+              <Route path="/doctor" element={<ProtectedRoute><RoleProtectedRoute requiredRole="doctor"><DoctorDashboardContent /></RoleProtectedRoute></ProtectedRoute>} />
+              <Route path="/pharmacist" element={<ProtectedRoute><RoleProtectedRoute requiredRole="pharmacist"><PharmacistDashboardContent /></RoleProtectedRoute></ProtectedRoute>} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
+        </AuthProvider>
+      </BrowserRouter>
+    </ThemeProvider>
   );
 }

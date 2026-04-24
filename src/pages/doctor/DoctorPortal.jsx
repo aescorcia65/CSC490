@@ -1,13 +1,17 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, Calendar, LogOut, Moon, Sun, Menu, X, Plus, Send,
   Clock, Check, AlertCircle, Loader2, Bell, BellOff, User, ArrowRight,
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
-  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText,
+  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip,
   Sparkles, ChevronRight
 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib/portalWebAudio";
+import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
+import { notificationSuggestsPrescription, notificationSuggestsChat, notificationTextBlob } from "../../lib/notificationNavigation";
+import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
@@ -55,6 +59,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [msgSending,setMsgSending]=useState(false);
   const [unreadCount,setUnreadCount]=useState(0);
   const [unreadPerContact,setUnreadPerContact]=useState({});
+  const [msgMode,setMsgMode]=useState("pharmacy");
+  const [patientChatContacts,setPatientChatContacts]=useState([]);
+  const [unreadPatientCount,setUnreadPatientCount]=useState(0);
+  const [unreadPerPatient,setUnreadPerPatient]=useState({});
   const [onlineUsers,setOnlineUsers]=useState({});
   const [chatSearchEmail,setChatSearchEmail]=useState("");
   const [chatSearchBusy,setChatSearchBusy]=useState(false);
@@ -94,11 +102,30 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     return isNaN(v)?0.7:Math.min(1,Math.max(0.1,v));
   });
   const [showSoundSettings,setShowSoundSettings]=useState(false);
+  const soundEnabledRef=useRef(soundEnabled);
+  const soundTypeRef=useRef(soundType);
+  const soundVolumeRef=useRef(soundVolume);
+  useEffect(()=>{ soundEnabledRef.current=soundEnabled; },[soundEnabled]);
+  useEffect(()=>{ soundTypeRef.current=soundType; },[soundType]);
+  useEffect(()=>{ soundVolumeRef.current=soundVolume; },[soundVolume]);
   const msgEndRef=useRef(null);
   const msgListRef=useRef(null);
   const atBottomRef=useRef(true);
   const typingTimeoutRef=useRef(null);
+  const typingBroadcastRef=useRef(null);
   const [peerTyping,setPeerTyping]=useState(false);
+
+  useEffect(()=>{
+    const unlock=()=>{ void ensurePortalAudioContext(); };
+    window.addEventListener("pointerdown",unlock,{passive:true});
+    window.addEventListener("touchstart",unlock,{passive:true});
+    window.addEventListener("keydown",unlock);
+    return ()=>{
+      window.removeEventListener("pointerdown",unlock);
+      window.removeEventListener("touchstart",unlock);
+      window.removeEventListener("keydown",unlock);
+    };
+  },[]);
 
   function sortMsgs(arr){ return [...arr].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)); }
 
@@ -115,6 +142,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [localName,setLocalName]=useState(userName);
   useEffect(()=>{ if(userName) setLocalName(userName); },[userName]);
   const name=localName||userName||user?.displayName||user?.email?.split("@")[0]||"Doctor";
+  const totalChatUnread=unreadCount+unreadPatientCount;
   const saveName=(n)=>{ setLocalName(n); if(setDisplayName) setDisplayName(n); };
   async function handleSignOut(){
     setOnlineUsers(prev=>{const n={...prev};delete n[user.id];return n;});
@@ -134,31 +162,19 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   };
 
   function playNotifSound(type,vol){
-    try{
-      const ctx=new (window.AudioContext||window.webkitAudioContext)();
-      const gain=vol!==undefined?vol:soundVolume;
-      const profile=SOUND_PROFILES[type]||SOUND_PROFILES.standard;
-      profile.tones.forEach(([freq,wave,delay,dur])=>{
-        const o=ctx.createOscillator(),g=ctx.createGain();
-        o.connect(g);g.connect(ctx.destination);
-        o.frequency.value=freq;
-        o.type=wave||"sine";
-        g.gain.setValueAtTime(0,ctx.currentTime+delay);
-        g.gain.linearRampToValueAtTime(gain,ctx.currentTime+delay+0.015);
-        g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+delay+dur);
-        o.start(ctx.currentTime+delay);
-        o.stop(ctx.currentTime+delay+dur+0.02);
-      });
-    }catch(e){}
+    const gain=vol!==undefined?vol:soundVolume;
+    const profile=SOUND_PROFILES[type]||SOUND_PROFILES.standard;
+    void playPortalNotificationSound(profile.tones,gain);
   }
 
   function toggleSound(val){setSoundEnabled(val);localStorage.setItem("mt_sound_on",String(val));}
-  function changeSoundType(val){setSoundType(val);localStorage.setItem("mt_sound_type",val);playNotifSound(val,soundVolume);}
-  function changeSoundVolume(val){setSoundVolume(val);localStorage.setItem("mt_sound_vol",String(val));playNotifSound(soundType,val);}
+  function changeSoundType(val){setSoundType(val);localStorage.setItem("mt_sound_type",val);void playNotifSound(val,soundVolume);}
+  function changeSoundVolume(val){setSoundVolume(val);localStorage.setItem("mt_sound_vol",String(val));void playNotifSound(soundType,val);}
   function sortContacts(list){
     return [...list].sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||""));
   }
   useEffect(()=>{
+    if(!user?.id) return;
     (async()=>{
       try{
         const[dpData,apptData,pharmData]=await Promise.all([
@@ -168,6 +184,36 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         ]);
         const pRows=(dpData.data||[]).map(r=>r.profiles).filter(Boolean);
         setPatients(pRows.map(p=>({id:p.id,fullName:[p.first_name,p.last_name].filter(Boolean).join(" ")||"Unknown",email:p.email||"",dob:p.dob||null,bloodType:p.blood_type||null,allergies:p.allergies||[],conditions:p.medical_conditions||[]})));
+        const patientIds=pRows.map(p=>p.id);
+        let unreadMap={};
+        let unreadPt=0;
+        const lastByPatient={};
+        if(patientIds.length){
+          const patientIdSet=new Set(patientIds);
+          const{data:pmAll}=await supabase.from("patient_messages")
+            .select("sender_id,recipient_id,created_at,read_at")
+            .or(`sender_id.eq.${user.id},recipient_id.eq.${user.id}`)
+            .order("created_at",{ascending:false})
+            .limit(800);
+          const seenLatest={};
+          (pmAll||[]).forEach(m=>{
+            const other=m.sender_id===user.id?m.recipient_id:m.sender_id;
+            if(!patientIdSet.has(other)) return;
+            if(!seenLatest[other]){ seenLatest[other]=true; lastByPatient[other]=m.created_at; }
+            if(m.recipient_id===user.id&&!m.read_at){
+              unreadPt+=1;
+              unreadMap[other]=(unreadMap[other]||0)+1;
+            }
+          });
+        }
+        setPatientChatContacts(sortContacts(pRows.map(p=>({
+          id:p.id,
+          name:[p.first_name,p.last_name].filter(Boolean).join(" ")||"Unknown",
+          email:p.email||"",
+          lastMessageAt:lastByPatient[p.id]||null,
+        }))));
+        setUnreadPerPatient(unreadMap);
+        setUnreadPatientCount(unreadPt);
         setAllAppointments(apptData.data||[]);
         const pharmacists=(pharmData.data||[]).map(p=>({id:p.id,name:[p.first_name,p.last_name].filter(Boolean).join(" ")||p.email||"Pharmacist",pharmacy:p.pharmacy_name||"Pharmacy",email:p.email||"",lastMessageAt:null}));
         if(pharmacists.length>0){
@@ -184,7 +230,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             pharmacists.sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||""));
           }
           setChatContacts(pharmacists);
-          if(pharmacists.length>0) setSelChat(pharmacists[0]);
           const{data:unread}=await supabase.from("chat_messages").select("id").eq("doctor_id",user.id).in("sender_id",pharmIds).is("read_at",null);
           setUnreadCount((unread||[]).length);
         } else {
@@ -192,7 +237,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         }
       }catch(e){console.error("Load:",e);}
     })();
-  },[]);
+  },[user?.id]);
   useEffect(()=>{
     if(!user?.id) return;
     const channels=[];
@@ -228,6 +273,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               if(!data) return;
               const np={id:data.id,fullName:[data.first_name,data.last_name].filter(Boolean).join(" ")||"Unknown",email:data.email||"",dob:data.dob||null,bloodType:data.blood_type||null,allergies:data.allergies||[],conditions:data.medical_conditions||[]};
               setPatients(prev=>prev.some(p=>p.id===np.id)?prev:[...prev,np]);
+              const pc={id:data.id,name:np.fullName,email:np.email||"",lastMessageAt:null};
+              setPatientChatContacts(prev=>prev.some(c=>c.id===pc.id)?prev:sortContacts([...prev,pc]));
             });
         }).subscribe()
     );
@@ -240,9 +287,43 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     return ()=>{ channels.forEach(c=>supabase.removeChannel(c)); };
   },[user?.id]);
   const selChatRef=useRef(selChat);
+  const msgModeRef=useRef(msgMode);
+  const chatContactsRef=useRef(chatContacts);
+  const patientChatContactsRef=useRef(patientChatContacts);
   useEffect(()=>{ selChatRef.current=selChat; },[selChat]);
+  useEffect(()=>{ msgModeRef.current=msgMode; },[msgMode]);
+  useEffect(()=>{ chatContactsRef.current=chatContacts; },[chatContacts]);
+  useEffect(()=>{ patientChatContactsRef.current=patientChatContacts; },[patientChatContacts]);
+  useEffect(()=>{ setChatSearchEmail(""); setChatSearchMsg(null); },[msgMode]);
   useEffect(()=>{
-    if(!selChat) return;
+    if(msgMode==="patients"){
+      setChatPatient(null);
+      setShowPatPicker(false);
+      setChatPatientExpanded(false);
+    }
+  },[msgMode]);
+  useEffect(()=>{
+    if(!selChat?.id) return;
+    const inPat=patientChatContacts.some(c=>c.id===selChat.id);
+    const inPh=chatContacts.some(c=>c.id===selChat.id);
+    if(inPat&&!inPh) setMsgMode("patients");
+    else if(inPh&&!inPat) setMsgMode("pharmacy");
+  },[selChat?.id,patientChatContacts,chatContacts]);
+  useEffect(()=>{
+    if(page!=="messages") return;
+    setSelChat(prev=>{
+      if(msgMode==="pharmacy"){
+        if(!chatContacts.length) return null;
+        if(prev&&chatContacts.some(c=>c.id===prev.id)) return chatContacts.find(c=>c.id===prev.id);
+        return chatContacts[0];
+      }
+      if(!patientChatContacts.length) return null;
+      if(prev&&patientChatContacts.some(c=>c.id===prev.id)) return patientChatContacts.find(c=>c.id===prev.id);
+      return patientChatContacts[0];
+    });
+  },[msgMode,page,chatContacts,patientChatContacts]);
+  useEffect(()=>{
+    if(msgMode!=="pharmacy"||!selChat) return;
     setChatContacts(prev=>{
       const updated=prev.find(c=>c.id===selChat.id);
       if(updated&&updated.lastMessageAt!==selChat.lastMessageAt){
@@ -250,7 +331,17 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       }
       return prev;
     });
-  },[chatContacts]);
+  },[chatContacts,msgMode,selChat?.id,selChat?.lastMessageAt]);
+  useEffect(()=>{
+    if(msgMode!=="patients"||!selChat) return;
+    setPatientChatContacts(prev=>{
+      const updated=prev.find(c=>c.id===selChat.id);
+      if(updated&&updated.lastMessageAt!==selChat.lastMessageAt){
+        setSelChat(updated);
+      }
+      return prev;
+    });
+  },[patientChatContacts,msgMode,selChat?.id,selChat?.lastMessageAt]);
   useEffect(()=>{
     if(!selChat||!user?.id)return;
     atBottomRef.current=true;
@@ -281,23 +372,48 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const interval=setInterval(()=>{
       const chat=selChatRef.current;
       if(!chat) return;
-      supabase.from("chat_messages").select("*")
-        .eq("doctor_id",user.id).eq("pharmacist_id",chat.id)
-        .order("created_at",{ascending:true})
-        .then(({data})=>{
-          if(!data) return;
-          setMessages(prev=>{
-            const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
-            const lastPrevId=realPrev[realPrev.length-1]?.id;
-            const lastNewId=data[data.length-1]?.id;
-            if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-            if(lastPrevId!==lastNewId&&data.length>0){
-              const ts=data[data.length-1].created_at;
-              setChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
-            }
-            return sortMsgs(data);
+      let pollPatient=patientChatContactsRef.current.some(c=>c.id===chat.id);
+      if(!pollPatient&&!chatContactsRef.current.some(c=>c.id===chat.id)){
+        pollPatient=msgModeRef.current==="patients";
+      } else if(chatContactsRef.current.some(c=>c.id===chat.id)&&!patientChatContactsRef.current.some(c=>c.id===chat.id)){
+        pollPatient=false;
+      }
+      if(pollPatient){
+        const q=`and(sender_id.eq.${user.id},recipient_id.eq.${chat.id}),and(sender_id.eq.${chat.id},recipient_id.eq.${user.id})`;
+        supabase.from("patient_messages").select("*").or(q).order("created_at",{ascending:true}).limit(200)
+          .then(({data})=>{
+            if(!data) return;
+            setMessages(prev=>{
+              const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
+              const lastPrevId=realPrev[realPrev.length-1]?.id;
+              const lastNewId=data[data.length-1]?.id;
+              if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
+              if(lastPrevId!==lastNewId&&data.length>0){
+                const ts=data[data.length-1].created_at;
+                setPatientChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
+              }
+              return sortMsgs(data);
+            });
           });
-        });
+      } else {
+        supabase.from("chat_messages").select("*")
+          .eq("doctor_id",user.id).eq("pharmacist_id",chat.id)
+          .order("created_at",{ascending:true})
+          .then(({data})=>{
+            if(!data) return;
+            setMessages(prev=>{
+              const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
+              const lastPrevId=realPrev[realPrev.length-1]?.id;
+              const lastNewId=data[data.length-1]?.id;
+              if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
+              if(lastPrevId!==lastNewId&&data.length>0){
+                const ts=data[data.length-1].created_at;
+                setChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
+              }
+              return sortMsgs(data);
+            });
+          });
+      }
     },2000);
     return ()=>clearInterval(interval);
   },[page,selChat?.id,user?.id]);
@@ -312,7 +428,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           (payload)=>{
             const msg=payload.new;
             if(msg.sender_id===user.id) return;
-            if(soundEnabled) playNotifSound(soundType);
+            if(soundEnabledRef.current) playNotifSound(soundTypeRef.current,soundVolumeRef.current);
             const currentChat=selChatRef.current;
             setChatContacts(prev=>[...prev].map(c=>c.id===msg.pharmacist_id?{...c,lastMessageAt:msg.created_at}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
             if(currentChat&&msg.pharmacist_id===currentChat.id){
@@ -355,6 +471,53 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   },[user?.id]);
   useEffect(()=>{
     if(!user?.id) return;
+    function handlePatientThreadInsert(payload){
+      const msg=payload.new;
+      if(!msg) return;
+      const other=msg.sender_id===user.id?msg.recipient_id:msg.sender_id;
+      const currentChat=selChatRef.current;
+      const mode=msgModeRef.current;
+      setPatientChatContacts(prev=>{
+        if(!prev.some(c=>c.id===other)) return prev;
+        return sortContacts([...prev].map(c=>c.id===other?{...c,lastMessageAt:msg.created_at}:c));
+      });
+      if(msg.sender_id!==user.id&&soundEnabledRef.current) playNotifSound(soundTypeRef.current,soundVolumeRef.current);
+      if(mode==="patients"&&currentChat&&currentChat.id===other){
+        const pair=new Set([msg.sender_id,msg.recipient_id]);
+        if(pair.has(user.id)&&pair.has(other)){
+          setMessages(prev=>{
+            if(prev.some(m=>m.id===msg.id)) return prev;
+            return sortMsgs([...prev,msg]);
+          });
+          if(msg.recipient_id===user.id&&!msg.read_at){
+            supabase.from("patient_messages").update({read_at:new Date().toISOString()}).eq("id",msg.id).then(()=>{});
+            setUnreadPatientCount(prev=>Math.max(0,prev-1));
+            setUnreadPerPatient(prev=>{
+              const n={...prev};
+              if(n[other]) n[other]=Math.max(0,n[other]-1);
+              if(!n[other]) delete n[other];
+              return n;
+            });
+          }
+        }
+      } else if(msg.recipient_id===user.id&&!msg.read_at&&msg.sender_id!==user.id){
+        setUnreadPatientCount(prev=>prev+1);
+        setUnreadPerPatient(prev=>({...prev,[other]:(prev[other]||0)+1}));
+      }
+    }
+    function onPatientMsgInsert(payload){
+      const msg=payload.new;
+      if(!msg) return;
+      if(msg.recipient_id!==user.id&&msg.sender_id!==user.id) return;
+      handlePatientThreadInsert(payload);
+    }
+    const ptCh=supabase.channel(`doc-pt-msgs-${user.id}`)
+      .on("postgres_changes",{event:"INSERT",schema:"public",table:"patient_messages"},onPatientMsgInsert)
+      .subscribe();
+    return ()=>{ supabase.removeChannel(ptCh); };
+  },[user?.id]);
+  useEffect(()=>{
+    if(!user?.id) return;
     supabase.from("user_presence")
       .upsert({user_id:user.id,is_online:true,last_seen:new Date().toISOString()},{onConflict:"user_id"})
       .then(()=>{});
@@ -389,41 +552,79 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     };
   },[user?.id]);
 
+  const peerIsPatient=useMemo(()=>!!selChat&&(
+    patientChatContacts.some(c=>c.id===selChat.id)||
+    (!chatContacts.some(c=>c.id===selChat.id)&&msgMode==="patients")
+  ),[selChat?.id,patientChatContacts,chatContacts,msgMode]);
+  const peerAvatarBg=useMemo(()=>peerIsPatient?"linear-gradient(135deg,#0e7490,#155e75)":"linear-gradient(135deg,#7c3aed,#6d28d9)",[peerIsPatient]);
+
   useEffect(()=>{
     if(!selChat?.id||!user?.id) return;
     setPeerTyping(false);
-    const ch=supabase.channel(`typing-doc-${user.id}-${selChat.id}`);
+    typingBroadcastRef.current=null;
+    const thread=[user.id,selChat.id].sort().join("-");
+    const chName=peerIsPatient?`pm-typing-${thread}`:`typing-doc-${user.id}-${selChat.id}`;
+    const ch=supabase.channel(chName,{config:{broadcast:{ack:false}}});
     ch.on("broadcast",{event:"typing"},(payload)=>{
       if(payload.payload?.sender_id!==user.id){
         setPeerTyping(true);
         clearTimeout(ch._typingTimer);
         ch._typingTimer=setTimeout(()=>setPeerTyping(false),2500);
       }
-    }).subscribe();
-    return ()=>{ clearTimeout(ch._typingTimer); supabase.removeChannel(ch); };
-  },[selChat?.id,user?.id]);
+    }).subscribe((status)=>{
+      if(status==="SUBSCRIBED") typingBroadcastRef.current=ch;
+    });
+    return ()=>{
+      typingBroadcastRef.current=null;
+      clearTimeout(ch._typingTimer);
+      supabase.removeChannel(ch);
+    };
+  },[selChat?.id,user?.id,peerIsPatient]);
 
   function emitTyping(){
     if(!selChat?.id||!user?.id) return;
-    const chName=`typing-doc-${user.id}-${selChat.id}`;
-    supabase.channel(chName).send({type:"broadcast",event:"typing",payload:{sender_id:user.id}}).catch(()=>{});
+    typingBroadcastRef.current?.send({type:"broadcast",event:"typing",payload:{sender_id:user.id}}).catch(()=>{});
   }
 
-  async function loadMessages(pharmacistId){
+  async function loadMessages(peerId){
     try{
+      let usePatientMsgs=patientChatContacts.some(c=>c.id===peerId);
+      if(!usePatientMsgs&&!chatContacts.some(c=>c.id===peerId)){
+        usePatientMsgs=msgModeRef.current==="patients";
+      } else if(chatContacts.some(c=>c.id===peerId)&&!patientChatContacts.some(c=>c.id===peerId)){
+        usePatientMsgs=false;
+      }
+      if(usePatientMsgs){
+        const q=`and(sender_id.eq.${user.id},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${user.id})`;
+        const{data,error}=await supabase.from("patient_messages").select("*").or(q).order("created_at",{ascending:true}).limit(200);
+        if(error){ console.error("Load patient msgs:",error.message); return; }
+        atBottomRef.current=true;
+        setMessages(sortMsgs(data||[]));
+        setUnreadPerPatient(prev=>{ const n={...prev}; delete n[peerId]; return n; });
+        if(data&&data.length>0){
+          const ts=data[data.length-1].created_at;
+          setPatientChatContacts(prev=>sortContacts([...prev].map(c=>c.id===peerId?{...c,lastMessageAt:ts}:c)));
+        }
+        const unreadIds=(data||[]).filter(m=>m.recipient_id===user.id&&m.sender_id===peerId&&!m.read_at).map(m=>m.id);
+        if(unreadIds.length>0){
+          supabase.from("patient_messages").update({read_at:new Date().toISOString()}).in("id",unreadIds).then(()=>{});
+          setUnreadPatientCount(prev=>Math.max(0,prev-unreadIds.length));
+        }
+        return;
+      }
       const{data,error}=await supabase
         .from("chat_messages").select("*")
-        .eq("doctor_id",user.id).eq("pharmacist_id",pharmacistId)
+        .eq("doctor_id",user.id).eq("pharmacist_id",peerId)
         .order("created_at",{ascending:true});
       if(error){ console.error("Load msgs:",error.message); return; }
       atBottomRef.current=true;
       setMessages(sortMsgs(data||[]));
-      setUnreadPerContact(prev=>{ const n={...prev}; delete n[pharmacistId]; return n; });
+      setUnreadPerContact(prev=>{ const n={...prev}; delete n[peerId]; return n; });
       if(data&&data.length>0){
         const ts=data[data.length-1].created_at;
-        setChatContacts(prev=>[...prev].map(c=>c.id===pharmacistId?{...c,lastMessageAt:ts}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
+        setChatContacts(prev=>[...prev].map(c=>c.id===peerId?{...c,lastMessageAt:ts}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
       }
-      const unreadIds=(data||[]).filter(m=>m.sender_id===pharmacistId&&!m.read_at).map(m=>m.id);
+      const unreadIds=(data||[]).filter(m=>m.sender_id===peerId&&!m.read_at).map(m=>m.id);
       if(unreadIds.length>0){
         supabase.from("chat_messages").update({read_at:new Date().toISOString()}).in("id",unreadIds).then(()=>{});
         setUnreadCount(prev=>Math.max(0,prev-unreadIds.length));
@@ -434,13 +635,48 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     if(!msgInput.trim()||!selChat||msgSending) return;
     setMsgSending(true);
     const userText=msgInput.trim();
-    const patContext=chatPatient?`📋 Re: ${chatPatient.fullName}${chatPatient.dob?` (DOB: ${chatPatient.dob})`:""}${chatPatient.bloodType?` · Blood: ${chatPatient.bloodType}`:""}${chatPatient.allergies?.length>0?` · Allergies: ${chatPatient.allergies.join(", ")}`:""}${chatPatient.conditions?.length>0?` · Conditions: ${chatPatient.conditions.join(", ")}`:""}
+    const sid=selChat.id;
+    let sendPatientMsgs=patientChatContacts.some(c=>c.id===sid);
+    if(!sendPatientMsgs&&!chatContacts.some(c=>c.id===sid)){
+      sendPatientMsgs=msgMode==="patients";
+    } else if(chatContacts.some(c=>c.id===sid)&&!patientChatContacts.some(c=>c.id===sid)){
+      sendPatientMsgs=false;
+    }
+    const patContext=!sendPatientMsgs&&chatPatient?`📋 Re: ${chatPatient.fullName}${chatPatient.dob?` (DOB: ${chatPatient.dob})`:""}${chatPatient.bloodType?` · Blood: ${chatPatient.bloodType}`:""}${chatPatient.allergies?.length>0?` · Allergies: ${chatPatient.allergies.join(", ")}`:""}${chatPatient.conditions?.length>0?` · Conditions: ${chatPatient.conditions.join(", ")}`:""}
 `:"";
     const body=patContext+userText;
     setMsgInput("");
     if(chatPatient) setChatPatient(null);
     const now=new Date().toISOString();
     const tempId=`temp-${Date.now()}`;
+    if(sendPatientMsgs){
+      const tempMsg={id:tempId,sender_id:user.id,recipient_id:selChat.id,body,created_at:now,read_at:null};
+      setMessages(prev=>sortMsgs([...prev,tempMsg]));
+      setPatientChatContacts(prev=>sortContacts([...prev].map(c=>c.id===selChat.id?{...c,lastMessageAt:now}:c)));
+      try{
+        const{data:msg,error}=await supabase.from("patient_messages")
+          .insert({sender_id:user.id,recipient_id:selChat.id,body})
+          .select("*").single();
+        if(error){
+          console.error("Send:",error.message);
+          setMessages(prev=>prev.filter(m=>m.id!==tempId));
+          setMsgInput(body);
+          return;
+        }
+        setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+        notifyRecipientNewChatMessage({
+          recipientId:selChat.id,
+          senderName:`Dr. ${name}`,
+          messageText:userText,
+          relatedMessageId:msg?.id,
+        });
+      }catch(e){
+        console.error("sendMessage:",e);
+        setMessages(prev=>prev.filter(m=>m.id!==tempId));
+        setMsgInput(body);
+      }finally{setMsgSending(false);}
+      return;
+    }
     const tempMsg={id:tempId,doctor_id:user.id,pharmacist_id:selChat.id,sender_id:user.id,body,created_at:now,read_at:null};
     setMessages(prev=>sortMsgs([...prev,tempMsg]));
     setChatContacts(prev=>[...prev].map(c=>c.id===selChat.id?{...c,lastMessageAt:now}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
@@ -455,6 +691,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         return;
       }
       setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+      notifyRecipientNewChatMessage({
+        recipientId:selChat.id,
+        senderName:`Dr. ${name}`,
+        messageText:userText,
+        relatedMessageId:msg?.id,
+      });
     }catch(e){
       console.error("sendMessage:",e);
       setMessages(prev=>prev.filter(m=>m.id!==tempId));
@@ -484,11 +726,17 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         pharmContact=pharmacist;
         setChatContacts(prev=>[...prev,pharmacist]);
       }
-      await supabase.from("chat_messages").insert({
+      const { data: sentRx } = await supabase.from("chat_messages").insert({
         doctor_id:user.id,
         pharmacist_id:pharmacist.id,
         sender_id:user.id,
         body,
+      }).select("id").single();
+      notifyRecipientNewChatMessage({
+        recipientId:pharmacist.id,
+        senderName:`Dr. ${name}`,
+        messageText:"Shared patient details with your pharmacy.",
+        relatedMessageId:sentRx?.id,
       });
       setSendToPharmacyDone(true);
       setTimeout(()=>{ setSendToPharmacyDone(false); setShowSendToPharmacy(false); },2000);
@@ -496,28 +744,51 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     finally{ setSendToPharmacyBusy(false); }
   }
 
-  // Load doctor notifications + poll every 15s as fallback until realtime publication is configured
+  // Load doctor notifications + poll fallback; realtime keeps read/delete in sync across tabs
   useEffect(()=>{
     if(!user?.id) return;
     const load=()=>supabase.from("notifications").select("*").eq("user_id",user.id).order("created_at",{ascending:false}).limit(30).then(({data})=>setDocNotifs(data||[]));
     load();
     const poll=setInterval(load,15000);
     const ch=supabase.channel(`doc-notifs-${user.id}`)
-      .on("postgres_changes",{event:"INSERT",schema:"public",table:"notifications",filter:`user_id=eq.${user.id}`},(p)=>{
-        setDocNotifs(prev=>prev.some(n=>n.id===p.new.id)?prev:[p.new,...prev]);
+      .on("postgres_changes",{event:"*",schema:"public",table:"notifications",filter:`user_id=eq.${user.id}`},(p)=>{
+        setDocNotifs(prev=>mergeNotificationRows(prev,p,30));
       }).subscribe();
     return ()=>{ clearInterval(poll); supabase.removeChannel(ch); };
   },[user?.id]);
 
   async function markNotifRead(id){
-    setDocNotifs(prev=>prev.map(n=>n.id===id?{...n,read_at:new Date().toISOString()}:n));
-    await supabase.from("notifications").update({read_at:new Date().toISOString()}).eq("id",id);
+    if(!user?.id) return;
+    const snapshot=docNotifs;
+    const now=new Date().toISOString();
+    setDocNotifs(prev=>prev.map(n=>n.id===id?{...n,read_at:now}:n));
+    const { error }=await supabase.from("notifications").update({read_at:now}).eq("id",id).eq("user_id",user.id);
+    if(error){ console.error("notifications.mark read:",error.message); setDocNotifs(snapshot); }
   }
   async function markAllNotifsRead(){
+    if(!user?.id) return;
     const ids=docNotifs.filter(n=>!n.read_at).map(n=>n.id);
     if(!ids.length) return;
-    setDocNotifs(prev=>prev.map(n=>({...n,read_at:n.read_at||new Date().toISOString()})));
-    await supabase.from("notifications").update({read_at:new Date().toISOString()}).in("id",ids);
+    const snapshot=docNotifs;
+    const now=new Date().toISOString();
+    setDocNotifs(prev=>prev.map(n=>({...n,read_at:n.read_at||now})));
+    const { error }=await supabase.from("notifications").update({read_at:now}).in("id",ids).eq("user_id",user.id);
+    if(error){ console.error("notifications.mark all read:",error.message); setDocNotifs(snapshot); }
+  }
+  async function removeNotif(id){
+    if(!user?.id) return;
+    const snapshot=docNotifs;
+    setDocNotifs(prev=>prev.filter(n=>n.id!==id));
+    const { error }=await supabase.from("notifications").delete().eq("id",id).eq("user_id",user.id);
+    if(error){ console.error("notifications.delete:",error.message); setDocNotifs(snapshot); }
+  }
+  async function clearAllNotifs(){
+    if(!docNotifs.length||!user?.id) return;
+    const snapshot=docNotifs;
+    const ids=docNotifs.map(n=>n.id);
+    setDocNotifs([]);
+    const { error }=await supabase.from("notifications").delete().in("id",ids).eq("user_id",user.id);
+    if(error){ console.error("notifications.delete all:",error.message); setDocNotifs(snapshot); }
   }
 
   // Doctor AI chat
@@ -560,12 +831,25 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       const{data:msg,error}=await supabase.from("prescription_messages").insert({prescription_id:selRxChat,sender_id:user.id,body}).select("*").single();
       if(error) throw error;
       setRxMessages(prev=>prev.map(m=>m.id===tempId?msg:m));
-      // Notify pharmacist of new rx chat message
-      const rx=patRx.find(r=>r.id===selRxChat);
-      if(rx?.pharmacist_id){
-        try{
-          await supabase.from("notifications").insert({user_id:rx.pharmacist_id,type:"general",title:"New prescription message",body:`Dr. ${name} sent a message about a prescription.`,related_id:selRxChat});
-        }catch{}
+      const rxRowCached=patRx.find(r=>r.id===selRxChat);
+      let pharmacistId=rxRowCached?.pharmacist_id;
+      let patientId=rxRowCached?.patient_id;
+      if(pharmacistId==null||patientId==null){
+        const{data:rxRow}=await supabase.from("prescriptions").select("pharmacist_id,patient_id").eq("id",selRxChat).eq("doctor_id",user.id).maybeSingle();
+        if(rxRow){
+          if(pharmacistId==null) pharmacistId=rxRow.pharmacist_id;
+          if(patientId==null) patientId=rxRow.patient_id;
+        }
+      }
+      const rows=[];
+      if(pharmacistId){
+        rows.push({user_id:pharmacistId,type:"general",title:"New prescription message",body:`Dr. ${name} sent a message about a prescription.`,related_id:selRxChat});
+      }
+      if(patientId){
+        rows.push({user_id:patientId,type:"general",title:"Prescription updated",body:"Your care team added an update. Open Prescriptions to view the thread.",related_id:selRxChat});
+      }
+      if(rows.length){
+        try{await supabase.from("notifications").insert(rows);}catch{}
       }
     }catch{
       setRxMessages(prev=>prev.filter(m=>m.id!==tempId));
@@ -597,12 +881,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       if(prof.role!=="pharmacist"){setChatSearchMsg({type:"err",text:"That account is not a pharmacist."});return;}
       if(chatContacts.find(c=>c.id===prof.id)){
         const ex=chatContacts.find(c=>c.id===prof.id);
-        setSelChat(ex);setChatSearchEmail("");
+        setMsgMode("pharmacy");setSelChat(ex);setChatSearchEmail("");
         setChatSearchMsg({type:"ok",text:`Switched to ${ex.name}.`});
         setTimeout(()=>setChatSearchMsg(null),2000);return;
       }
       const nc={id:prof.id,name:[prof.first_name,prof.last_name].filter(Boolean).join(" ")||prof.email||"Pharmacist",pharmacy:prof.pharmacy_name||"Pharmacy",email:prof.email||"",lastMessageAt:null};
-      setChatContacts(prev=>sortContacts([...prev,nc]));setSelChat(nc);setChatSearchEmail("");
+      setChatContacts(prev=>sortContacts([...prev,nc]));setMsgMode("pharmacy");setSelChat(nc);setChatSearchEmail("");
       setChatSearchMsg({type:"ok",text:`${nc.name} added.`});
       setTimeout(()=>setChatSearchMsg(null),2500);
     }catch(e){setChatSearchMsg({type:"err",text:"Something went wrong."});}
@@ -631,7 +915,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       if(linkErr&&!linkErr.message?.includes("duplicate")){console.error("Link error:",linkErr);setAddPatientMsg({type:"err",text:"Could not add patient: "+linkErr.message});return;}
       await supabase.from("profiles").update({primary_doctor_id:user.id}).eq("id",prof.id).is("primary_doctor_id",null);
       const np={id:prof.id,fullName:[prof.first_name,prof.last_name].filter(Boolean).join(" ")||prof.email||"Patient",email:prof.email||"",dob:prof.dob||null,bloodType:prof.blood_type||null,allergies:prof.allergies||[],conditions:prof.medical_conditions||[]};
-      setPatients(prev=>[...prev,np]);setAddPatientEmail("");
+      setPatients(prev=>[...prev,np]);
+      setPatientChatContacts(prev=>prev.some(c=>c.id===np.id)?prev:sortContacts([...prev,{id:np.id,name:np.fullName,email:np.email||"",lastMessageAt:null}]));
+      setAddPatientEmail("");
       setAddPatientMsg({type:"ok",text:`${np.fullName} added successfully.`});
       setTimeout(()=>setAddPatientMsg(null),3000);
     }catch(e){console.error("addPatientByEmail:",e);setAddPatientMsg({type:"err",text:"Error: "+e.message});}
@@ -646,7 +932,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         supabase.from("profiles").select("*").eq("id",pat.id).single(),
         supabase.from("user_medications").select("*").eq("user_id",pat.id),
         supabase.from("doctor_notes").select("*").eq("doctor_id",user.id).eq("patient_id",pat.id).order("created_at",{ascending:false}),
-        supabase.from("prescriptions").select("id,status,notes,created_at").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
+        supabase.from("prescriptions").select("id,status,notes,created_at,pharmacist_id,patient_id,doctor_id").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
         supabase.from("appointments").select("*").eq("patient_id",pat.id).eq("doctor_id",user.id).order("date",{ascending:true}),
       ]);
       setPatProfile(profRes.data||{});
@@ -659,6 +945,42 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       try{const s=JSON.parse(localStorage.getItem(key)||"{}");if(s.flag)setPatFlag(s.flag);if(s.vitals)setVitals(s.vitals);}catch{}
     }catch(e){}finally{setLoading(false);}
   }
+
+  async function openNotificationTarget(n){
+    if(!n?.id||!user?.id) return;
+    if(!n.read_at) await markNotifRead(n.id);
+    setShowNotifPanel(false);
+    const rxId=n.related_id;
+    const blob=notificationTextBlob(n);
+    if(rxId&&notificationSuggestsPrescription(n)){
+      const { data:rx,error:rxErr}=await supabase.from("prescriptions").select("id,patient_id").eq("id",rxId).eq("doctor_id",user.id).maybeSingle();
+      if(rxErr) console.error("openNotificationTarget:",rxErr.message);
+      if(rx){
+        let pat=patients.find(p=>p.id===rx.patient_id);
+        if(!pat){
+          const { data:prof }=await supabase.from("profiles").select("id,first_name,last_name,email,dob,blood_type,allergies,medical_conditions").eq("id",rx.patient_id).maybeSingle();
+          if(prof){
+            pat={id:prof.id,fullName:[prof.first_name,prof.last_name].filter(Boolean).join(" ")||prof.email||"Patient",email:prof.email||"",dob:prof.dob||null,bloodType:prof.blood_type||null,allergies:prof.allergies||[],conditions:prof.medical_conditions||[]};
+          }
+        }
+        if(pat){
+          setPage("patients");
+          await openPatient(pat);
+          setActiveTab("prescriptions");
+          setSelRxChat(rx.id);
+          return;
+        }
+      }
+    }
+    if(notificationSuggestsChat(n)||/appointment|reschedule|scheduled/i.test(blob)){
+      setPage("messages");
+      if(/patient|follow-up|lab|visit|your patient|patient message/i.test(blob)) setMsgMode("patients");
+      else setMsgMode("pharmacy");
+      return;
+    }
+    setPage("dashboard");
+  }
+
   function saveToLocal(patch){const key=`doc_${user.id}_pat_${selPat?.id}`;try{const e=JSON.parse(localStorage.getItem(key)||"{}");localStorage.setItem(key,JSON.stringify({...e,...patch}));}catch{}}
   async function saveFlag(flag){setPatFlag(flag);saveToLocal({flag});}
   async function saveVitals(){setVitalsBusy(true);saveToLocal({vitals});await new Promise(r=>setTimeout(r,400));setVitalsBusy(false);setVitalsSaved(true);setTimeout(()=>setVitalsSaved(false),2500);}
@@ -715,6 +1037,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const filtered=patients.filter(p=>!search||(p.fullName||"").toLowerCase().includes(search.toLowerCase())||(p.email||"").toLowerCase().includes(search.toLowerCase()));
   const greetHour=new Date().getHours();
   const docGreet=greetHour<12?"Good morning":greetHour<17?"Good afternoon":"Good evening";
+  const patientChatFilter=chatSearchEmail.trim().toLowerCase();
+  const filteredPatientChats=patientChatFilter
+    ? patientChatContacts.filter(c=>(c.name||"").toLowerCase().includes(patientChatFilter)||(c.email||"").toLowerCase().includes(patientChatFilter))
+    : patientChatContacts;
   const FLAG_CONFIG={none:{label:"No flag",color:t3,bg:"var(--s2)",border:b1},stable:{label:"Stable",color:"var(--gr)",bg:"rgba(5,150,105,.1)",border:"rgba(5,150,105,.25)"},"follow-up":{label:"Follow-up",color:"var(--am)",bg:"rgba(217,119,6,.1)",border:"rgba(217,119,6,.25)"},urgent:{label:"Urgent",color:"var(--ro)",bg:"rgba(185,28,28,.1)",border:"rgba(185,28,28,.25)"}};
   const TabBtn=({id,label,count})=>(
     <motion.button type="button" whileTap={{scale:.96}} onClick={()=>setActiveTab(id)}
@@ -752,7 +1078,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
                 <I size={15}/>{l}
                 {id==="patients"&&patients.length>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{patients.length}</span>}
-                {id==="messages"&&unreadCount>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{unreadCount}</span>}
+                {id==="messages"&&totalChatUnread>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{totalChatUnread}</span>}
               </div>
             ))}
           </nav>
@@ -798,8 +1124,33 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               {(!isMob||!selChat)&&(
               <div style={{width:isMob?"100%":280,flexShrink:0,borderRight:isMob?"none":`1px solid ${b1}`,borderBottom:isMob?`1px solid ${b1}`:"none",display:"flex",flexDirection:"column",background:"var(--s1)",minHeight:0,overflow:"hidden"}}>
                 <div style={{padding:"14px 16px",borderBottom:`1px solid ${b1}`}}>
-                  <h2 style={{color:t1,fontSize:15,fontWeight:700,margin:0,display:"flex",alignItems:"center",gap:8}}><MessageSquare size={14} color={DocAC}/> Pharmacy Chat</h2>
-                  {}
+                  <div style={{display:"flex",gap:6,marginBottom:10}}>
+                    {[
+                      ["pharmacy","Pharmacy",unreadCount],
+                      ["patients","Patients",unreadPatientCount],
+                    ].map(([id,label,badge])=>(
+                      <button key={id} type="button" onClick={()=>{
+                        setMsgMode(id);
+                        if(id==="pharmacy") setSelChat(chatContacts[0]||null);
+                        else setSelChat(patientChatContacts[0]||null);
+                      }}
+                        style={{
+                          flex:1,padding:"8px 10px",borderRadius:10,border:msgMode===id?`2px solid ${DocAC}`:`1px solid ${b1}`,
+                          background:msgMode===id?"var(--doc-pd)":"var(--s2)",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:700,color:t1,
+                          display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                        }}>
+                        {label}
+                        {badge>0&&<span style={{background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:9,fontWeight:800,padding:"1px 6px"}}>{badge}</span>}
+                      </button>
+                    ))}
+                  </div>
+                  <h2 style={{color:t1,fontSize:15,fontWeight:700,margin:0,display:"flex",alignItems:"center",gap:8}}>
+                    <MessageSquare size={14} color={DocAC}/> {msgMode==="pharmacy"?"Pharmacy chat":"Patient messages"}
+                  </h2>
+                  {msgMode==="pharmacy"?(
+                  <p style={{color:t3,fontSize:11,margin:"6px 0 0",lineHeight:1.45}}>Secure chat with pharmacists about prescriptions and fills.</p>
+                  ):null}
+                  {msgMode==="pharmacy"?(
                   <div style={{marginTop:10,display:"flex",gap:7}}>
                     <input className="inp" type="email" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPharmacistByEmail();}} placeholder="Find pharmacist by email…" style={{flex:1,padding:"7px 11px",borderRadius:10,fontSize:12}}/>
                     <motion.button whileTap={{scale:.93}} onClick={findPharmacistByEmail} disabled={chatSearchBusy||!chatSearchEmail.trim()}
@@ -807,8 +1158,13 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       {chatSearchBusy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<Search size={13}/>}
                     </motion.button>
                   </div>
+                  ):(
+                  <div style={{marginTop:10}}>
+                    <input className="inp" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} placeholder="Search patients by name or email…" style={{width:"100%",padding:"7px 11px",borderRadius:10,fontSize:12,boxSizing:"border-box"}}/>
+                  </div>
+                  )}
                   <AnimatePresence>
-                    {chatSearchMsg&&(
+                    {msgMode==="pharmacy"&&chatSearchMsg&&(
                       <motion.p initial={{opacity:0,y:-4}} animate={{opacity:1,y:0}} exit={{opacity:0}}
                         style={{fontSize:11.5,marginTop:6,color:chatSearchMsg.type==="ok"?"var(--gr)":"var(--ro)",fontWeight:600}}>
                         {chatSearchMsg.text}
@@ -817,7 +1173,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   </AnimatePresence>
                 </div>
                 <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
-                  {chatContacts.length===0?(
+                  {msgMode==="pharmacy"?(chatContacts.length===0?(
                     <div style={{padding:"30px 16px",textAlign:"center"}}>
                       <Search size={22} color={t3} style={{opacity:.2,margin:"0 auto 10px",display:"block"}}/>
                       <p style={{color:t3,fontSize:12}}>Search for a pharmacist by email above</p>
@@ -827,7 +1183,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     const unread=unreadPerContact[contact.id]||0;
                     const isOnline=!!onlineUsers[contact.id];
                     return (
-                      <div key={contact.id} onClick={()=>setSelChat(contact)}
+                      <div key={contact.id} onClick={()=>{setMsgMode("pharmacy");setSelChat(contact);}}
                         style={{padding:"12px 16px",cursor:"pointer",borderBottom:"1px solid var(--b0)",background:isActive?"rgba(14,116,144,.07)":unread>0?"rgba(14,116,144,.03)":"transparent",borderLeft:`3px solid ${isActive?DocAC:unread>0?"var(--doc-p)":"transparent"}`,transition:"all .15s"}}>
                         <div style={{display:"flex",alignItems:"center",gap:10}}>
                           <div style={{position:"relative",flexShrink:0}}>
@@ -849,7 +1205,39 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         </div>
                       </div>
                     );
-                  })}
+                  })):(filteredPatientChats.length===0?(
+                    <div style={{padding:"30px 16px",textAlign:"center"}}>
+                      <User size={22} color={t3} style={{opacity:.2,margin:"0 auto 10px",display:"block"}}/>
+                      <p style={{color:t3,fontSize:12}}>{patientChatContacts.length===0?"Add patients under Patients to message them here.":"No patients match your search."}</p>
+                    </div>
+                  ):filteredPatientChats.map(contact=>{
+                    const isActive=selChat?.id===contact.id;
+                    const unread=unreadPerPatient[contact.id]||0;
+                    const isOnline=!!onlineUsers[contact.id];
+                    return (
+                      <div key={contact.id} onClick={()=>{setMsgMode("patients");setSelChat(contact);}}
+                        style={{padding:"12px 16px",cursor:"pointer",borderBottom:"1px solid var(--b0)",background:isActive?"rgba(14,116,144,.07)":unread>0?"rgba(14,116,144,.03)":"transparent",borderLeft:`3px solid ${isActive?DocAC:unread>0?"var(--doc-p)":"transparent"}`,transition:"all .15s"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:10}}>
+                          <div style={{position:"relative",flexShrink:0}}>
+                            <div style={{width:38,height:38,borderRadius:"50%",background:"linear-gradient(135deg,#0e7490,#155e75)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                              <span style={{color:"#fff",fontSize:14,fontWeight:800}}>{contact.name[0]?.toUpperCase()||"P"}</span>
+                            </div>
+                            <div style={{position:"absolute",bottom:1,right:1,width:9,height:9,borderRadius:"50%",background:isOnline?"#22c55e":"var(--b1)",border:"2px solid var(--s1)",transition:"background .4s"}}/>
+                          </div>
+                          <div style={{flex:1,minWidth:0}}>
+                            <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                            <p style={{color:unread>0?DocAC:t3,fontSize:11,margin:"2px 0 0",fontWeight:unread>0?700:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {isOnline?"Online now":contact.lastMessageAt?new Date(contact.lastMessageAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):(contact.email||"Patient")}
+                            </p>
+                          </div>
+                          {unread>0&&(
+                            <span style={{background:"var(--doc-p)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:800,padding:"2px 7px",flexShrink:0,minWidth:20,textAlign:"center"}}>{unread}</span>
+                          )}
+                          {isActive&&!unread&&<div style={{width:7,height:7,borderRadius:"50%",background:DocAC}}/>}
+                        </div>
+                      </div>
+                    );
+                  }))}
                 </div>
               </div>
               )} {}
@@ -858,29 +1246,87 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 {!selChat?(
                   <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}>
                     <MessageSquare size={32} color={t3} style={{opacity:.2}}/>
-                    <p style={{color:t2,fontSize:14,fontWeight:600}}>Search for a pharmacist to start chatting</p>
+                    <p style={{color:t2,fontSize:14,fontWeight:600}}>
+                      {msgMode==="pharmacy"?"Search for a pharmacist to start chatting":"Select a patient from the list to start messaging"}
+                    </p>
                   </div>
                 ):(
                   <>
-                    <div style={{padding:isMob?"10px 12px":"13px 20px",borderBottom:`1px solid ${b1}`,background:"var(--s1)",display:"flex",alignItems:"center",gap:isMob?10:13,flexShrink:0}}>{isMob&&(<button onClick={()=>setSelChat(null)} style={{width:32,height:32,borderRadius:9,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3,flexShrink:0}}><ArrowRight size={14} style={{transform:"rotate(180deg)"}}/></button>)}
-                      <div style={{width:isMob?38:42,height:isMob?38:42,borderRadius:"50%",background:"linear-gradient(135deg,#7c3aed,#6d28d9)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-                        <span style={{color:"#fff",fontSize:isMob?14:16,fontWeight:800}}>{selChat.name[0]?.toUpperCase()}</span>
-                      </div>
-                      <div style={{flex:1,minWidth:0}}>
-                        <p className="truncate" style={{color:t1,fontSize:isMob?13:14,fontWeight:700,margin:0}}>{selChat.name}</p>
-                        <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2}}>
-                          <div style={{width:7,height:7,borderRadius:"50%",background:onlineUsers[selChat.id]?"#22c55e":"var(--b1)",boxShadow:onlineUsers[selChat.id]?"0 0 5px #22c55e":"none",transition:"all .4s",flexShrink:0}}/>
-                          <p style={{color:onlineUsers[selChat.id]?"#22c55e":t3,fontSize:11,margin:0,fontWeight:onlineUsers[selChat.id]?600:400}}>
-                            {onlineUsers[selChat.id]?"Online now":"Offline"}
-                          </p>
+                    <div style={{padding:isMob?"10px 12px":"13px 20px",borderBottom:`1px solid ${b1}`,background:"var(--s1)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexShrink:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:isMob?10:13,flex:1,minWidth:0}}>
+                        {isMob&&(<button type="button" onClick={()=>setSelChat(null)} style={{width:32,height:32,borderRadius:9,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3,flexShrink:0}}><ArrowRight size={14} style={{transform:"rotate(180deg)"}}/></button>)}
+                        <div style={{width:isMob?38:42,height:isMob?38:42,borderRadius:"50%",background:peerIsPatient?"linear-gradient(135deg,#0e7490,#155e75)":"linear-gradient(135deg,#7c3aed,#6d28d9)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                          <span style={{color:"#fff",fontSize:isMob?14:16,fontWeight:800}}>{selChat.name[0]?.toUpperCase()}</span>
+                        </div>
+                        <div style={{flex:1,minWidth:0}}>
+                          <p className="truncate" style={{color:t1,fontSize:isMob?13:14,fontWeight:700,margin:0}}>{selChat.name}</p>
+                          <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2}}>
+                            <div style={{width:7,height:7,borderRadius:"50%",background:onlineUsers[selChat.id]?"#22c55e":"var(--b1)",boxShadow:onlineUsers[selChat.id]?"0 0 5px #22c55e":"none",transition:"all .4s",flexShrink:0}}/>
+                            <p style={{color:onlineUsers[selChat.id]?"#22c55e":t3,fontSize:11,margin:0,fontWeight:onlineUsers[selChat.id]?600:400}}>
+                              {onlineUsers[selChat.id]?"Online now":"Offline"}
+                            </p>
+                          </div>
                         </div>
                       </div>
-                      <span className="role-badge role-pharmacist">Pharmacist</span>
+                      <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                        <button
+                          type="button"
+                          onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}}
+                          title={soundEnabled?"Message sounds on":"Message sounds off"}
+                          style={{
+                            width:isMob?44:40,
+                            height:isMob?44:40,
+                            borderRadius:10,
+                            border:`1px solid ${b1}`,
+                            background:showSoundSettings?"rgba(14,116,144,.14)":"var(--s1)",
+                            color:soundEnabled?DocAC:t3,
+                            display:"grid",
+                            placeItems:"center",
+                            cursor:"pointer",
+                            fontFamily:"inherit",
+                          }}
+                          aria-expanded={showSoundSettings}
+                          aria-label="Message notification sounds"
+                        >
+                          {soundEnabled?<Bell size={18}/>:<BellOff size={18}/>}
+                        </button>
+                        <span className={peerIsPatient?"role-badge role-patient":"role-badge role-pharmacist"}>{peerIsPatient?"Patient":"Pharmacist"}</span>
+                      </div>
                     </div>
+                    {showSoundSettings?(
+                      <div style={{padding:"12px 14px",borderBottom:`1px solid ${b1}`,background:"var(--s2)"}}>
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                          <span style={{color:t1,fontSize:12,fontWeight:700}}>New message sounds</span>
+                          <div style={{display:"flex",alignItems:"center",gap:8}}>
+                            <span style={{color:soundEnabled?"#16a34a":t3,fontSize:11,fontWeight:600}}>{soundEnabled?"On":"Off"}</span>
+                            <div className={`sw ${soundEnabled?"on":""}`} onClick={()=>toggleSound(!soundEnabled)} role="switch" aria-checked={soundEnabled} style={{cursor:"pointer"}}/>
+                          </div>
+                        </div>
+                        {soundEnabled&&(
+                          <>
+                            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10}}>
+                              {Object.entries(SOUND_PROFILES).map(([key,prof])=>(
+                                <button key={key} type="button" onClick={()=>changeSoundType(key)} style={{padding:"4px 10px",borderRadius:99,fontSize:10.5,fontWeight:600,border:`1.5px solid ${soundType===key?DocAC:b1}`,background:soundType===key?"var(--doc-pd)":"transparent",color:soundType===key?DocAC:t3,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}} title={prof.desc}>{prof.label}{key==="urgent"&&<AlertTriangle size={9} color="var(--ro)"/>}</button>
+                              ))}
+                            </div>
+                            <div style={{display:"flex",alignItems:"center",gap:10}}>
+                              <Volume1 size={13} color={t3} style={{flexShrink:0}}/>
+                              <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e=>changeSoundVolume(parseFloat(e.target.value))} style={{flex:1,accentColor:DocAC,cursor:"pointer"}}/>
+                              <Volume2 size={13} color={t3} style={{flexShrink:0}}/>
+                              <span style={{color:t3,fontSize:10,flexShrink:0,minWidth:32}}>{Math.round(soundVolume*100)}%</span>
+                            </div>
+                            {SOUND_PROFILES[soundType]&&<p style={{color:t3,fontSize:10,margin:"8px 0 0",fontStyle:"italic"}}>{SOUND_PROFILES[soundType].desc}</p>}
+                          </>
+                        )}
+                      </div>
+                    ):null}
                     {messages.length===0&&(
                       <div style={{padding:"8px 20px",borderBottom:"1px solid var(--b0)",background:"var(--s2)",display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
                         <span style={{color:t3,fontSize:11,fontWeight:700,flexShrink:0}}>Quick start:</span>
-                        {["Prescription inquiry","Medication availability","Prior authorization","Drug interaction check"].map(qt=>(
+                        {(!peerIsPatient
+                          ? ["Prescription inquiry","Medication availability","Prior authorization","Drug interaction check"]
+                          : ["Follow-up check-in","Lab or imaging results","Visit summary","Medication change"]
+                        ).map(qt=>(
                           <button key={qt} onClick={()=>setMsgInput(qt)} style={{padding:"3px 10px",borderRadius:99,fontSize:11,fontWeight:600,border:`1px solid ${b1}`,background:"var(--s1)",color:t2,cursor:"pointer",fontFamily:"inherit"}}>{qt}</button>
                         ))}
                       </div>
@@ -897,14 +1343,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         const bubbleRadius=isMe
                           ?`${groupTop?"18px":"6px"} 18px 18px ${groupBottom?"18px":"6px"}`
                           :`18px ${groupTop?"18px":"6px"} ${groupBottom?"18px":"6px"} 18px`;
-                        const bodyLines=msg.body.split("\n");
+                        const rawBody=msg.body==null?"":String(msg.body);
+                        const bodyLines=rawBody.split("\n");
                         const isPatRef=bodyLines[0]?.startsWith("📋 Re:");
-                        const isNewPatRef=msg.body.startsWith("PATREF:");
+                        const isNewPatRef=rawBody.startsWith("PATREF:");
                         let patCard=null;
                         // Handle new PATREF:{JSON} format
                         if(isNewPatRef){
                           try{
-                            const json=JSON.parse(msg.body.slice(7));
+                            const json=JSON.parse(rawBody.slice(7));
                             patCard={name:json.name,dob:json.dob,blood:json.blood,allergies:Array.isArray(json.allergies)?json.allergies.join(", "):json.allergies,conditions:Array.isArray(json.conditions)?json.conditions.join(", "):json.conditions};
                           }catch{}
                         }
@@ -918,14 +1365,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           const condMatch=refLine.match(/Conditions:\s*([^·]+)/);
                           patCard={name:nameMatch?.[1]?.replace(/\(.*$/,"").trim(),dob:dobMatch?.[1]?.trim(),blood:bloodMatch?.[1]?.trim(),allergies:allergyMatch?.[1]?.trim(),conditions:condMatch?.[1]?.trim()};
                         }
-                        const displayBody=(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():msg.body;
+                        const displayBody=(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():rawBody;
                         return (
                           <div key={msg.id} style={{display:"block",width:"100%",marginTop:groupTop?14:3}}>
                             {showDate&&(<div style={{textAlign:"center",margin:"16px 0 14px"}}><span style={{padding:"4px 16px",borderRadius:99,fontSize:10,background:"var(--s2)",border:"1px solid var(--b0)",color:t3,fontWeight:700,letterSpacing:".03em"}}>{new Date(msg.created_at).toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"})}</span></div>)}
                             <div style={{display:"flex",alignItems:"flex-end",gap:8,flexDirection:isMe?"row-reverse":"row",width:"100%"}}>
                               <div style={{width:28,flexShrink:0,display:"flex",justifyContent:"center"}}>
                                 {!isMe&&groupBottom&&(
-                                  <div style={{width:26,height:26,borderRadius:"50%",background:"linear-gradient(135deg,#7c3aed,#6d28d9)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                                  <div style={{width:26,height:26,borderRadius:"50%",background:peerAvatarBg,display:"flex",alignItems:"center",justifyContent:"center"}}>
                                     <span style={{color:"#fff",fontSize:10,fontWeight:800}}>{selChat.name[0]?.toUpperCase()}</span>
                                   </div>
                                 )}
@@ -947,9 +1394,35 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                     </div>
                                   </div>
                                 )}
-                                {displayBody&&(
+                                {(msg.attachment_url || displayBody)&&(
                                 <div style={{padding:"9px 14px",borderRadius:bubbleRadius,background:isMe?DocAC:"var(--s1)",border:isMe?"none":`1px solid ${b1}`,boxShadow:isMe?"0 2px 8px rgba(14,116,144,.18)":"0 1px 3px rgba(0,0,0,.06)",maxWidth:"100%",transition:"box-shadow .2s"}}>
-                                  <p style={{color:isMe?"#fff":t1,fontSize:13.5,lineHeight:1.6,margin:0,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{displayBody}</p>
+                                  {msg.attachment_url&&(msg.attachment_mime || "").startsWith("image/")&&(
+                                    <a href={msg.attachment_url} target="_blank" rel="noopener noreferrer" style={{display:"block",marginBottom:displayBody?8:0,lineHeight:0,borderRadius:10,overflow:"hidden"}}>
+                                      <img src={msg.attachment_url} alt={msg.attachment_name || ""} style={{maxWidth:"100%",maxHeight:220,width:"auto",height:"auto",display:"block",objectFit:"cover"}}/>
+                                    </a>
+                                  )}
+                                  {msg.attachment_url&&!(msg.attachment_mime || "").startsWith("image/")&&(
+                                    <a
+                                      href={msg.attachment_url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      style={{
+                                        display:"inline-flex",
+                                        alignItems:"center",
+                                        gap:6,
+                                        marginBottom:displayBody?8:0,
+                                        color:isMe?"rgba(255,255,255,.95)":DocAC,
+                                        fontWeight:600,
+                                        fontSize:12,
+                                        textDecoration:"none",
+                                        wordBreak:"break-all"
+                                      }}
+                                    >
+                                      <Paperclip size={14} strokeWidth={2}/>
+                                      {msg.attachment_name || "View attachment"}
+                                    </a>
+                                  )}
+                                  {displayBody&&<p style={{color:isMe?"#fff":t1,fontSize:13.5,lineHeight:1.6,margin:0,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{displayBody}</p>}
                                 </div>
                                 )}
                                 {groupBottom&&(
@@ -965,7 +1438,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       })}
                       {peerTyping&&(
                         <div style={{display:"flex",alignItems:"flex-end",gap:8,marginTop:10}}>
-                          <div style={{width:26,height:26,borderRadius:"50%",background:"linear-gradient(135deg,#7c3aed,#6d28d9)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                          <div style={{width:26,height:26,borderRadius:"50%",background:peerAvatarBg,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
                             <span style={{color:"#fff",fontSize:10,fontWeight:800}}>{selChat.name[0]?.toUpperCase()}</span>
                           </div>
                           <div style={{padding:"10px 14px",borderRadius:"18px 18px 18px 3px",background:"var(--s1)",border:`1px solid ${b1}`,display:"flex",alignItems:"center",gap:4}}>
@@ -976,7 +1449,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       <div ref={msgEndRef}/>
                     </div>
                     <div style={{flexShrink:0,borderTop:`1px solid ${b1}`,background:"var(--s1)",position:"relative",zIndex:10}}>
-                      {(showPatPicker||chatPatient||showSoundSettings)&&(
+                      {(showPatPicker||chatPatient)&&(
                         <div style={{maxHeight:"40vh",overflowY:"auto",borderBottom:`1px solid ${b1}`}}>
                           {showPatPicker&&(
                             <div style={{background:"var(--s2)"}}>
@@ -1002,7 +1475,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                               </div>
                             </div>
                           )}
-                          {chatPatient&&!showPatPicker&&(
+                          {msgMode==="pharmacy"&&chatPatient&&!showPatPicker&&(
                             <div style={{background:"var(--doc-pd)",borderBottom:`1px solid rgba(14,116,144,.15)`}}>
                               <div style={{padding:"7px 12px",display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>setChatPatientExpanded(p=>!p)}>
                                 <User size={13} color={DocAC}/>
@@ -1022,42 +1495,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                               )}
                             </div>
                           )}
-                          <AnimatePresence>
-                            {showSoundSettings&&(
-                              <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0,y:6}} style={{padding:"12px 14px",background:"var(--s2)"}}>
-                                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-                                  <span style={{color:t1,fontSize:12,fontWeight:700}}>Notification sounds</span>
-                                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                    <span style={{color:soundEnabled?"var(--gr)":"var(--ro)",fontSize:11,fontWeight:600}}>{soundEnabled?"On":"Off"}</span>
-                                    <div className={`sw ${soundEnabled?"on":""}`} onClick={()=>toggleSound(!soundEnabled)}/>
-                                  </div>
-                                </div>
-                                {soundEnabled&&(
-                                  <>
-                                    <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
-                                      {Object.entries(SOUND_PROFILES).map(([key,prof])=>(
-                                        <button key={key} onClick={()=>changeSoundType(key)} style={{padding:"4px 11px",borderRadius:99,fontSize:10.5,fontWeight:600,border:`1.5px solid ${soundType===key?DocAC:b1}`,background:soundType===key?"var(--doc-pd)":"transparent",color:soundType===key?DocAC:t3,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}} title={prof.desc}>{prof.label}{key==="urgent"&&<AlertTriangle size={9} color="var(--ro)"/>}</button>
-                                      ))}
-                                    </div>
-                                    <div style={{display:"flex",alignItems:"center",gap:10}}>
-                                      <Volume1 size={13} color={t3} style={{flexShrink:0}}/>
-                                      <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e=>changeSoundVolume(parseFloat(e.target.value))} style={{flex:1,accentColor:DocAC,cursor:"pointer"}}/>
-                                      <Volume2 size={13} color={t3} style={{flexShrink:0}}/>
-                                      <span style={{color:t3,fontSize:10,flexShrink:0,minWidth:28}}>{Math.round(soundVolume*100)}%</span>
-                                    </div>
-                                    {SOUND_PROFILES[soundType]&&<p style={{color:t3,fontSize:10,margin:"6px 0 0",fontStyle:"italic"}}>{SOUND_PROFILES[soundType].desc}</p>}
-                                  </>
-                                )}
-                              </motion.div>
-                            )}
-                          </AnimatePresence>
                         </div>
                       )}
                       <div style={{padding:`10px 14px calc(10px + env(safe-area-inset-bottom,0px))`}}>
                         <div style={{display:"flex",alignItems:"flex-end",gap:9}}>
-                          <button onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient" style={{width:36,height:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>
+                          {msgMode==="pharmacy"?(
+                          <button type="button" onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient context for pharmacy message" style={{width:36,height:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>
                             <User size={15}/>
                           </button>
+                          ):null}
                           <div style={{flex:1,background:"var(--s2)",border:`1.5px solid ${b1}`,borderRadius:20,padding:"10px 14px"}}
                             onClick={e=>e.currentTarget.querySelector("textarea")?.focus()}>
                             <textarea
@@ -1073,14 +1519,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             {msgSending?<Loader2 size={15} style={{animation:"spin360 .7s linear infinite"}}/>:<Send size={15}/>}
                           </button>
                         </div>
-                        {!isMob&&(
-                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:5}}>
-                            <p style={{color:t3,fontSize:10,margin:0}}>Enter to send · Shift+Enter for new line{chatPatient&&<span style={{color:DocAC}}> · Referencing <strong>{chatPatient.fullName}</strong></span>}</p>
-                            <button onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}} style={{background:"none",border:"none",cursor:"pointer",color:soundEnabled?DocAC:t3,fontSize:10,fontWeight:600,display:"flex",alignItems:"center",gap:4,padding:0,fontFamily:"inherit"}}>
-                              {soundEnabled?<Bell size={11}/>:<BellOff size={11}/>} Sound
-                            </button>
-                          </div>
-                        )}
+                        <p style={{color:t3,fontSize:10,margin:"5px 0 0"}}>Enter to send · Shift+Enter for new line{chatPatient&&<span style={{color:DocAC}}> · Referencing <strong>{chatPatient.fullName}</strong></span>}</p>
                       </div>
                     </div>
                   </>
@@ -1525,20 +1964,28 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         {showNotifPanel&&(
           <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setShowNotifPanel(false)} style={{position:"fixed",inset:0,zIndex:70}}>
             <motion.div initial={{opacity:0,y:-8,scale:.97}} animate={{opacity:1,y:0,scale:1}} exit={{opacity:0,y:-8}} transition={{type:"spring",damping:28,stiffness:320}} onClick={e=>e.stopPropagation()} style={{position:"absolute",top:58,right:isMob?8:16,width:isMob?"calc(100vw - 16px)":"360px",maxHeight:"70vh",display:"flex",flexDirection:"column",background:"var(--bg)",border:`1px solid ${b1}`,borderRadius:18,boxShadow:"0 16px 48px rgba(0,0,0,.18)",overflow:"hidden",zIndex:71}}>
-              <div style={{padding:"14px 16px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+              <div style={{padding:"14px 16px",borderBottom:`1px solid ${b1}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,flexWrap:"wrap",gap:8}}>
                 <h3 style={{color:t1,fontSize:14,fontWeight:700,margin:0,display:"flex",alignItems:"center",gap:7}}><Bell size={13} color={DocAC}/> Notifications {unreadNotifCount>0&&<span style={{background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:800,padding:"1px 7px"}}>{unreadNotifCount}</span>}</h3>
-                {unreadNotifCount>0&&<button onClick={markAllNotifsRead} style={{fontSize:11,fontWeight:600,color:DocAC,background:"none",border:"none",cursor:"pointer",fontFamily:"inherit"}}>Mark all read</button>}
+                <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                  {docNotifs.length>0&&<button type="button" onClick={(e)=>{e.stopPropagation();clearAllNotifs();}} style={{fontSize:11,fontWeight:600,color:"var(--ro)",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",display:"inline-flex",alignItems:"center",gap:4}}><Trash2 size={12}/> Clear all</button>}
+                  {unreadNotifCount>0&&<button type="button" onClick={(e)=>{e.stopPropagation();markAllNotifsRead();}} style={{fontSize:11,fontWeight:600,color:DocAC,background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",display:"inline-flex",alignItems:"center",gap:4}}><CheckCheck size={12}/> Mark all read</button>}
+                </div>
               </div>
               <div style={{flex:1,overflowY:"auto"}}>
                 {docNotifs.length===0&&<p style={{color:t3,fontSize:13,textAlign:"center",padding:"28px 16px"}}>No notifications yet.</p>}
                 {docNotifs.map(n=>(
-                  <div key={n.id} onClick={()=>markNotifRead(n.id)} style={{padding:"12px 16px",borderBottom:`1px solid ${b1}`,cursor:"pointer",background:n.read_at?"transparent":"rgba(14,116,144,.04)",display:"flex",gap:10,alignItems:"flex-start"}} onMouseEnter={e=>e.currentTarget.style.background="var(--s2)"} onMouseLeave={e=>e.currentTarget.style.background=n.read_at?"transparent":"rgba(14,116,144,.04)"}>
-                    <div style={{width:8,height:8,borderRadius:"50%",background:n.read_at?"transparent":DocAC,flexShrink:0,marginTop:5}}/>
-                    <div style={{flex:1,minWidth:0}}>
-                      <p style={{color:t1,fontSize:13,fontWeight:n.read_at?500:700,margin:0}}>{n.title}</p>
-                      {n.body&&<p style={{color:t3,fontSize:12,margin:"3px 0 0",lineHeight:1.5}}>{n.body}</p>}
-                      <p style={{color:t3,fontSize:10,margin:"4px 0 0"}}>{new Date(n.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</p>
+                  <div key={n.id} style={{padding:"10px 12px",borderBottom:`1px solid ${b1}`,background:n.read_at?"transparent":"rgba(14,116,144,.04)",display:"flex",gap:8,alignItems:"flex-start"}}>
+                    <div role="button" tabIndex={0} onClick={(e)=>{ e.stopPropagation(); void openNotificationTarget(n); }} onKeyDown={e=>{if(e.key==="Enter"||e.key===" ") { e.preventDefault(); void openNotificationTarget(n); }}} style={{flex:1,minWidth:0,cursor:"pointer",padding:"2px 4px 2px 0",borderRadius:8}} onMouseEnter={e=>{e.currentTarget.style.background="var(--s2)"}} onMouseLeave={e=>{e.currentTarget.style.background="transparent"}}>
+                      <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:n.read_at?"transparent":DocAC,flexShrink:0,marginTop:5}}/>
+                        <div style={{flex:1,minWidth:0}}>
+                          <p style={{color:t1,fontSize:13,fontWeight:n.read_at?500:700,margin:0}}>{n.title}</p>
+                          {n.body&&<p style={{color:t3,fontSize:12,margin:"3px 0 0",lineHeight:1.5}}>{n.body}</p>}
+                          <p style={{color:t3,fontSize:10,margin:"4px 0 0"}}>{new Date(n.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</p>
+                        </div>
+                      </div>
                     </div>
+                    <button type="button" title="Dismiss" onClick={(e)=>{e.stopPropagation();removeNotif(n.id);}} style={{flexShrink:0,width:30,height:30,borderRadius:8,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3}}><X size={14}/></button>
                   </div>
                 ))}
               </div>
@@ -1658,8 +2105,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           {[["dashboard",HeartPulse,"Dashboard"],["patients",User,"Patients"],["messages",MessageSquare,"Msgs"]].map(([id,I,l])=>(
             <button key={id} className={`bt ${page===id?"on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
               <I size={19}/>
-              {id==="messages"&&unreadCount>0
-                ?<span style={{position:"relative"}}>{l}<span style={{position:"absolute",top:-6,right:-10,background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:8,fontWeight:800,padding:"1px 4px"}}>{unreadCount}</span></span>
+              {id==="messages"&&totalChatUnread>0
+                ?<span style={{position:"relative"}}>{l}<span style={{position:"absolute",top:-6,right:-10,background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:8,fontWeight:800,padding:"1px 4px"}}>{totalChatUnread}</span></span>
                 :l}
             </button>
           ))}
@@ -1688,7 +2135,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);setMobMenu(false);}}>
                     <I size={15}/>{l}
                     {id==="patients"&&patients.length>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{patients.length}</span>}
-                    {id==="messages"&&unreadCount>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{unreadCount}</span>}
+                    {id==="messages"&&totalChatUnread>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{totalChatUnread}</span>}
                   </div>
                 ))}
               </nav>

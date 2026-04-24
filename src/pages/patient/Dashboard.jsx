@@ -1,544 +1,1084 @@
-import { useState, useEffect, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Pill, Calendar, Plus, Clock, Check, AlertCircle, Flame, Loader2, TrendingUp, Bell, CheckCircle2, Pencil, Stethoscope, Sparkles, Trash2, X, ChevronRight, Info, AlertTriangle, Shield } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { motion } from "framer-motion";
+import { Pill, Calendar, Plus, CheckCircle2, Check, Flame, TrendingUp, MessageCircle, AlertTriangle, ChevronRight, ChevronDown, Pencil, Clock, Bell, Lightbulb, Moon, Sun, Utensils, Sparkles, Stethoscope, X } from "lucide-react";
 import { supabase } from "../../supabase";
-import { COLS, TIPS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
-import { to12h } from "../../lib/utils";
+import { TIPS } from "../../lib/constants";
+import { to12h, to12hNoSeconds } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useClock } from "../../hooks/useClock";
 import Ring from "../../components/common/Ring";
-import AppointmentRow from "../../components/appointments/AppointmentRow";
-import { logMedicationTaken, unlogMedicationTaken, getAdherenceStreak, getDailyAdherence, getWeekStart } from "../../lib/adherence";
+import { logMedicationTaken, unlogMedicationTaken, getAdherenceStreak, doseRowLogged, patchMedDoseToggle } from "../../lib/adherence";
+import { expandDoseTimesForToday, timeHMToMins, ringMaxSecForMedSpacing } from "../../lib/medScheduleGroups";
+import { openExternalLink } from "../../lib/openExternalLink";
 
-// Fetch drug info from OpenFDA (free, no key needed)
-async function fetchDrugInfo(medName) {
-  const name = medName.replace(/\s*\(.*?\)\s*/g, "").trim(); // strip brand name in parens
-  const url = `https://api.fda.gov/drug/label.json?search=openfda.brand_name:"${encodeURIComponent(name)}"+openfda.generic_name:"${encodeURIComponent(name)}"&limit=1`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      // fallback: search by generic name only
-      const res2 = await fetch(`https://api.fda.gov/drug/label.json?search=${encodeURIComponent(name)}&limit=1`);
-      if (!res2.ok) return null;
-      const d2 = await res2.json();
-      return d2.results?.[0] || null;
-    }
-    const d = await res.json();
-    return d.results?.[0] || null;
-  } catch { return null; }
+const DASHBOARD_HEALTH_TIPS_URL = "https://medlineplus.gov/druginformation.html";
+const HEALTH_TIP_DISMISS_STORAGE_KEY = "mt_dashboard_health_tip_dismissed";
+
+function formatInApprox(sec) {
+  if (sec == null || sec < 0) return "—";
+  const s = Math.floor(sec);
+  if (s < 60) return "in less than a minute";
+  const hours = s / 3600;
+  if (hours >= 1) {
+    const h = Math.round(hours);
+    return `in ${h} hour${h === 1 ? "" : "s"}`;
+  }
+  const m = Math.max(1, Math.round(s / 60));
+  return `in ${m} minute${m === 1 ? "" : "s"}`;
 }
 
-export default function Dashboard({ user, meds, setMeds, onAdd, onEdit, onDelete, onChat, displayName, onEditName }) {
+function formatCountdownHM(sec) {
+  if (sec == null || sec < 0) return "—";
+  const s = Math.floor(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const secRem = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(secRem).padStart(2, "0")}`;
+  return `${m}:${String(secRem).padStart(2, "0")}`;
+}
+
+const NEXT_HOUR_SEC = 3600;
+const NEXT_DOSE_RING_FALLBACK_SEC = 8 * 3600;
+
+function summarizeNextDoseMeds(medsAtSlot) {
+  if (!medsAtSlot?.length) return "";
+  if (medsAtSlot.length === 1) return medsAtSlot[0].name;
+  if (medsAtSlot.length === 2) return `${medsAtSlot[0].name} · ${medsAtSlot[1].name}`;
+  return `${medsAtSlot.length} medications at this time`;
+}
+
+function shortPillName(name) {
+  const s = String(name).replace(/\s*\([^)]*\)\s*/g, "").trim() || String(name);
+  return s.length > 24 ? `${s.slice(0, 22)}…` : s;
+}
+
+function formatDueSoonNames(meds) {
+  if (!meds.length) return "";
+  const parts = meds.slice(0, 4).map((m) => shortPillName(m.name));
+  if (meds.length > 4) parts.push(`+${meds.length - 4}`);
+  return parts.join(" · ");
+}
+
+function formatNextUpMedLine(medsAtSlot) {
+  if (!medsAtSlot?.length) return null;
+  if (medsAtSlot.length === 1) return medsAtSlot[0].name;
+  if (medsAtSlot.length === 2) return `${medsAtSlot[0].name} · ${medsAtSlot[1].name}`;
+  return `${medsAtSlot[0].name} · ${medsAtSlot[1].name} +${medsAtSlot.length - 2} more`;
+}
+
+function sameMedIdSet(a, b) {
+  if (a.length !== b.length) return false;
+  const ids = new Set(a.map((m) => m.id));
+  return b.every((m) => ids.has(m.id));
+}
+
+function buildTodaysDoseRows(meds) {
+  const rows = [];
+  for (const m of meds) {
+    for (const slotTime of expandDoseTimesForToday(m)) {
+      rows.push({ med: m, slotTime });
+    }
+  }
+  rows.sort((a, b) => {
+    const d = timeHMToMins(a.slotTime) - timeHMToMins(b.slotTime);
+    if (d !== 0) return d;
+    return String(a.med.name || "").localeCompare(String(b.med.name || ""), undefined, { sensitivity: "base", numeric: true });
+  });
+  return rows;
+}
+
+function doseRowsDueInNextHour(untakenRows, curSec) {
+  return untakenRows
+    .filter((r) => {
+      const tsec = timeHMToMins(r.slotTime) * 60;
+      if (tsec <= curSec) return false;
+      return tsec - curSec <= NEXT_HOUR_SEC;
+    })
+    .sort((a, b) => timeHMToMins(a.slotTime) - timeHMToMins(b.slotTime));
+}
+
+export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onEditName, onNavigateTab }) {
   const now = useClock();
   const isMob = useIsMobile();
-  const activeMeds = meds.filter(m => m.active !== false);
-  const taken = activeMeds.filter(m => m.taken).length;
-  const total = activeMeds.length;
-  const pct = total ? Math.round(taken / total * 100) : 0;
   const hr = now.getHours();
   const greet = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
-  const tip = TIPS[now.getDate() % TIPS.length];
   const name = displayName || user?.displayName || user?.email?.split("@")[0] || "there";
-  const t1 = "var(--t1)", t2 = "var(--t2)", t3 = "var(--t3)";
-  const toMins = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
   const curMins = hr * 60 + now.getMinutes();
-  const nextMed = [...activeMeds].filter(m => !m.taken && toMins(m.time) > curMins).sort((a, b) => toMins(a.time) - toMins(b.time))[0];
-  const overdueMeds = [...activeMeds].filter(m => !m.taken && toMins(m.time) < curMins);
+  const medList = Array.isArray(meds) ? meds : [];
+  const medCount = medList.length;
+  const todaysDoseRows = useMemo(() => buildTodaysDoseRows(medList), [medList]);
+  const totalDoseSlots = todaysDoseRows.length;
+  const takenDoseSlots = useMemo(() => todaysDoseRows.filter((r) => doseRowLogged(r.med, r.slotTime)).length, [todaysDoseRows]);
+  const adherencePctSlots = totalDoseSlots ? Math.round((takenDoseSlots / totalDoseSlots) * 100) : 0;
+
+  const [showMoreSidebarDoses, setShowMoreSidebarDoses] = useState(false);
+  const healthTipDayKey = now.toDateString();
+  const [healthTipDismissed, setHealthTipDismissed] = useState(false);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(HEALTH_TIP_DISMISS_STORAGE_KEY);
+      setHealthTipDismissed(saved === healthTipDayKey);
+    } catch {
+      setHealthTipDismissed(false);
+    }
+  }, [healthTipDayKey]);
+  const pendingDoseRows = useMemo(() => todaysDoseRows.filter((r) => !doseRowLogged(r.med, r.slotTime)), [todaysDoseRows]);
+  const sidebarDoseList = showMoreSidebarDoses ? pendingDoseRows : pendingDoseRows.slice(0, 4);
+  const hasMoreSidebarDoses = pendingDoseRows.length > 4;
+
+  const overdueDoseRows = useMemo(() => {
+    const rows = [];
+    for (const m of medList) {
+      const slots = expandDoseTimesForToday(m);
+      const past = slots
+        .filter((s) => timeHMToMins(s) < curMins && !doseRowLogged(m, s))
+        .sort((a, b) => timeHMToMins(a) - timeHMToMins(b));
+      for (const slotTime of past) {
+        rows.push({ med: m, slotTime });
+      }
+    }
+    rows.sort((a, b) => {
+      const d = timeHMToMins(a.slotTime) - timeHMToMins(b.slotTime);
+      if (d !== 0) return d;
+      return String(a.med.name || "").localeCompare(String(b.med.name || ""), undefined, { sensitivity: "base", numeric: true });
+    });
+    return rows;
+  }, [medList, curMins]);
+
+  const overdueDoseCount = overdueDoseRows.length;
 
   const [streak, setStreak] = useState(0);
-  const [weekAvg, setWeekAvg] = useState(0);
-  const [modal, setModal] = useState(null);
-  const [drugInfo, setDrugInfo] = useState(null); // { med, data, loading }
+  const [apptProvider, setApptProvider] = useState(null);
+  const [appointments, setAppointments] = useState([]);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  const [notifPreview, setNotifPreview] = useState(null);
 
-  async function openDrugInfo(med) {
-    setDrugInfo({ med, data: null, loading: true });
-    const data = await fetchDrugInfo(med.name);
-    setDrugInfo({ med, data, loading: false });
-  } // { title, content }
-
-  const refreshAdherenceStats = useCallback(async () => {
+  useEffect(() => {
     if (!user?.id) return;
-    const weekStart = getWeekStart();
-    const today = new Date();
-    const [daily, str] = await Promise.all([
-      getDailyAdherence(user.id, weekStart, today),
-      getAdherenceStreak(user.id),
-    ]);
-    const avg = (daily && daily.length)
-      ? Math.round(daily.reduce((s, row) => s + (row.adherence_pct || 0), 0) / daily.length)
-      : 0;
-    setWeekAvg(avg);
-    setStreak(str ?? 0);
+    getAdherenceStreak(user.id).then(setStreak);
   }, [user?.id]);
 
-  const toggle = useCallback(async (id) => {
-    const med = meds.find(m => m.id === id);
-    if (!med || med.active === false) return;
-    const wasTaken = med.taken;
-    setMeds(ms => ms.map(m => m.id === id ? { ...m, taken: !m.taken } : m));
-    const ok = wasTaken
-      ? await unlogMedicationTaken(user.id, id)
-      : await logMedicationTaken(user.id, id);
-    if (!ok) {
-      setMeds(ms => ms.map(m => m.id === id ? { ...m, taken: wasTaken } : m));
+  useEffect(() => {
+    if (!user?.id) return;
+    const refreshNotifs = () => {
+      supabase.from("notifications").select("id", { count: "exact", head: true }).eq("user_id", user.id).is("read_at", null).then(({ count }) => setUnreadNotifCount(count || 0));
+      supabase.from("notifications").select("id,title,body").eq("user_id", user.id).is("read_at", null).order("created_at", { ascending: false }).limit(1).maybeSingle().then(({ data }) => setNotifPreview(data || null));
+    };
+    refreshNotifs();
+    const ch = supabase.channel(`dash-n-${user.id}`).on("postgres_changes", { event: "*", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, refreshNotifs).subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    supabase.from("appointments")
+      .select("id,date,time,type,notes,status,doctor_id")
+      .eq("patient_id", user.id)
+      .in("status", ["scheduled", "rescheduled"])
+      .order("date", { ascending: true })
+      .limit(5)
+      .then(({ data }) => setAppointments(data || []));
+
+    const ch = supabase.channel(`pt-appt-dash-${user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${user.id}` }, () => {
+        supabase.from("appointments").select("id,date,time,type,notes,status,doctor_id").eq("patient_id", user.id).in("status", ["scheduled", "rescheduled"]).order("date", { ascending: true }).limit(5)
+          .then(({ data }) => setAppointments(data || []));
+      }).subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [user?.id]);
+
+  const nextAppt = appointments[0];
+  const daysToAppt = nextAppt?.date
+    ? Math.max(0, Math.round((new Date(`${nextAppt.date}T12:00:00`).getTime() - new Date(new Date().toDateString()).getTime()) / 86400000))
+    : null;
+
+  useEffect(() => {
+    const id = nextAppt?.doctor_id;
+    if (!id) {
+      setApptProvider(null);
       return;
     }
-    await refreshAdherenceStats();
-  }, [meds, user?.id, setMeds, refreshAdherenceStats]);
+    let cancel = false;
+    supabase.from("profiles").select("first_name,last_name,specialty,role").eq("id", id).single().then(({ data, error }) => {
+      if (cancel || error || !data) return;
+      const fullName = [data.first_name, data.last_name].filter(Boolean).join(" ") || null;
+      const spec = typeof data.specialty === "string" && data.specialty.trim() ? data.specialty.trim() : "";
+      let kindLabel = spec;
+      if (!kindLabel && data.role === "doctor") kindLabel = "Physician";
+      if (!kindLabel && data.role) kindLabel = data.role.charAt(0).toUpperCase() + data.role.slice(1);
+      setApptProvider(fullName || kindLabel ? { fullName, kindLabel: kindLabel || "" } : null);
+    });
+    return () => { cancel = true; };
+  }, [nextAppt?.doctor_id]);
 
-  const [prescriptions, setPrescriptions] = useState([]);
-  const [notifications, setNotifications] = useState([]);
-  const [appointments, setAppointments] = useState([]);
-  const [careTeam, setCareTeam] = useState([]);
+  const nextDoseHero = useMemo(() => {
+    const cur = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+    const slotSec = (hm) => timeHMToMins(hm) * 60;
+    const allRows = buildTodaysDoseRows(medList);
+    const untakenRows = allRows.filter((r) => !doseRowLogged(r.med, r.slotTime));
 
-  useEffect(() => {
-    if (!user?.id) return;
-    (async () => {
-      const [pRes, nRes, aRes] = await Promise.all([
-        supabase.from("prescriptions").select("id,status,created_at,notes").eq("patient_id", user.id).order("created_at", { ascending: false }).limit(10),
-        supabase.from("notifications").select("id,type,title,body,read_at,created_at").eq("user_id", user.id).order("created_at", { ascending: false }).limit(5),
-        supabase.from("appointments").select("id,date,time,type,notes,status,reschedule_request,doctor_id").eq("patient_id", user.id).in("status", ["scheduled", "rescheduled"]).order("date", { ascending: true }).limit(10),
-      ]);
-      setPrescriptions(pRes.data || []); setNotifications(nRes.data || []); setAppointments(aRes.data || []);
-      refreshAdherenceStats();
-      const profRes = await supabase.from("profiles").select("primary_doctor_id,primary_pharmacist_id,care_team").eq("id", user.id).single();
-      const pd = profRes.data?.primary_doctor_id;
-      const pp = profRes.data?.primary_pharmacist_id;
-      const rawTeam = profRes.data?.care_team;
-      const teamList = [];
-      if (Array.isArray(rawTeam) && rawTeam.length > 0) {
-        const ids = [...new Set(rawTeam.map((e) => e?.doctor_id).filter(Boolean))];
-        if (ids.length > 0) {
-          const { data: docRows } = await supabase.from("profiles").select("id,first_name,last_name,role,specialty,pharmacy_name,email").in("id", ids);
-          const byId = Object.fromEntries((docRows || []).map((d) => [d.id, d]));
-          for (const entry of rawTeam) {
-            const doc = entry?.doctor_id ? byId[entry.doctor_id] : null;
-            if (doc) teamList.push({ ...doc, careLabel: entry.label || "Doctor" });
-          }
-        }
-      } else if (pd) {
-        const { data: solo } = await supabase.from("profiles").select("id,first_name,last_name,role,specialty,pharmacy_name,email").eq("id", pd).single();
-        if (solo) teamList.push({ ...solo, careLabel: "Primary care" });
+    if (!untakenRows.length) {
+      if (!medList.length) {
+        return {
+          ringLabel: "Next dose",
+          centerMain: "—",
+          timeHint: null,
+          nextUpNames: null,
+          statusLine: "No medications yet",
+          namesSummary: "Add meds to see your schedule",
+          dueSoonNames: null,
+          ringPct: 100,
+          firstMed: null,
+          firstSlotTime: null,
+          allComplete: false,
+          secUntil: null,
+        };
       }
-      if (pp) {
-        const { data: ph } = await supabase.from("profiles").select("id,first_name,last_name,role,specialty,pharmacy_name,email").eq("id", pp).single();
-        if (ph) teamList.push({ ...ph, careLabel: null });
+      const sortedNextDay = [...allRows].sort((a, b) => slotSec(a.slotTime) - slotSec(b.slotTime));
+      const first = sortedNextDay[0];
+      if (!first) {
+        return {
+          ringLabel: "Next dose",
+          centerMain: "—",
+          timeHint: null,
+          nextUpNames: null,
+          statusLine: "No doses scheduled",
+          namesSummary: null,
+          dueSoonNames: null,
+          ringPct: 100,
+          firstMed: null,
+          firstSlotTime: null,
+          allComplete: false,
+          secUntil: null,
+        };
       }
-      setCareTeam(teamList);
-    })();
-  }, [user?.id, refreshAdherenceStats]);
+      const tsec = slotSec(first.slotTime);
+      const secUntil = 86400 - cur + tsec;
+      const sameSlotMeds = sortedNextDay.filter((r) => r.slotTime === first.slotTime).map((r) => r.med);
+      const ringMaxSec = ringMaxSecForMedSpacing(first.med, NEXT_DOSE_RING_FALLBACK_SEC);
+      const ringPct = Math.min(100, Math.max(12, 100 - (secUntil / ringMaxSec) * 40));
+      return {
+        ringLabel: "Next dose",
+        centerMain: formatInApprox(secUntil),
+        timeHint: `Tomorrow at ${to12h(first.slotTime)}`,
+        nextUpNames: formatNextUpMedLine(sameSlotMeds),
+        statusLine: "All medications taken today",
+        namesSummary: null,
+        dueSoonNames: null,
+        ringPct,
+        firstMed: first.med,
+        firstSlotTime: first.slotTime,
+        allComplete: true,
+        secUntil,
+      };
+    }
 
-  useEffect(() => {
-    if (!user?.id) return;
-    const channels = [];
-    channels.push(supabase.channel(`pt-rx-${user.id}`).on("postgres_changes", { event: "*", schema: "public", table: "prescriptions", filter: `patient_id=eq.${user.id}` }, (payload) => {
-      if (payload.eventType === "INSERT") setPrescriptions(prev => prev.some(p => p.id === payload.new.id) ? prev : [payload.new, ...prev]);
-      else if (payload.eventType === "UPDATE") setPrescriptions(prev => prev.map(p => p.id === payload.new.id ? { ...p, ...payload.new } : p));
-      else if (payload.eventType === "DELETE") setPrescriptions(prev => prev.filter(p => p.id !== payload.old.id));
-    }).subscribe());
-    channels.push(supabase.channel(`pt-notif-${user.id}`).on("postgres_changes", { event: "*", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, (payload) => {
-      if (payload.eventType === "INSERT") setNotifications(prev => prev.some(n => n.id === payload.new.id) ? prev : [payload.new, ...prev]);
-      else if (payload.eventType === "UPDATE") setNotifications(prev => prev.map(n => n.id === payload.new.id ? { ...n, ...payload.new } : n));
-      else if (payload.eventType === "DELETE") setNotifications(prev => prev.filter(n => n.id !== payload.old.id));
-    }).subscribe());
-    channels.push(supabase.channel(`pt-appt-${user.id}`).on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${user.id}` }, (payload) => {
-      if (payload.eventType === "INSERT") { if (["scheduled", "rescheduled"].includes(payload.new.status)) setAppointments(prev => prev.some(a => a.id === payload.new.id) ? prev : [...prev, payload.new]); }
-      else if (payload.eventType === "UPDATE") { if (payload.new.status === "cancelled") setAppointments(prev => prev.filter(a => a.id !== payload.new.id)); else setAppointments(prev => prev.map(a => a.id === payload.new.id ? { ...a, ...payload.new } : a)); }
-      else if (payload.eventType === "DELETE") setAppointments(prev => prev.filter(a => a.id !== payload.old.id));
-    }).subscribe());
-    channels.push(supabase.channel(`pt-ml-${user.id}`).on("postgres_changes", { event: "*", schema: "public", table: "medication_logs", filter: `user_id=eq.${user.id}` }, () => {
-      refreshAdherenceStats();
-    }).subscribe());
-    return () => { channels.forEach(c => supabase.removeChannel(c)); };
-  }, [user?.id, refreshAdherenceStats]);
+    const sorted = [...untakenRows].sort((a, b) => slotSec(a.slotTime) - slotSec(b.slotTime) || String(a.med.name).localeCompare(String(b.med.name), undefined, { sensitivity: "base", numeric: true }));
+    const first = sorted[0];
+    const tsec = slotSec(first.slotTime);
+    let secUntil;
+    if (tsec > cur) {
+      secUntil = tsec - cur;
+    } else {
+      secUntil = 86400 - cur + tsec;
+    }
+    const ringMaxSec = ringMaxSecForMedSpacing(first.med, NEXT_DOSE_RING_FALLBACK_SEC);
+    const ringPct = Math.min(100, Math.max(12, 100 - (secUntil / ringMaxSec) * 40));
+    const dayPart = tsec > cur ? "Today" : "Tomorrow";
 
-  const ringColor = pct >= 80 ? "var(--gr)" : pct >= 40 ? "var(--am)" : "var(--ro)";
-  const progressGrad = pct >= 80 ? "linear-gradient(90deg,#059669,#10b981)" : pct >= 40 ? "linear-gradient(90deg,#b45309,#d97706)" : "linear-gradient(90deg,#b91c1c,#dc2626)";
+    const primaryGroupMeds = sorted.filter((r) => r.slotTime === first.slotTime).map((r) => r.med);
+    const nextUpNames = formatNextUpMedLine(primaryGroupMeds);
 
-  function openMedsModal() {
-    setModal({ title: "Today's Medications", kind: "meds" });
-  }
+    const dueSoonRows = doseRowsDueInNextHour(untakenRows, cur);
+    let dueSoonNames = dueSoonRows.length ? formatDueSoonNames(dueSoonRows.map((r) => r.med)) : null;
+    if (dueSoonRows.length && sameMedIdSet(primaryGroupMeds, dueSoonRows.map((r) => r.med))) {
+      dueSoonNames = null;
+    }
 
-  function openApptsModal() {
-    setModal({
-      title: "Upcoming Appointments",
-      content: appointments.length === 0
-        ? <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: "20px 0" }}>No upcoming appointments.</p>
-        : <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-            {appointments.map(appt => (
-              <AppointmentRow key={appt.id} appt={appt}
-                onCancel={id => setAppointments(as => as.filter(a => a.id !== id))}
-                onRescheduled={(id, req) => setAppointments(as => as.map(a => a.id === id ? { ...a, reschedule_request: req, status: "rescheduled" } : a))} />
-            ))}
-          </div>
-    });
-  }
+    let namesSummary = null;
+    if (dueSoonNames) {
+      const later = sorted.filter((r) => slotSec(r.slotTime) > cur + NEXT_HOUR_SEC);
+      if (later.length) {
+        const t0 = later[0].slotTime;
+        const group = later.filter((r) => r.slotTime === t0).map((r) => r.med);
+        namesSummary = `Then ${to12h(t0)} · ${summarizeNextDoseMeds(group)}`;
+      }
+    } else {
+      const rest = sorted.filter((r) => r.slotTime !== first.slotTime);
+      if (rest.length) {
+        const line = rest.slice(0, 2).map((r) => r.med.name).join(", ");
+        const more = rest.length - 2;
+        namesSummary = more > 0 ? `Later: ${line} +${more} more` : `Later: ${line}`;
+      } else {
+        namesSummary = null;
+      }
+    }
 
-  function openRxModal() {
-    setModal({
-      title: "Prescriptions",
-      content: prescriptions.length === 0
-        ? <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: "20px 0" }}>No prescriptions found.</p>
-        : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {prescriptions.map(pr => (
-              <div key={pr.id} style={{ padding: "10px 14px", borderRadius: 12, background: "var(--s2)", border: "1px solid var(--b0)" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span style={{ color: t3, fontSize: 12 }}>{new Date(pr.created_at).toLocaleDateString()}</span>
-                  <span style={{ padding: "2px 8px", borderRadius: 99, fontSize: 10.5, fontWeight: 700, background: pr.status === "ready" ? "rgba(5,150,105,.12)" : (pr.status === "filled" || pr.status === "picked_up") ? "var(--pd)" : "rgba(217,119,6,.12)", color: pr.status === "ready" ? "var(--gr)" : (pr.status === "filled" || pr.status === "picked_up") ? "var(--p)" : "var(--am)" }}>
-                    {PRESCRIPTION_STATUS_LABELS[pr.status] || pr.status}
-                  </span>
-                </div>
-                {pr.notes && <p style={{ color: t2, fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>{pr.notes}</p>}
-              </div>
-            ))}
-          </div>
-    });
-  }
+    return {
+      ringLabel: "Next dose",
+      centerMain: formatInApprox(secUntil),
+      timeHint: `${dayPart} at ${to12h(first.slotTime)}`,
+      nextUpNames,
+      statusLine: null,
+      namesSummary,
+      dueSoonNames,
+      ringPct,
+      firstMed: first.med,
+      firstSlotTime: first.slotTime,
+      allComplete: false,
+      secUntil,
+    };
+  }, [medList, now]);
 
-  function openNotifModal() {
-    setModal({
-      title: "Notifications",
-      content: (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {notifications.length === 0 && <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: "20px 0" }}>No notifications.</p>}
-          {notifications.map(n => (
-            <motion.div key={n.id} layout style={{ padding: "10px 12px", borderRadius: 11, background: n.read_at ? "var(--s2)" : "rgba(37,99,235,.06)", border: `1px solid ${n.read_at ? "var(--b0)" : "rgba(37,99,235,.14)"}`, display: "flex", alignItems: "flex-start", gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <p style={{ color: t1, fontSize: 12.5, fontWeight: n.read_at ? 500 : 700, margin: 0 }}>{n.title}</p>
-                {n.body && <p style={{ color: t3, fontSize: 11.5, marginTop: 3, marginBottom: 0, lineHeight: 1.5 }}>{n.body}</p>}
-              </div>
-              <button onClick={async () => {
-                if (!n.read_at) await supabase.from("notifications").update({ read_at: new Date().toISOString() }).eq("id", n.id);
-                setNotifications(prev => prev.filter(x => x.id !== n.id));
-              }} style={{ flexShrink: 0, background: "none", border: "none", cursor: "pointer", color: t3, padding: 2, display: "flex", opacity: .5 }}><X size={13} /></button>
-            </motion.div>
-          ))}
-        </div>
-      )
-    });
-  }
+  const toggle = useCallback(async (id, slotTime) => {
+    const med = medList.find((m) => m.id === id);
+    if (!med || slotTime == null || String(slotTime).trim() === "") return;
+    const wasLogged = doseRowLogged(med, slotTime);
+    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, !wasLogged) : m)));
+    if (wasLogged) await unlogMedicationTaken(user.id, id, slotTime);
+    else await logMedicationTaken(user.id, id, slotTime);
+  }, [medList, user?.id, setMeds]);
+
+  const uiFont = "'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const cardSh = "var(--shadow-card-hover)";
+  const healthTipIndex = now.getDate() % TIPS.length;
+  const dailyHealthTipText = TIPS[healthTipIndex];
+  const dosesRemainingToday = Math.max(0, totalDoseSlots - takenDoseSlots);
+  const doseTrackerEncouragement = !totalDoseSlots
+    ? { text: "Add your meds 💊", bg: "var(--s2)", color: "var(--t2)", border: "1px solid var(--b1)" }
+    : takenDoseSlots >= totalDoseSlots
+      ? { text: "Perfect! 🎉", bg: "var(--auth-ok-bg)", color: "var(--auth-ok-text)", border: "1px solid var(--auth-ok-border)" }
+      : adherencePctSlots >= 50
+        ? { text: "You're on track! 🥳", bg: "var(--auth-ok-bg)", color: "var(--auth-ok-text)", border: "1px solid var(--auth-ok-border)" }
+        : { text: "Keep going!", bg: "rgba(251,191,36,.14)", color: "var(--am)", border: "1px solid rgba(251,191,36,.28)" };
+  const greetVisual = hr < 12
+    ? { Icon: Sun, bg: "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)", showStars: false }
+    : hr < 17
+      ? { Icon: Sun, bg: "linear-gradient(135deg, #38bdf8 0%, #2563eb 100%)", showStars: false }
+      : { Icon: Moon, bg: "#1e40af", showStars: true };
+
+  const statCards = [
+    {
+      l: "Daily progress",
+      v: `${takenDoseSlots}/${totalDoseSlots || 0}`,
+      sub: totalDoseSlots ? (takenDoseSlots >= totalDoseSlots ? "Perfect — all doses logged! 🎉" : takenDoseSlots >= totalDoseSlots * 0.6 ? "You're on track! 🥳" : "You've got this — keep going!") : "Add meds to track progress",
+      subColor: "#10b981",
+      I: CheckCircle2,
+      c: "#10b981",
+      bg: "rgba(16,185,129,.12)",
+      onClick: () => onNavigateTab?.("medications"),
+    },
+    {
+      l: "Day streak",
+      v: String(streak),
+      sub: streak === 0 ? "Start your streak today!" : `${streak} day${streak === 1 ? "" : "s"} strong`,
+      subColor: "#d97706",
+      I: Flame,
+      c: "#f59e0b",
+      bg: "rgba(245,158,11,.14)",
+      onClick: () => onNavigateTab?.("analytics"),
+    },
+    {
+      l: "Adherence",
+      v: `${adherencePctSlots}%`,
+      sub: "You're doing great!",
+      subColor: "#2563eb",
+      I: TrendingUp,
+      c: "#2563eb",
+      bg: "rgba(37,99,235,.1)",
+      onClick: () => onNavigateTab?.("analytics"),
+    },
+    {
+      l: "Active medications",
+      v: String(medCount),
+      sub: "Manage medications →",
+      subColor: "#7c3aed",
+      I: Pill,
+      c: "#7c3aed",
+      bg: "rgba(124,58,237,.12)",
+      onClick: () => onNavigateTab?.("medications"),
+    },
+  ];
+
+  const quickActions = [
+    { label: "Add Medication", icon: Plus, onClick: onAdd, bg: "var(--pd)", c: "var(--pl)", border: "1px solid var(--ph)" },
+    { label: "Book Appointment", icon: Calendar, onClick: () => onNavigateTab?.("appointments"), bg: "rgba(239,68,68,.08)", c: "var(--ro)", border: "1px solid rgba(239,68,68,.22)" },
+    { label: "Message Doctor", icon: MessageCircle, onClick: () => onNavigateTab?.("messages"), bg: "var(--pha-pd)", c: "var(--pha-p)", border: "1px solid rgba(124,58,237,.22)" },
+    { label: "Care Hub", icon: Stethoscope, onClick: () => onNavigateTab?.("care-hub"), bg: "var(--pd)", c: "var(--pl)", border: "1px solid var(--ph)" },
+  ];
+
+  const apptLabel = nextAppt
+    ? `${new Date(`${nextAppt.date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}${nextAppt.time ? `, ${to12h(String(nextAppt.time).slice(0, 5))}` : ""}`
+    : "None scheduled";
+
+  const c1 = "var(--t1)";
+  const cMuted = "var(--t3)";
+  const cardBase = {
+    background: "var(--s1)",
+    border: "1px solid var(--b1)",
+    borderRadius: 16,
+    boxShadow: "var(--shadow-card)",
+  };
 
   return (
-    <div style={{ flex: 1 }}>
-      <div style={{ maxWidth: 800, margin: "0 auto", padding: isMob ? "16px 14px 56px" : "32px 24px 56px" }}>
-        <motion.div className="au" style={{ marginBottom: 28 }}>
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
-            <div style={{ flex: 1 }}>
-              <p style={{ color: "var(--p)", fontSize: 10.5, fontWeight: 800, letterSpacing: ".14em", textTransform: "uppercase", opacity: .7, marginBottom: 9 }}>
-                {pct === 100 ? "All caught up for today" : pct > 50 ? "Good progress today" : "Your daily overview"}
-              </p>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <h1 style={{ color: t1, fontSize: 32, fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", fontWeight: 700, letterSpacing: "-.4px", lineHeight: 1.1, margin: 0 }}>
-                  {greet}, <span style={{ color: "var(--p)" }}>{name}.</span>
-                </h1>
-                <motion.button whileHover={{ scale: 1.1, rotate: 10 }} whileTap={{ scale: .9 }} onClick={onEditName}
-                  style={{ width: 28, height: 28, borderRadius: 9, border: "1px solid var(--b1)", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0, transition: "border-color .15s, color .15s" }}
-                  onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--p)"; e.currentTarget.style.color = "var(--p)"; }}
-                  onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--b1)"; e.currentTarget.style.color = t3; }}>
-                  <Pencil size={11} />
-                </motion.button>
-              </div>
-              <p style={{ color: t3, fontSize: 12.5, marginTop: 6, fontVariantNumeric: "tabular-nums" }}>
-                {now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
-                {" · "}{now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-              </p>
-            </div>
-            <div className="flex gap-2 shrink-0 mt-1">
-              <motion.button whileHover={{ scale: 1.04 }} whileTap={{ scale: .96 }} onClick={onChat}
-                style={{ width: 40, height: 40, borderRadius: 12, border: "1px solid var(--b1)", background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--p)", transition: "all .15s", boxShadow: "0 2px 8px rgba(0,0,0,.06)" }}>
-                <Sparkles size={16} />
-              </motion.button>
-              <motion.button whileHover={{ scale: 1.04 }} whileTap={{ scale: .96 }} onClick={onAdd}
-                style={{ padding: "10px 20px", fontSize: 13.5, borderRadius: 12, display: "flex", alignItems: "center", gap: 7, fontWeight: 700 }} className="btn">
-                <Plus size={14} /> Add
-              </motion.button>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-4 mt-6">
-            <Ring pct={pct} color={ringColor} size={isMob ? 64 : 80} stroke={isMob ? 6 : 7} />
-            <div style={{ flex: 1 }}>
-              <p style={{ color: t1, fontSize: isMob ? 13 : 14.5, fontWeight: 700, margin: "0 0 5px" }}>
-                {taken === 0 ? "No medications taken yet today"
-                  : taken === total && total > 0 ? "All medications taken for today"
-                  : `${taken} of ${total} medications taken`}
-              </p>
-              <div style={{ height: 6, borderRadius: 99, background: "var(--b0)", overflow: "hidden" }}>
-                <motion.div style={{ height: "100%", borderRadius: 99, background: progressGrad }} initial={{ width: 0 }} animate={{ width: `${pct}%` }} transition={{ duration: 1.2, ease: [.22, 1, .36, 1], delay: .3 }} />
-              </div>
-              {nextMed && (
-                <p style={{ color: t3, fontSize: 12, marginTop: 6 }}>Next: <span style={{ color: t2, fontWeight: 600 }}>{nextMed.name}</span> at {to12h(nextMed.time)}</p>
-              )}
-            </div>
-          </div>
-        </motion.div>
-
-        {/* ── Summary stat cards — all clickable ── */}
-        <div style={{ display: "grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
-          {[
-            { l: "Done today", v: `${taken}/${total}`, I: CheckCircle2, c: "var(--gr)", bg: "rgba(5,150,105,.1)", onClick: openMedsModal },
-            { l: "Day streak", v: `${streak} day${streak !== 1 ? "s" : ""}`, I: Flame, c: "var(--am)", bg: "rgba(217,119,6,.1)", onClick: null },
-            { l: "Week avg", v: `${weekAvg}%`, I: TrendingUp, c: "var(--p)", bg: "var(--pd)", onClick: null },
-            { l: "Medications", v: String(total), I: Pill, c: "var(--tl)", bg: "rgba(8,145,178,.1)", onClick: openMedsModal },
-          ].map((s, i) => (
-            <motion.div key={s.l} className={`au d${i + 1}`} whileHover={{ y: -3, boxShadow: "0 12px 32px rgba(0,0,0,.1)" }}
-              onClick={s.onClick || undefined}
-              style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 18, padding: "16px 15px", cursor: s.onClick ? "pointer" : "default", transition: "box-shadow .2s", boxShadow: "0 2px 8px rgba(0,0,0,.04)" }}>
-              <div style={{ width: 36, height: 36, borderRadius: 11, background: s.bg, marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 4px 12px ${s.bg}` }}>
-                <s.I size={16} color={s.c} />
-              </div>
-              <p style={{ color: t1, fontSize: 20, fontVariantNumeric: "tabular-nums", fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", fontWeight: 700, marginBottom: 3 }}>{s.v}</p>
-              <p style={{ color: t3, fontSize: 10, fontWeight: 800, letterSpacing: ".09em", textTransform: "uppercase" }}>{s.l}</p>
-            </motion.div>
-          ))}
-        </div>
-
-        {/* ── Quick summary rows — click to open detail modal ── */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
-          {/* Medications row */}
-          <motion.div className="au d3" whileHover={{ x: 2 }} onClick={openMedsModal} style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 16, padding: "14px 18px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 38, height: 38, borderRadius: 12, background: "rgba(8,145,178,.1)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Pill size={16} color="var(--tl)" /></div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <p style={{ color: t1, fontSize: 13.5, fontWeight: 700, margin: 0 }}>Today's Medications</p>
-              <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>{taken} of {total} taken{overdueMeds.length > 0 ? ` · ${overdueMeds.length} overdue` : ""}</p>
-            </div>
-            <ChevronRight size={16} color={t3} style={{ flexShrink: 0 }} />
-          </motion.div>
-
-          {/* Appointments row */}
-          <motion.div className="au d4" whileHover={{ x: 2 }} onClick={openApptsModal} style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 16, padding: "14px 18px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 38, height: 38, borderRadius: 12, background: "rgba(14,116,144,.1)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Calendar size={16} color="var(--doc-p)" /></div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <p style={{ color: t1, fontSize: 13.5, fontWeight: 700, margin: 0 }}>Appointments</p>
-              <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>{appointments.length === 0 ? "No upcoming appointments" : `${appointments.length} upcoming`}</p>
-            </div>
-            <ChevronRight size={16} color={t3} style={{ flexShrink: 0 }} />
-          </motion.div>
-
-          {/* Prescriptions row */}
-          {prescriptions.length > 0 && (
-            <motion.div className="au d4" whileHover={{ x: 2 }} onClick={openRxModal} style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 16, padding: "14px 18px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 38, height: 38, borderRadius: 12, background: "var(--pd)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Pill size={16} color="var(--p)" /></div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ color: t1, fontSize: 13.5, fontWeight: 700, margin: 0 }}>Prescriptions</p>
-                <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>{prescriptions.length} prescription{prescriptions.length !== 1 ? "s" : ""}</p>
-              </div>
-              <ChevronRight size={16} color={t3} style={{ flexShrink: 0 }} />
-            </motion.div>
-          )}
-
-          {/* Notifications row */}
-          {notifications.length > 0 && (
-            <motion.div className="au d5" whileHover={{ x: 2 }} onClick={openNotifModal} style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 16, padding: "14px 18px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 38, height: 38, borderRadius: 12, background: "rgba(217,119,6,.1)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, position: "relative" }}>
-                <Bell size={16} color="var(--am)" />
-                {notifications.filter(n => !n.read_at).length > 0 && (
-                  <span style={{ position: "absolute", top: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: "var(--am)", color: "#fff", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{notifications.filter(n => !n.read_at).length}</span>
-                )}
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ color: t1, fontSize: 13.5, fontWeight: 700, margin: 0 }}>Notifications</p>
-                <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>{notifications.filter(n => !n.read_at).length > 0 ? `${notifications.filter(n => !n.read_at).length} unread` : `${notifications.length} notification${notifications.length !== 1 ? "s" : ""}`}</p>
-              </div>
-              <ChevronRight size={16} color={t3} style={{ flexShrink: 0 }} />
-            </motion.div>
-          )}
-
-          {/* Care team row */}
-          {careTeam.length > 0 && (
-            <motion.div className="au" whileHover={{ x: 2 }} onClick={() => setModal({
-              title: "My Care Team",
-              content: (
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {careTeam.map(p => {
-                    const isDoc = p.role === "doctor";
-                    const nm = [p.first_name, p.last_name].filter(Boolean).join(" ") || p.email;
-                    const specialty = isDoc ? (p.specialty || "Doctor") : (p.pharmacy_name || "Pharmacist");
-                    const detail = p.careLabel != null ? `${p.careLabel} · ${specialty}` : specialty;
-                    const color = isDoc ? "var(--p)" : "var(--pha-p)";
-                    const bg = isDoc ? "var(--pd)" : "rgba(124,58,237,.1)";
-                    return (
-                      <div key={`${p.id}-${p.careLabel ?? "ph"}`} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 14px", borderRadius: 13, background: "var(--s2)", border: "1px solid var(--b0)" }}>
-                        <div style={{ width: 38, height: 38, borderRadius: 12, background: bg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                          <span style={{ color, fontSize: 16, fontWeight: 800, fontFamily: "'Playfair Display',serif" }}>{nm[0]?.toUpperCase() || "?"}</span>
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <p style={{ color: t1, fontSize: 13.5, fontWeight: 700, margin: 0 }}>{isDoc ? `Dr. ${nm}` : nm}</p>
-                          <p style={{ color, fontSize: 12, marginTop: 2, fontWeight: 600 }}>{detail}</p>
-                        </div>
-                        <span style={{ padding: "3px 9px", borderRadius: 99, fontSize: 10.5, fontWeight: 700, background: bg, color, flexShrink: 0 }}>{p.careLabel != null ? p.careLabel : (isDoc ? "Doctor" : "Pharmacist")}</span>
-                      </div>
-                    );
-                  })}
+    <div style={{ flex: 1, minHeight: 0, fontFamily: uiFont, overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", touchAction: "pan-y" }}>
+      <div
+        className="patient-dashboard-canvas"
+        style={{
+          maxWidth: 1200,
+          margin: "0 auto",
+          padding: isMob ? "14px 12px 52px" : "16px 20px 48px",
+          background: "var(--bg)",
+        }}
+      >
+        <div style={{ display: "grid", gridTemplateColumns: isMob ? "repeat(2, minmax(0,1fr))" : "repeat(4, minmax(0,1fr))", gap: 12, marginBottom: 16 }}>
+          {statCards.map((s, si) => {
+            const Inner = (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 999, background: s.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <s.I size={20} color={s.c} strokeWidth={2.2} />
                 </div>
-              )
-            })} style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 16, padding: "14px 18px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 38, height: 38, borderRadius: 12, background: "var(--pd)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Stethoscope size={16} color="var(--p)" /></div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ color: t1, fontSize: 13.5, fontWeight: 700, margin: 0 }}>My Care Team</p>
-                <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>{careTeam.length} member{careTeam.length !== 1 ? "s" : ""}</p>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <p style={{ color: c1, fontSize: 22, fontWeight: 700, fontVariantNumeric: "tabular-nums", margin: 0, letterSpacing: "-0.02em", lineHeight: 1.15 }}>{s.v}</p>
+                  <p style={{ color: cMuted, fontSize: 12, fontWeight: 600, margin: "6px 0 0" }}>{s.l}</p>
+                  {s.sub ? <p style={{ color: s.subColor || "var(--t3)", fontSize: 11, fontWeight: 500, margin: "8px 0 0", lineHeight: 1.35 }}>{s.sub}</p> : null}
+                  {si === 0 && totalDoseSlots > 0 ? (
+                    <div style={{ marginTop: 12, height: 4, borderRadius: 4, background: "var(--b1)", overflow: "hidden" }}>
+                      <div style={{ width: `${adherencePctSlots}%`, height: "100%", background: "var(--gr)", borderRadius: 4, transition: "width .35s ease" }} />
+                    </div>
+                  ) : null}
+                </div>
               </div>
-              <ChevronRight size={16} color={t3} style={{ flexShrink: 0 }} />
-            </motion.div>
-          )}
+            );
+            const cardStyle = { textAlign: "left", ...cardBase, padding: "14px 16px", fontFamily: "inherit" };
+            return (
+              <motion.button type="button" key={s.l} className="au" whileHover={{ y: -2, boxShadow: cardSh }} onClick={s.onClick} style={{ ...cardStyle, cursor: "pointer" }}>{Inner}</motion.button>
+            );
+          })}
         </div>
 
-        {/* Health tip */}
-        <motion.div className="au d5 relative overflow-hidden rounded-[20px] border border-[rgba(8,145,178,0.14)] bg-gradient-to-br from-[rgba(8,145,178,0.07)] to-[rgba(6,182,212,0.04)] shadow-[0_2px_12px_rgba(8,145,178,0.06)]">
-          <div className="flex items-start gap-4 px-5 py-[18px] sm:px-[22px]">
-            <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-xl border border-[rgba(8,145,178,0.2)] bg-[rgba(8,145,178,0.12)]">
-              <Sparkles size={16} className="text-teal" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="mb-1.5 text-[10px] font-extrabold uppercase tracking-[0.13em] text-teal">Health Tip</p>
-              <p className="m-0 text-[13.5px] leading-[1.8] text-txt-2">{tip}</p>
-            </div>
-          </div>
-        </motion.div>
-      </div>
-
-      {/* Detail modal */}
-      <AnimatePresence>
-        {modal && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setModal(null)} className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 p-4">
-            <motion.div initial={{ y: 20, opacity: 0, scale: .97 }} animate={{ y: 0, opacity: 1, scale: 1 }} exit={{ y: 16, opacity: 0 }} transition={{ type: "spring", damping: 26, stiffness: 300 }} onClick={e => e.stopPropagation()} className="flex max-h-[85vh] w-full max-w-[520px] flex-col overflow-hidden rounded-[20px] border border-border-1 bg-[var(--bg)] shadow-[0_20px_60px_rgba(0,0,0,0.2)]">
-              <div className="flex shrink-0 items-center justify-between border-b border-border-1 px-5 py-4">
-                <h3 className="m-0 text-base font-bold text-txt-1">{modal.title}</h3>
-                <button type="button" onClick={() => setModal(null)} className="flex h-[30px] w-[30px] cursor-pointer items-center justify-center rounded-lg border border-border-1 bg-surface-2 text-txt-3"><X size={13} /></button>
-              </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3.5">
-                {modal.kind === "meds" ? (
-                  <div className="flex flex-col gap-2.5">
-                    {activeMeds.length === 0 ? <p className="py-5 text-center text-[13px] text-txt-3">No medications yet.</p> :
-                      [...activeMeds].sort((a, b) => a.time.localeCompare(b.time)).map((med) => {
-                        const col = COLS[med.color] || COLS.blue;
-                        const isOverdue = !med.taken && toMins(med.time) < curMins;
-                        return (
-                          <div key={med.id} className={`relative flex items-center gap-3 overflow-hidden rounded-[14px] border bg-surface-1 px-3.5 py-3 ${isOverdue ? "border-rose/20" : "border-border-1"}`}>
-                            <div className="absolute bottom-0 left-0 top-0 w-1 rounded-l-[14px]" style={{ background: med.taken ? "rgba(16,185,129,.45)" : col.a }} />
-                            <div className="ml-1.5 flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-xl border-[1.5px]" style={{ background: med.taken ? "rgba(16,185,129,.12)" : col.d, borderColor: med.taken ? "rgba(16,185,129,.35)" : col.b }}>
-                              <Pill size={16} color={med.taken ? "var(--gr)" : col.a} />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-[13.5px] font-bold text-txt-1">{med.name}</p>
-                              <p className="mt-0.5 text-xs text-txt-3">{med.dosage}{med.freq ? ` · ${med.freq}` : ""} · {to12h(med.time)}</p>
-                            </div>
-                            <div className="flex shrink-0 flex-wrap gap-1.5">
-                              <button type="button" onClick={() => { setModal(null); openDrugInfo(med); }} title="Drug information" className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg border border-border-1 bg-transparent text-brand"><Info size={12} /></button>
-                              {!isMob && <button type="button" onClick={() => onEdit(med)} className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg border border-border-1 bg-transparent text-txt-3"><Pencil size={12} /></button>}
-                              {!isMob && <button type="button" onClick={() => onDelete(med.id)} className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg border border-rose/20 bg-rose/[0.05] text-rose"><Trash2 size={12} /></button>}
-                              <button type="button" onClick={() => toggle(med.id)} title={med.taken ? "Mark not taken" : "Mark taken"} className={`flex h-9 w-9 cursor-pointer items-center justify-center rounded-[10px] transition-colors ${med.taken ? "border-0 bg-green shadow-[0_2px_10px_rgba(16,185,129,0.35)]" : "border border-border-0 bg-surface-2"}`}>
-                                <Check size={16} strokeWidth={med.taken ? 2.75 : 2} color={med.taken ? "#fff" : "var(--t3)"} className={med.taken ? "drop-shadow-[0_0_1px_rgba(255,255,255,0.5)]" : ""} />
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                  </div>
-                ) : (
-                  modal.content
-                )}
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Drug Info Modal */}
-      <AnimatePresence>
-        {drugInfo && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={() => setDrugInfo(null)}
-            className="fixed inset-0 z-[90] box-border flex items-center justify-center bg-black/60 pt-[max(10px,env(safe-area-inset-top))] pr-[max(10px,env(safe-area-inset-right))] pb-[max(10px,env(safe-area-inset-bottom))] pl-[max(10px,env(safe-area-inset-left))] md:p-5"
-          >
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: isMob ? "1fr" : "minmax(0, 2fr) minmax(0, 1fr)",
+            gridTemplateRows: isMob ? "none" : "auto auto auto",
+            gap: 14,
+            marginBottom: 16,
+            alignItems: "start",
+          }}
+        >
             <motion.div
-              initial={{ y: 24, opacity: 0, scale: .97 }}
-              animate={{ y: 0, opacity: 1, scale: 1 }}
-              exit={{ y: 16, opacity: 0 }}
-              transition={{ type: "spring", damping: 26, stiffness: 300 }}
-              onClick={e => e.stopPropagation()}
-              className={`flex min-h-0 w-full max-w-lg flex-col border border-border-1 bg-[var(--bg)] shadow-[0_24px_64px_rgba(0,0,0,0.22)] ${isMob ? "max-h-[min(92dvh,900px)] rounded-[18px]" : "max-h-[min(88vh,820px)] rounded-[20px]"}`}
+              className="au"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              style={{
+                ...cardBase,
+                padding: isMob ? 16 : 18,
+                ...(isMob ? {} : { gridColumn: 1, gridRow: 1 }),
+              }}
             >
-              <div className={`flex shrink-0 items-start border-b border-border-1 ${isMob ? "gap-2.5 px-3.5 pb-3 pt-3.5" : "gap-3 px-5 pb-3.5 pt-4"}`}>
-                <div className={`mt-0.5 flex shrink-0 items-center justify-center rounded-[11px] bg-brand-dim ${isMob ? "h-9 w-9" : "h-10 w-10"}`}>
-                  <Info size={isMob ? 15 : 17} className="text-brand" />
-                </div>
-                <div className="min-w-0 flex-1 pr-1">
-                  <h3 className={`break-words font-bold leading-snug text-txt-1 [overflow-wrap:anywhere] ${isMob ? "text-[15px]" : "text-[17px]"}`}>
-                    {drugInfo.med.name}
-                  </h3>
-                  <p className={`mt-1.5 leading-[1.45] text-txt-3 ${isMob ? "text-xs" : "text-[13px]"}`}>
-                    {drugInfo.med.dosage} · Drug information
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  aria-label="Close"
-                  onClick={() => setDrugInfo(null)}
-                  className={`flex shrink-0 cursor-pointer items-center justify-center rounded-[10px] border border-border-1 bg-surface-2 text-txt-3 md:mt-0 ${isMob ? "-mt-1 h-11 min-w-[44px] w-11" : "h-[34px] min-w-[34px] w-[34px]"}`}
-                >
-                  <X size={isMob ? 15 : 14} />
-                </button>
-              </div>
-              <div
-                className={`flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain ${isMob ? "gap-[11px] px-3.5 pb-4 pt-3.5" : "gap-3.5 px-5 pb-5 pt-[18px]"}`}
-                style={{ WebkitOverflowScrolling: "touch" }}
-              >
-                {drugInfo.loading && (
-                  <div className="flex items-center justify-center gap-3 px-2 py-9 text-txt-3">
-                    <Loader2 size={20} className="auth-spin shrink-0" />
-                    <span className={`leading-snug ${isMob ? "text-sm" : "text-[13px]"}`}>Looking up drug information…</span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, marginBottom: 14 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 14, flex: 1, minWidth: 0 }}>
+                  <div style={{ width: 56, height: 56, borderRadius: "50%", background: greetVisual.bg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: "0 4px 14px rgba(30,64,175,.28)", position: "relative" }} aria-hidden>
+                    <greetVisual.Icon size={26} color="#fff" strokeWidth={2.2} />
+                    {greetVisual.showStars ? (
+                      <Sparkles size={12} color="#fff" style={{ position: "absolute", top: 8, right: 10, opacity: 0.92 }} strokeWidth={2.2} />
+                    ) : null}
                   </div>
-                )}
-                {!drugInfo.loading && !drugInfo.data && (
-                  <div className="px-1 pb-2 pt-6 text-center">
-                    <AlertTriangle size={isMob ? 32 : 28} className="mx-auto mb-3.5 block text-txt-3 opacity-30" />
-                    <p className={`mb-2 font-semibold leading-snug text-txt-2 ${isMob ? "text-[15px]" : "text-sm"}`}>No information found</p>
-                    <p className={`mx-auto max-w-[400px] leading-relaxed text-txt-3 [overflow-wrap:anywhere] ${isMob ? "text-sm" : "text-[13px]"}`}>
-                      Drug information for "{drugInfo.med.name}" is not available in our database. Please consult your pharmacist or prescribing doctor.
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ margin: 0, color: cMuted, fontSize: 15, fontWeight: 500 }}>{greet},</p>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+                      <h1 style={{ margin: 0, fontSize: isMob ? 24 : 28, fontWeight: 700, color: c1, letterSpacing: "-0.02em", lineHeight: 1.1 }}>{name}</h1>
+                      {onEditName ? (
+                        <button type="button" title="Edit name" onClick={onEditName} style={{ width: 32, height: 32, borderRadius: 10, border: "1px solid var(--b1)", background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: cMuted }}>
+                          <Pencil size={15} />
+                        </button>
+                      ) : null}
+                    </div>
+                    <p style={{ margin: "12px 0 0", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", color: cMuted, fontSize: 13, fontWeight: 500 }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <Calendar size={15} color={cMuted} strokeWidth={2} />
+                        {now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+                      </span>
+                      <span style={{ opacity: 0.35, userSelect: "none" }}>|</span>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <Clock size={15} color={cMuted} strokeWidth={2} />
+                        {now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
+                      </span>
                     </p>
                   </div>
-                )}
-                {!drugInfo.loading && drugInfo.data && (() => {
-                  const d = drugInfo.data;
-                  const sections = [
-                    { icon: Shield, color: "var(--ro)", bg: "rgba(185,28,28,.06)", border: "rgba(185,28,28,.18)", title: "Warnings", content: d.warnings?.[0] || d.boxed_warning?.[0] },
-                    { icon: AlertTriangle, color: "var(--am)", bg: "rgba(217,119,6,.06)", border: "rgba(217,119,6,.18)", title: "Side Effects", content: d.adverse_reactions?.[0] },
-                    { icon: Info, color: "var(--p)", bg: "rgba(37,99,235,.05)", border: "rgba(37,99,235,.18)", title: "Indications & Usage", content: d.indications_and_usage?.[0] },
-                    { icon: Pill, color: "var(--tl)", bg: "rgba(8,145,178,.06)", border: "rgba(8,145,178,.18)", title: "Dosage & Administration", content: d.dosage_and_administration?.[0] },
-                    { icon: AlertCircle, color: "var(--ro)", bg: "rgba(185,28,28,.04)", border: "rgba(185,28,28,.14)", title: "Contraindications", content: d.contraindications?.[0] },
-                    { icon: Info, color: "var(--t2)", bg: "var(--s2)", border: "var(--b1)", title: "Drug Interactions", content: d.drug_interactions?.[0] },
-                    { icon: Info, color: "var(--t2)", bg: "var(--s2)", border: "var(--b1)", title: "Pregnancy & Nursing", content: d.pregnancy?.[0] || d.nursing_mothers?.[0] },
-                  ].filter(s => s.content);
-                  return sections.map(({ icon: Icon, color, bg, border, title, content }) => (
-                    <div
-                      key={title}
-                      className={`shrink-0 overflow-hidden border ${isMob ? "rounded-xl" : "rounded-[14px]"}`}
-                      style={{ background: bg, borderColor: border }}
-                    >
-                      <div className={`flex items-start gap-2.5 ${isMob ? "px-3.5 py-3" : "px-4 py-3"}`}>
-                        <Icon size={isMob ? 15 : 14} color={color} className="mt-0.5 shrink-0" />
-                        <span className={`font-bold uppercase tracking-wide ${isMob ? "text-[11px] leading-snug" : "text-xs leading-snug"}`} style={{ color }}>{title}</span>
-                      </div>
-                      <div className={isMob ? "px-3.5 pb-3.5" : "px-4 pb-4"}>
-                        <p className={`m-0 break-words whitespace-pre-wrap text-txt-1 [overflow-wrap:anywhere] ${isMob ? "text-[15px] leading-relaxed" : "text-sm leading-[1.75]"}`}>
-                          {content.replace(/^\d+\s+[A-Z\s&]+\n?/, "").trim()}
-                        </p>
-                      </div>
-                    </div>
-                  ));
-                })()}
-                <p className={`mt-auto shrink-0 text-center text-[11px] leading-normal text-txt-3 ${isMob ? "pb-[max(4px,env(safe-area-inset-bottom))]" : "pt-2"}`}>
-                  Source: FDA Drug Label Database · Always follow your doctor&apos;s instructions.
-                </p>
+                </div>
+              </div>
+              <div
+                style={{
+                  borderRadius: 16,
+                  padding: isMob ? "14px 16px" : "16px 20px",
+                  background: "var(--pd)",
+                  border: "1px solid var(--ph)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 16,
+                }}
+              >
+                <div style={{ width: 48, height: 48, borderRadius: "50%", background: "linear-gradient(135deg, var(--pl), var(--p))", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: "var(--shadow-card)" }} aria-hidden>
+                  <Utensils size={22} color="#fff" strokeWidth={2.2} />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <p style={{ margin: 0, fontSize: 16, fontWeight: 700, color: c1, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                    Better with food
+                    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: "50%", background: "var(--pl)", flexShrink: 0 }} aria-hidden>
+                      <Check size={12} color="#fff" strokeWidth={3} />
+                    </span>
+                  </p>
+                  <p style={{ margin: "8px 0 0", fontSize: 13, color: cMuted, lineHeight: 1.55, fontWeight: 500 }}>Some medications absorb better when taken with meals.</p>
+                </div>
               </div>
             </motion.div>
+
+            <motion.div
+              className="au"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.03 }}
+              style={{
+                ...cardBase,
+                padding: isMob ? 16 : 18,
+                ...(isMob ? {} : { gridColumn: 1, gridRow: 2 }),
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: isMob ? 12 : 16, flexWrap: "wrap" }}>
+                <Ring size={isMob ? 72 : 80} stroke={5} color="var(--pl)" trackColor="var(--s3)" pct={totalDoseSlots ? adherencePctSlots : 0}>
+                  <CheckCircle2 size={32} color="var(--pl)" strokeWidth={2.2} aria-hidden />
+                </Ring>
+                <div style={{ flex: "1 1 160px", minWidth: 0 }}>
+                  <p style={{ margin: 0, lineHeight: 1.2 }}>
+                    <span style={{ fontSize: isMob ? 24 : 28, fontWeight: 800, color: c1, fontVariantNumeric: "tabular-nums" }}>{takenDoseSlots} of {totalDoseSlots || 0}</span>
+                    <span style={{ fontSize: isMob ? 15 : 16, fontWeight: 500, color: cMuted }}> doses taken today</span>
+                  </p>
+                </div>
+                <div
+                  style={{
+                    padding: "10px 16px",
+                    borderRadius: 999,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    background: doseTrackerEncouragement.bg,
+                    color: doseTrackerEncouragement.color,
+                    border: doseTrackerEncouragement.border,
+                    flexShrink: 0,
+                    marginLeft: isMob ? 0 : "auto",
+                  }}
+                >
+                  {doseTrackerEncouragement.text}
+                </div>
+              </div>
+              <div style={{ height: 10, borderRadius: 10, background: "var(--b1)", marginTop: 14, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${totalDoseSlots ? adherencePctSlots : 0}%`, background: "var(--pl)", borderRadius: 10, transition: "width .35s ease" }} />
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigateTab?.("medications")}
+                style={{
+                  marginTop: 14,
+                  width: "100%",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 14,
+                  padding: 0,
+                  border: "none",
+                  background: "none",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  textAlign: "left",
+                }}
+              >
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(59,130,246,.1)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Calendar size={22} color="var(--pl)" strokeWidth={2} />
+                </div>
+                <span style={{ flex: 1, fontSize: 15, fontWeight: 500, color: "var(--t2)" }}>
+                  {!totalDoseSlots
+                    ? "No doses scheduled today — add medications"
+                    : dosesRemainingToday === 0
+                      ? "All doses logged for today"
+                      : `${dosesRemainingToday} dose${dosesRemainingToday === 1 ? "" : "s"} remaining today`}
+                </span>
+                <ChevronRight size={22} color={cMuted} style={{ flexShrink: 0 }} aria-hidden />
+              </button>
+            </motion.div>
+
+            <motion.div
+              className="au"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.06 }}
+              style={{
+                ...cardBase,
+                padding: isMob ? 16 : 18,
+                ...(isMob ? {} : { gridColumn: 1, gridRow: 3, alignSelf: "stretch" }),
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: isMob ? "column" : "row", alignItems: "center", gap: isMob ? 16 : 20 }}>
+                <div className="patient-next-dose-ring" style={{ background: "var(--s1)", borderRadius: "50%", padding: 8, boxShadow: "var(--shadow-card)", flexShrink: 0 }}>
+                  <Ring size={isMob ? 148 : 168} stroke={6} color="var(--pl)" trackColor="var(--s3)" pct={nextDoseHero.ringPct}>
+                    <div style={{ textAlign: "center", padding: "6px 12px 0", maxWidth: 140 }}>
+                      <p style={{ margin: 0, color: c1, fontSize: 9, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", opacity: 0.8 }}>NEXT DOSE</p>
+                      <p style={{ margin: "10px 0 0", color: c1, fontSize: isMob ? 22 : 26, fontWeight: 800, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em", lineHeight: 1.1 }}>
+                        {nextDoseHero.secUntil != null ? `in ${formatCountdownHM(nextDoseHero.secUntil)}` : nextDoseHero.centerMain}
+                      </p>
+                      {nextDoseHero.timeHint ? (
+                        <p style={{ margin: "8px 0 0", color: cMuted, fontSize: 12, fontWeight: 600, lineHeight: 1.3 }}>{nextDoseHero.timeHint}</p>
+                      ) : null}
+                    </div>
+                  </Ring>
+                </div>
+                <div style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", flexDirection: "column" }}>
+                  {nextDoseHero.firstMed ? (
+                    <>
+                      <p style={{ margin: 0, fontSize: isMob ? 17 : 19, fontWeight: 800, color: c1, lineHeight: 1.25 }}>{nextDoseHero.firstMed.name}</p>
+                      {nextDoseHero.firstMed.dosage ? (
+                        <span style={{ display: "inline-block", marginTop: 10, padding: "6px 12px", borderRadius: 8, background: "var(--s2)", fontSize: 12, fontWeight: 700, color: "var(--t2)" }}>{nextDoseHero.firstMed.dosage}</span>
+                      ) : null}
+                      <p style={{ margin: "12px 0 0", display: "flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 600, color: cMuted }}>
+                        <Utensils size={16} color="var(--t3)" strokeWidth={2} />
+                        With food
+                      </p>
+                    </>
+                  ) : (
+                    <p style={{ margin: 0, fontSize: 15, fontWeight: 600, color: cMuted }}>{nextDoseHero.statusLine || "Add medications to see your next dose."}</p>
+                  )}
+                  {nextDoseHero.namesSummary ? (
+                    <p style={{ margin: "14px 0 0", fontSize: 13, fontWeight: 500, color: c1, lineHeight: 1.45 }}>{nextDoseHero.namesSummary}</p>
+                  ) : null}
+                  {nextDoseHero.dueSoonNames && !nextDoseHero.namesSummary ? (
+                    <p style={{ margin: "14px 0 0", fontSize: 12, color: "var(--t2)" }}>
+                      <span style={{ fontWeight: 700, color: cMuted, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", display: "block", marginBottom: 4 }}>Next hour</span>
+                      {nextDoseHero.dueSoonNames}
+                    </p>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => onNavigateTab?.("medications")}
+                    style={{
+                      marginTop: "auto",
+                      padding: "10px 0 0",
+                      border: "none",
+                      background: "none",
+                      cursor: "pointer",
+                      fontFamily: "inherit",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: "var(--pl)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      alignSelf: "flex-start",
+                    }}
+                  >
+                    View full schedule <ChevronRight size={16} />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+
+            <section
+              className="au"
+              style={{
+                ...cardBase,
+                padding: isMob ? 14 : 16,
+                ...(isMob ? {} : { gridColumn: 2, gridRow: 1, alignSelf: "start" }),
+              }}
+            >
+              <h2 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: c1 }}>Quick actions</h2>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {quickActions.map((a) => (
+                  <button
+                    key={a.label}
+                    type="button"
+                    onClick={a.onClick}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      padding: "12px 12px",
+                      borderRadius: 12,
+                      background: "var(--s1)",
+                      cursor: "pointer",
+                      color: a.c,
+                      fontWeight: 600,
+                      fontSize: 11,
+                      textAlign: "left",
+                      fontFamily: "inherit",
+                      minHeight: 72,
+                      border: a.border || "1px solid var(--b1)",
+                      boxShadow: "var(--shadow-card)",
+                    }}
+                  >
+                    <a.icon size={22} strokeWidth={2.2} />
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section
+              className="au"
+              style={{
+                ...cardBase,
+                padding: isMob ? 14 : 16,
+                ...(isMob
+                  ? {}
+                  : {
+                      gridColumn: 2,
+                      gridRow: "2 / 4",
+                      alignSelf: "stretch",
+                      minHeight: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                    }),
+              }}
+            >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+                  <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: c1 }}>Today&apos;s doses</h2>
+                  <button type="button" onClick={() => onNavigateTab?.("medications")} style={{ border: "none", background: "none", padding: 0, color: "var(--pl)", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 2 }}>
+                    View all <ChevronRight size={16} />
+                  </button>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, ...(isMob ? {} : { flex: 1, minHeight: 0 }) }}>
+                  {!totalDoseSlots ? (
+                    <p style={{ margin: 0, fontSize: 13, color: cMuted, textAlign: "center", padding: "12px 8px" }}>Add medications to see today&apos;s dose list.</p>
+                  ) : sidebarDoseList.length === 0 ? (
+                    <p style={{ margin: 0, fontSize: 13, color: cMuted, textAlign: "center", padding: "12px 8px" }}>Every dose for today is logged.</p>
+                  ) : (
+                    sidebarDoseList.map((r, idx) => (
+                      <div
+                        key={`${r.med.id}-${r.slotTime}`}
+                        style={{
+                          border: "1px solid var(--b1)",
+                          borderRadius: 10,
+                          padding: isMob ? "10px 12px" : "8px 10px",
+                          background: "var(--s2)",
+                          display: "grid",
+                          gridTemplateColumns: isMob ? "1fr" : "minmax(64px, auto) minmax(0, 1fr) auto",
+                          columnGap: isMob ? 0 : 10,
+                          rowGap: isMob ? 8 : 0,
+                          alignItems: "center",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            flexDirection: "row",
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                            gap: "4px 8px",
+                            minWidth: 0,
+                            gridColumn: isMob ? "1" : undefined,
+                          }}
+                        >
+                          {idx === 0 ? (
+                            <span style={{ padding: "1px 6px", borderRadius: 4, background: "var(--pd)", color: "var(--pl)", fontSize: 8, fontWeight: 800, letterSpacing: "0.06em", lineHeight: 1.4, flexShrink: 0 }}>UP NEXT</span>
+                          ) : null}
+                          <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: "var(--pl)", fontVariantNumeric: "tabular-nums", lineHeight: 1.2 }}>{to12hNoSeconds(r.slotTime)}</p>
+                        </div>
+                        <div
+                          style={{
+                            minWidth: 0,
+                            gridColumn: isMob ? "1" : undefined,
+                            display: "flex",
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                            gap: "0 6px",
+                            rowGap: 2,
+                            lineHeight: 1.3,
+                          }}
+                        >
+                          <span style={{ fontSize: 13, fontWeight: 700, color: c1 }}>{r.med.name}</span>
+                          {r.med.dosage ? (
+                            <>
+                              <span style={{ color: "var(--b2)", fontWeight: 400, userSelect: "none" }} aria-hidden>
+                                ·
+                              </span>
+                              <span style={{ fontSize: 12, color: cMuted, fontWeight: 600 }}>{r.med.dosage}</span>
+                            </>
+                          ) : null}
+                          <span style={{ color: "var(--b2)", fontWeight: 400, userSelect: "none" }} aria-hidden>
+                            ·
+                          </span>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: cMuted }}>
+                            <Utensils size={12} color="var(--t3)" strokeWidth={2} />
+                            With food
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggle(r.med.id, r.slotTime)}
+                          style={{
+                            width: isMob ? "100%" : "auto",
+                            justifySelf: isMob ? "stretch" : "end",
+                            padding: "8px 14px",
+                            borderRadius: 9,
+                            fontSize: 12,
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            fontFamily: "inherit",
+                            background: "var(--pl)",
+                            color: "#fff",
+                            border: "none",
+                            boxShadow: "var(--shadow-card)",
+                            whiteSpace: "nowrap",
+                            gridColumn: isMob ? "1" : undefined,
+                          }}
+                        >
+                          Take dose
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+                {hasMoreSidebarDoses ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowMoreSidebarDoses((v) => !v)}
+                    style={{
+                      marginTop: isMob ? 10 : "auto",
+                      width: "100%",
+                      padding: "10px",
+                      borderRadius: 10,
+                      border: "1px solid var(--b1)",
+                      background: "var(--s1)",
+                      color: "var(--pl)",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      fontFamily: "inherit",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 6,
+                    }}
+                  >
+                    {showMoreSidebarDoses ? "Show less" : "Show more"}
+                    <ChevronDown size={16} style={{ transform: showMoreSidebarDoses ? "rotate(180deg)" : "none", transition: "transform .2s" }} />
+                  </button>
+                ) : null}
+              </section>
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: isMob ? "1fr" : healthTipDismissed ? "repeat(2, minmax(0, 1fr))" : "repeat(3, minmax(0, 1fr))",
+            gap: 12,
+            marginBottom: 16,
+          }}
+        >
+          {!healthTipDismissed && (
+            <motion.div
+              className="au"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              style={{ ...cardBase, padding: 16, background: "rgba(251, 146, 60, 0.12)", border: "1px solid rgba(251, 146, 60, 0.28)", position: "relative" }}
+            >
+              <button
+                type="button"
+                aria-label="Dismiss today’s tip"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  try {
+                    localStorage.setItem(HEALTH_TIP_DISMISS_STORAGE_KEY, healthTipDayKey);
+                  } catch {}
+                  setHealthTipDismissed(true);
+                }}
+                style={{
+                  position: "absolute",
+                  top: 10,
+                  right: 10,
+                  width: 30,
+                  height: 30,
+                  borderRadius: 8,
+                  border: "1px solid rgba(251, 146, 60, 0.35)",
+                  background: "var(--s2)",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--am)",
+                }}
+              >
+                <X size={15} strokeWidth={2.5} />
+              </button>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 14, paddingRight: 28 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(245, 158, 11, 0.2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }} aria-hidden>
+                  <Lightbulb size={22} color="var(--am)" strokeWidth={2} />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "var(--am)" }}>Daily health tip</p>
+                  <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--t2)", lineHeight: 1.55, fontWeight: 500 }}>{dailyHealthTipText}</p>
+                  <button
+                    type="button"
+                    onClick={() => void openExternalLink(DASHBOARD_HEALTH_TIPS_URL)}
+                    style={{
+                      marginTop: 12,
+                      padding: "8px 0 0",
+                      border: "none",
+                      background: "none",
+                      cursor: "pointer",
+                      fontFamily: "inherit",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: "var(--am)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                    }}
+                  >
+                    See more tips <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          <motion.button
+            type="button"
+            className="au"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.04 }}
+            onClick={() => (overdueDoseCount ? onNavigateTab?.("medications", overdueDoseRows[0]?.med?.id) : onNavigateTab?.("medications"))}
+            style={{
+              ...cardBase,
+              padding: 18,
+              background: overdueDoseCount ? "rgba(239, 68, 68, 0.1)" : "rgba(34, 197, 94, 0.1)",
+              border: overdueDoseCount ? "1px solid rgba(248, 113, 113, 0.28)" : "1px solid rgba(74, 222, 128, 0.28)",
+              cursor: "pointer",
+              fontFamily: "inherit",
+              textAlign: "left",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 12, background: overdueDoseCount ? "rgba(239, 68, 68, 0.12)" : "rgba(34, 197, 94, 0.15)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                {overdueDoseCount ? <AlertTriangle size={22} color="var(--ro)" strokeWidth={2} /> : <CheckCircle2 size={22} color="var(--gr)" strokeWidth={2.2} />}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: overdueDoseCount ? "var(--ro)" : "var(--gr)" }}>
+                  {overdueDoseCount ? `${overdueDoseCount} overdue dose${overdueDoseCount === 1 ? "" : "s"}` : "No overdue doses"}
+                </p>
+                <div style={{ margin: "6px 0 0", color: overdueDoseCount ? "var(--t2)" : "var(--t2)", lineHeight: 1.45 }}>
+                  {overdueDoseCount ? (
+                    <>
+                      {overdueDoseRows.slice(0, 4).map((r, i) => (
+                        <p key={`${r.med.id}-${r.slotTime}`} style={{ margin: i ? "5px 0 0" : 0, fontSize: 12, fontWeight: 500 }}>
+                          {r.med.name} · {to12hNoSeconds(r.slotTime)}
+                        </p>
+                      ))}
+                      {overdueDoseRows.length > 4 ? (
+                        <p style={{ margin: "5px 0 0", fontSize: 11, fontWeight: 600, opacity: 0.92 }}>+{overdueDoseRows.length - 4} more</p>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p style={{ margin: 0, fontSize: 12, fontWeight: 500 }}>You&apos;re on track with today&apos;s schedule.</p>
+                  )}
+                </div>
+              </div>
+              <ChevronRight size={20} color={overdueDoseCount ? "var(--ro)" : "var(--gr)"} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden />
+            </div>
+          </motion.button>
+
+          <motion.button
+            type="button"
+            className="au"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.08 }}
+            onClick={() => onNavigateTab?.("notifications")}
+            style={{
+              ...cardBase,
+              padding: 18,
+              background: "var(--pha-pd)",
+              border: "1px solid color-mix(in srgb, var(--pha-p) 28%, transparent)",
+              cursor: "pointer",
+              fontFamily: "inherit",
+              textAlign: "left",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 12, background: "color-mix(in srgb, var(--pha-p) 14%, transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Bell size={22} color="var(--pha-p)" strokeWidth={2} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>
+                  {unreadNotifCount === 0 ? "No new alerts" : `${unreadNotifCount} new alert${unreadNotifCount === 1 ? "" : "s"}`}
+                </p>
+                <p style={{ margin: "6px 0 0", fontSize: 12, fontWeight: 500, color: "var(--pha-p)", lineHeight: 1.45 }}>
+                  {unreadNotifCount === 0 ? "You're all caught up on reminders." : "Action required"}
+                </p>
+              </div>
+              <ChevronRight size={20} color="var(--pha-p)" style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden />
+            </div>
+          </motion.button>
+        </div>
+
+        <section className="au" style={{ marginBottom: 16 }}>
+          <h2 style={{ margin: "0 0 14px", fontSize: 11, fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase", color: cMuted }}>Upcoming</h2>
+          <motion.div className="au" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} style={{ ...cardBase, padding: isMob ? 18 : 22 }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1px 1fr", gap: 0, alignItems: "stretch" }}>
+              <button type="button" onClick={() => onNavigateTab?.("medications")} style={{ textAlign: "left", background: "transparent", border: "none", padding: isMob ? "0 0 16px" : "4px 20px 4px 4px", cursor: "pointer", fontFamily: "inherit" }}>
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(59,130,246,.1)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Pill size={20} color="var(--pl)" /></div>
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: cMuted }}>Next medication</p>
+                    <p style={{ margin: "8px 0 0", fontSize: 15, fontWeight: 700, color: c1 }}>{nextDoseHero.firstMed ? nextDoseHero.firstMed.name : "All caught up"}</p>
+                    <p style={{ margin: "4px 0 0", fontSize: 12, color: cMuted, lineHeight: 1.45 }}>
+                      {nextDoseHero.firstMed
+                        ? [
+                            nextDoseHero.firstMed.dosage || null,
+                            nextDoseHero.allComplete && nextDoseHero.timeHint ? nextDoseHero.timeHint : nextDoseHero.firstSlotTime ? `Today, ${to12h(nextDoseHero.firstSlotTime)}` : null,
+                            "With food",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")
+                        : "Nice work today"}
+                    </p>
+                    <p style={{ margin: "12px 0 0", fontSize: 12, fontWeight: 600, color: "var(--pl)", display: "inline-flex", alignItems: "center", gap: 4 }}>View schedule <ChevronRight size={14} /></p>
+                  </div>
+                  </div>
+              </button>
+              {!isMob ? <div style={{ background: "var(--b1)", width: 1, margin: "4px 0" }} aria-hidden /> : <div style={{ height: 1, background: "var(--b1)", margin: "0 0 16px" }} aria-hidden />}
+              <button type="button" onClick={() => onNavigateTab?.("appointments")} style={{ textAlign: "left", background: "transparent", border: "none", padding: isMob ? 0 : "4px 4px 4px 20px", cursor: "pointer", fontFamily: "inherit" }}>
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(34,197,94,.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Calendar size={20} color="var(--gr)" /></div>
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: cMuted }}>Next appointment</p>
+                    <p style={{ margin: "8px 0 0", fontSize: 15, fontWeight: 700, color: nextAppt ? "var(--gr)" : c1 }}>{apptLabel}</p>
+                    {nextAppt && (
+                      <>
+                        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--t3)" }}>
+                          {[nextAppt.type, daysToAppt != null ? `In ${daysToAppt} day${daysToAppt === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ")}
+                        </p>
+                        {(apptProvider?.fullName || apptProvider?.kindLabel) && (
+                          <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--t3)", lineHeight: 1.45 }}>
+                            {apptProvider.fullName ? (
+                              <>
+                                <span style={{ fontWeight: 600, color: "var(--t1)" }}>Dr. {apptProvider.fullName}</span>
+                                {apptProvider.kindLabel ? <span>{` · ${apptProvider.kindLabel}`}</span> : null}
+                              </>
+                            ) : (
+                              <span style={{ fontWeight: 600, color: "var(--t1)" }}>{apptProvider.kindLabel}</span>
+                            )}
+                          </p>
+                        )}
+                      </>
+                    )}
+                    <p style={{ margin: "12px 0 0", fontSize: 12, fontWeight: 600, color: "var(--pl)", display: "inline-flex", alignItems: "center", gap: 4 }}>View all appointments <ChevronRight size={14} /></p>
+                      </div>
+                    </div>
+              </button>
+              </div>
           </motion.div>
-        )}
-      </AnimatePresence>
+        </section>
+      </div>
     </div>
   );
 }

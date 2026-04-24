@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Moon, Sun, LogOut, ChevronDown, Loader2, Pencil, Mail, Trash2, UserCircle2, BellRing, ShieldCheck, HeartPulse, Siren, Stethoscope, MessageSquare, ArrowRight } from "lucide-react";
+import { Moon, Sun, LogOut, ChevronDown, Loader2, Pencil, Mail, Trash2, UserCircle2, BellRing, ShieldCheck, HeartPulse, Siren, Stethoscope, MessageSquare, ArrowRight, Volume2 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import ErrBanner from "../../components/common/ErrBanner";
@@ -8,8 +8,9 @@ import OkBanner from "../../components/common/OkBanner";
 import HealthProfile from "./settings/HealthProfile";
 import EmergencyContact from "./settings/EmergencyContact";
 import PrimaryCareSection from "./settings/PrimaryCareSection";
+import SoundNotificationsSection from "./settings/SoundNotificationsSection";
 
-export default function SettingsPage({ light, setLight, user, displayName, onEditName, meds, onFeedback }) {
+export default function SettingsPage({ light, setLight, user, displayName, onEditName, meds, onFeedback, expandSectionKey }) {
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t2 = "var(--t2)", t3 = "var(--t3)";
   const name = displayName || user?.displayName || user?.email?.split("@")[0] || "User";
@@ -23,6 +24,30 @@ export default function SettingsPage({ light, setLight, user, displayName, onEdi
   const [delStep, setDelStep] = useState(0);
 
   function toggleRow(key) { setOpenRow(o => o === key ? null : key); }
+
+  useEffect(() => {
+    if (!user?.id) return;
+    supabase.from("profiles").select("notifications_enabled,reminder_email").eq("id", user.id).single().then(({ data }) => {
+      if (!data) return;
+      if (typeof data.notifications_enabled === "boolean") {
+        setNotifOn(data.notifications_enabled);
+        localStorage.setItem("mt_notif", data.notifications_enabled ? "true" : "false");
+      }
+      if (data.reminder_email) {
+        setNotifEmail(data.reminder_email);
+        localStorage.setItem("mt_notif_email", data.reminder_email);
+      }
+    });
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!expandSectionKey) return;
+    setOpenRow(expandSectionKey);
+    const id = `settings-section-${expandSectionKey}`;
+    requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [expandSectionKey]);
 
   async function saveNotifications() {
     localStorage.setItem("mt_notif", notifOn ? "true" : "false");
@@ -55,6 +80,15 @@ export default function SettingsPage({ light, setLight, user, displayName, onEdi
   }
 
   const rows = [
+    {
+      key: "soundNotifications",
+      I: Volume2,
+      label: "Sound & notifications",
+      sub: "Message tones, volume, and in-app alerts",
+      color: "rgba(124,58,237,.1)",
+      iconColor: "var(--pha-p)",
+      content: <SoundNotificationsSection />,
+    },
     {
       key: "notifications", I: BellRing, label: "Notifications", sub: "Email reminders for medication times", color: "rgba(37,99,235,.12)", iconColor: "var(--p)", content: (
         <div style={{ padding: "16px 18px 20px", borderTop: "1px solid var(--b0)" }}>
@@ -102,7 +136,7 @@ export default function SettingsPage({ light, setLight, user, displayName, onEdi
   ];
 
   return (
-    <div style={{ flex: 1, overflowY: "auto" }}>
+    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", touchAction: "pan-y" }}>
       <div style={{ maxWidth: 560, margin: "0 auto", padding: isMob ? "16px 14px 56px" : "26px 22px 44px" }}>
         <motion.div className="au" style={{ marginBottom: 26 }}>
           <h2 style={{ color: t1, fontSize: 24, fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", fontWeight: 600, letterSpacing: "-.3px" }}>Settings</h2>
@@ -142,7 +176,7 @@ export default function SettingsPage({ light, setLight, user, displayName, onEdi
         <motion.div className="au d3 card" style={{ overflow: "hidden", marginBottom: 10 }}>
           <p style={{ color: t3, fontSize: 10, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", padding: "16px 18px 11px", opacity: .8 }}>Account & Preferences</p>
           {rows.map((r, i) => (
-            <div key={r.key}>
+            <div key={r.key} id={`settings-section-${r.key}`} style={{ scrollMarginTop: 20 }}>
               {i > 0 && <div style={{ height: 1, background: "var(--b0)", margin: "0 18px" }} />}
               <div className="srow" onClick={() => toggleRow(r.key)} style={{ padding: "13px 18px", display: "flex", alignItems: "center", gap: 13, cursor: "pointer" }}>
                 <div style={{ width: 36, height: 36, borderRadius: 10, background: r.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><r.I size={16} color={r.iconColor} /></div>

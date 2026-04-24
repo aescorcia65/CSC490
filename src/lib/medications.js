@@ -46,6 +46,8 @@ export async function loadMedications(userId) {
       time: d.reminder_time || "08:00",
       color: d.color || "blue",
       taken: false,
+      loggedAllDay: false,
+      loggedSlotTimes: [],
       active: d.active ?? true,
     }));
   } catch (e) {
