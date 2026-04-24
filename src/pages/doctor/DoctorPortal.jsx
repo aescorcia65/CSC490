@@ -1059,7 +1059,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     </div>
   );
   return (
-    <div style={{display:"flex",height:"100vh",overflow:"hidden",background:"var(--bg)"}}>
+    <div style={{display:"flex",height:"100dvh",overflow:"hidden",background:"var(--bg)"}}>
       {!isMob&&(
         <aside className="sidebar">
           <div style={{padding:"22px 14px 14px"}}>
@@ -1094,16 +1094,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden"}}>
         <header className="tb">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
-            {isMob&&(
-              <button
-                type="button"
-                aria-label="Open portal menu"
-                onClick={()=>setMobMenu(true)}
-                style={{width:34,height:34,borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3,flexShrink:0}}
-              >
-                <MoreHorizontal size={16}/>
-              </button>
-            )}
+            <button
+              type="button"
+              aria-label="Open portal menu"
+              onClick={()=>setMobMenu(true)}
+              style={{width:34,height:34,borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:t3,flexShrink:0}}
+            >
+              <MoreHorizontal size={16}/>
+            </button>
             <Stethoscope size={16} color={DocAC}/>
             <span style={{color:t1,fontSize:15,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700}}>Dr. {name}</span>
             {!isMob&&<span className="role-badge role-doctor">Doctor</span>}
@@ -1455,7 +1453,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       )}
                       <div ref={msgEndRef}/>
                     </div>
-                    <div style={{flexShrink:0,borderTop:`1px solid ${b1}`,background:"var(--s1)",position:"relative",zIndex:10}}>
+                    <div style={{flexShrink:0,borderTop:`1px solid ${b1}`,background:"var(--s1)",position:isMob?"sticky":"relative",bottom:isMob?0:"auto",zIndex:10}}>
                       {(showPatPicker||chatPatient)&&(
                         <div style={{maxHeight:"40vh",overflowY:"auto",borderBottom:`1px solid ${b1}`}}>
                           {showPatPicker&&(
@@ -1504,7 +1502,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           )}
                         </div>
                       )}
-                      <div style={{padding:isMob?`8px 10px calc(8px + env(safe-area-inset-bottom,0px))`:`10px 14px calc(10px + env(safe-area-inset-bottom,0px))`}}>
+                      <div style={{padding:isMob?`8px 10px calc(12px + env(safe-area-inset-bottom,0px))`:`10px 14px calc(10px + env(safe-area-inset-bottom,0px))`}}>
                         <div style={{display:"flex",alignItems:"flex-end",gap:9}}>
                           {msgMode==="pharmacy"?(
                           <button type="button" onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient context for pharmacy message" style={{width:isMob?42:36,height:isMob?42:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>

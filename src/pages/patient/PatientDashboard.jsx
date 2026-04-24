@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, Component, useTransition } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { HeartPulse, Calendar, BarChart3, SlidersHorizontal, Moon, Sun, LogOut, Menu, X, Stethoscope, MessageSquare, LayoutGrid, Pill, Bell, FileHeart, MoreHorizontal, ChevronRight, Loader2 } from "lucide-react";
+import { HeartPulse, Calendar, BarChart3, SlidersHorizontal, Moon, Sun, LogOut, X, Stethoscope, MessageSquare, LayoutGrid, Pill, Bell, FileHeart, MoreHorizontal, ChevronRight, Loader2 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../hooks/useTheme";
@@ -191,7 +191,7 @@ export default function PatientDashboard() {
   }, [goToPage]);
 
   return (
-    <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
       {!light && (
         <div style={{ position: "fixed", inset: 0, pointerEvents: "none", overflow: "hidden", zIndex: 0 }}>
           <div style={{ position: "absolute", width: 600, height: 600, left: "-15%", top: "-20%", borderRadius: "50%", filter: "blur(80px)", animation: "orbDrift 14s ease-in-out infinite", background: "radial-gradient(circle,rgba(37,99,235,.055) 0%,transparent 70%)" }} />
@@ -275,9 +275,7 @@ export default function PatientDashboard() {
       <div className={page === "appointments" ? "patient-main-wrap patient-main-wrap--appointments" : "patient-main-wrap"} style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, position: "relative" }}>
         <header className="tb">
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-            {isMob && (
-              <button type="button" onClick={() => setMobMenu(true)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}><Menu size={16} /></button>
-            )}
+            <button type="button" aria-label="Open portal menu" onClick={() => setMobMenu(true)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3 }}><MoreHorizontal size={16} /></button>
             <HeartPulse size={17} color="var(--p)" style={{ filter: "drop-shadow(0 0 5px var(--p))", flexShrink: 0 }} />
             <span style={{ fontSize: 17, fontFamily: "'Playfair Display',Georgia,serif", fontStyle: "italic", fontWeight: 700, letterSpacing: "-.3px" }}>
               <span style={{ color: t1 }}>Med</span><span style={{ color: "var(--p)" }}>Track</span>

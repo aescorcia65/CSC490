@@ -826,8 +826,8 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       <div
         style={{
           flex: 1,
-          minHeight: isPhone ? "calc(100dvh - 230px)" : 520,
-          height: isPhone ? "calc(100dvh - 190px)" : "min(590px, calc(100vh - 210px))",
+          minHeight: isPhone ? 0 : 520,
+          height: isPhone ? "calc(100dvh - 172px)" : "min(590px, calc(100vh - 210px))",
           display: "flex",
           gap: 14,
           overflow: "hidden",
@@ -1228,7 +1228,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
             )}
           </div>
 
-          <div style={{ padding: "6px 10px 8px", borderTop: `1px solid ${b1}`, background: "var(--s1)", flexShrink: 0, position: isPhone ? "sticky" : "static", bottom: 0, zIndex: 2 }}>
+          <div style={{ padding: isPhone ? "6px 10px calc(12px + env(safe-area-inset-bottom, 0px))" : "6px 10px 8px", borderTop: `1px solid ${b1}`, background: "var(--s1)", flexShrink: 0, position: isPhone ? "sticky" : "static", bottom: 0, zIndex: 2 }}>
             {suggestion && !suggestionDismissed ? (
               <div
                 style={{

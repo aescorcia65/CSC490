@@ -975,7 +975,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     ? patientChatContacts.filter(c => (c.name || "").toLowerCase().includes(patientChatFilter) || (c.email || "").toLowerCase().includes(patientChatFilter))
     : patientChatContacts;
   return (
-    <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
       {}
       {!isMob && (
         <aside className="sidebar">
@@ -1022,9 +1022,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
         <header className="tb">
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-            {isMob && (
-              <button type="button" aria-label="Open portal menu" onClick={() => setMobMenu(true)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0 }}><MoreHorizontal size={16} /></button>
-            )}
+            <button type="button" aria-label="Open portal menu" onClick={() => setMobMenu(true)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t3, flexShrink: 0 }}><MoreHorizontal size={16} /></button>
             <ShieldCheck size={16} color={PhAC} className="shrink-0" />
             <span className="min-w-0 truncate text-sm sm:text-[15px]" style={{ color: t1, fontFamily: "'Playfair Display',serif", fontStyle: "italic", fontWeight: 600 }} title={name}>{name}</span>
             {!isMob && <span className="role-badge role-pharmacist shrink-0">Pharmacist</span>}
@@ -1467,8 +1465,8 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                       <div ref={msgEndRef} />
                     </div>
                     {}
-                    <div style={{ flexShrink: 0, borderTop: `1px solid ${b1}`, background: "var(--s1)", position: "relative", zIndex: 10 }}>
-                      <div style={{ padding: `10px 14px calc(10px + env(safe-area-inset-bottom, 0px))` }}>
+                    <div style={{ flexShrink: 0, borderTop: `1px solid ${b1}`, background: "var(--s1)", position: isMob ? "sticky" : "relative", bottom: isMob ? 0 : "auto", zIndex: 10 }}>
+                      <div style={{ padding: isMob ? `10px 12px calc(12px + env(safe-area-inset-bottom, 0px))` : `10px 14px calc(10px + env(safe-area-inset-bottom, 0px))` }}>
                         <div style={{ display: "flex", alignItems: "flex-end", gap: 9 }}>
                           <div style={{ flex: 1, background: "var(--s2)", border: `1.5px solid ${b1}`, borderRadius: 20, padding: "10px 14px" }}
                             onClick={e => e.currentTarget.querySelector("textarea")?.focus()}>
