@@ -1315,7 +1315,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                       </div>
                     )}
                     {}
-                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
+                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", padding: isMob ? "14px 10px 10px" : "20px 16px 12px", display: "flex", flexDirection: "column", gap: 0, background: "var(--bg)" }}>
                       {messages.length === 0 && (
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8, padding: "60px 0" }}>
                           <Send size={22} color={t3} style={{ opacity: .2 }} />
@@ -1424,7 +1424,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                                   </div>
                                 )}
                               </div>
-                              <div style={{ maxWidth: isMob ? "min(85%, 340px)" : "78%", minWidth: 0, display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
+                              <div style={{ maxWidth: isMob ? "88%" : "78%", minWidth: 0, display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
                                 {groupTop && !isMe && <p style={{ color: t3, fontSize: 10, marginBottom: 4, fontWeight: 600, paddingLeft: 2 }}>Dr. {selChat.name}</p>}
                                 {isLegacyRef && legacyCard && (
                                   <div style={{ marginBottom: 6, width: "100%", background: "var(--s1)", border: `1.5px solid rgba(14,116,144,.25)`, borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(14,116,144,.08)" }}>

@@ -1338,7 +1338,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         ))}
                       </div>
                     )}
-                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{flex:1,minHeight:0,overflowY:"auto",overscrollBehavior:"contain",WebkitOverflowScrolling:"touch",padding:"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
+                    <div ref={msgListRef} onScroll={handleMsgScroll} style={{flex:1,minHeight:0,overflowY:"auto",overscrollBehavior:"contain",WebkitOverflowScrolling:"touch",padding:isMob?"14px 10px 10px":"20px 16px 12px",display:"flex",flexDirection:"column",gap:0,background:"var(--bg)"}}>
                       {messages.length===0&&(<div style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:8,padding:"60px 0"}}><Send size={22} color={t3} style={{opacity:.2}}/><p style={{color:t3,fontSize:13}}>No messages yet — send the first one</p></div>)}
                       {messages.map((msg,i)=>{
                         const isMe=msg.sender_id===user.id;
@@ -1384,7 +1384,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                   </div>
                                 )}
                               </div>
-                              <div style={{maxWidth:isMob?"min(82%,320px)":"72%",minWidth:0,display:"flex",flexDirection:"column",alignItems:isMe?"flex-end":"flex-start"}}>
+                              <div style={{maxWidth:isMob?"88%":"72%",minWidth:0,display:"flex",flexDirection:"column",alignItems:isMe?"flex-end":"flex-start"}}>
                                 {groupTop&&!isMe&&<p style={{color:t3,fontSize:10,marginBottom:4,fontWeight:600,paddingLeft:2}}>{selChat.name}</p>}
                                 {(isPatRef||isNewPatRef)&&patCard&&(
                                   <div style={{marginBottom:6,width:"100%",background:"var(--s1)",border:"1.5px solid rgba(14,116,144,.25)",borderRadius:12,overflow:"hidden",boxShadow:"0 2px 8px rgba(14,116,144,.08)"}}>
@@ -1504,10 +1504,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           )}
                         </div>
                       )}
-                      <div style={{padding:`10px 14px calc(10px + env(safe-area-inset-bottom,0px))`}}>
+                      <div style={{padding:isMob?`8px 10px calc(8px + env(safe-area-inset-bottom,0px))`:`10px 14px calc(10px + env(safe-area-inset-bottom,0px))`}}>
                         <div style={{display:"flex",alignItems:"flex-end",gap:9}}>
                           {msgMode==="pharmacy"?(
-                          <button type="button" onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient context for pharmacy message" style={{width:36,height:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>
+                          <button type="button" onClick={()=>{setShowPatPicker(p=>!p);setShowSoundSettings(false);}} title="Attach patient context for pharmacy message" style={{width:isMob?42:36,height:isMob?42:36,borderRadius:"50%",border:`1px solid ${chatPatient?DocAC:b1}`,background:chatPatient?"var(--doc-pd)":"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:chatPatient?DocAC:t3,flexShrink:0,transition:"all .2s"}}>
                             <User size={15}/>
                           </button>
                           ):null}

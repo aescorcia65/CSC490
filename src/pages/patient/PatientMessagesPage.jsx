@@ -826,8 +826,8 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       <div
         style={{
           flex: 1,
-          minHeight: isPhone ? 0 : 520,
-          height: isPhone ? "auto" : "min(590px, calc(100vh - 210px))",
+          minHeight: isPhone ? "calc(100dvh - 230px)" : 520,
+          height: isPhone ? "calc(100dvh - 190px)" : "min(590px, calc(100vh - 210px))",
           display: "flex",
           gap: 14,
           overflow: "hidden",
@@ -862,8 +862,8 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                     style={{
                       width: "100%",
                       textAlign: "left",
-                      padding: "9px 9px",
-                      minHeight: 52,
+                      padding: isPhone ? "10px 10px" : "9px 9px",
+                      minHeight: isPhone ? 56 : 52,
                       borderRadius: 12,
                       border: active ? "1px solid rgba(37,99,235,.3)" : "1px solid transparent",
                       background: active ? "rgba(37,99,235,.12)" : hoverConversationId === item.id ? "rgba(15,23,42,.04)" : "transparent",
@@ -1071,7 +1071,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                           animate={{ opacity: 1, y: 0 }}
                           style={{
                             width: "fit-content",
-                            maxWidth: isMob ? "88%" : "72%",
+                            maxWidth: isMob ? "90%" : "72%",
                             display: "flex",
                             flexDirection: "column",
                           }}
@@ -1192,7 +1192,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                   );
                 })}
                 {peerTyping && (
-                  <div style={{ display: "flex", alignItems: "flex-end", gap: 8, alignSelf: "flex-start", maxWidth: isMob ? "88%" : "72%" }}>
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 8, alignSelf: "flex-start", maxWidth: isMob ? "90%" : "72%" }}>
                     <div
                       style={{
                         width: 28,
@@ -1274,7 +1274,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                 </div>
               </div>
             ) : null}
-            <div style={{ display: "flex", gap: 6, maxWidth: 860, width: "100%", margin: "0 auto", alignItems: "center", background: "var(--s2)", border: `1px solid ${b1}`, borderRadius: 12, padding: 4 }}>
+            <div style={{ display: "flex", gap: 6, maxWidth: 860, width: "100%", margin: "0 auto", alignItems: "center", background: "var(--s2)", border: `1px solid ${b1}`, borderRadius: 12, padding: isPhone ? 6 : 4 }}>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1333,7 +1333,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                   emitTyping();
                 }}
                 placeholder="Type your message..."
-                style={{ flex: 1, resize: "none", borderRadius: 10, fontSize: isPhone ? 12.5 : 13, padding: "6px 8px", border: "none", background: "transparent", boxShadow: "none", minHeight: 18, maxHeight: 74 }}
+                style={{ flex: 1, resize: "none", borderRadius: 10, fontSize: isPhone ? 16 : 13, padding: isPhone ? "8px 10px" : "6px 8px", border: "none", background: "transparent", boxShadow: "none", minHeight: isPhone ? 24 : 18, maxHeight: isPhone ? 98 : 74 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
