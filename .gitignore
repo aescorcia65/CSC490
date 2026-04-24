@@ -107,3 +107,5 @@ android/local.properties
 *.sln
 *.sw?
 
+CSC490/
+
