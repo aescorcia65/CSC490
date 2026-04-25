@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, Component, useTransition } from "react";
+import { useState, useCallback, useEffect, Component, useTransition, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { HeartPulse, Calendar, BarChart3, SlidersHorizontal, Moon, Sun, LogOut, X, Stethoscope, MessageSquare, LayoutGrid, Pill, Bell, FileHeart, MoreHorizontal, ChevronRight, Loader2 } from "lucide-react";
 import { supabase } from "../../supabase";
@@ -35,6 +35,18 @@ const PATIENT_MAIN_NAV = [
 ];
 
 const CARE_HUB_SIDEBAR_ITEM = { id: "care-hub", label: "Care Hub", Icon: LayoutGrid, page: "care-hub" };
+const PATIENT_PAGE_STORAGE_KEY = "mt_patient_last_page";
+const PATIENT_ALLOWED_PAGES = new Set([
+  "dashboard",
+  "medications",
+  "appointments",
+  "messages",
+  "analytics",
+  "health-records",
+  "notifications",
+  "settings",
+  "care-hub",
+]);
 
 const MOBILE_TABS = [
   { id: "dashboard", page: "dashboard", I: HeartPulse, l: "Home" },
@@ -44,7 +56,6 @@ const MOBILE_TABS = [
   { id: "settings", page: "settings", I: SlidersHorizontal, l: "Settings" },
 ];
 
-/** Catches render errors so a failed page doesn’t leave the main area blank. */
 class PatientMainErrorBoundary extends Component {
   constructor(props) {
     super(props);
@@ -110,6 +121,7 @@ export default function PatientDashboard() {
   const [messagesPeer, setMessagesPeer] = useState(null);
   const [headerAlertCount, setHeaderAlertCount] = useState(0);
   const [isNavPending, startNavTransition] = useTransition();
+  const pageRestoreDoneRef = useRef(false);
   const isMob = useIsMobile();
   const saveName = (n) => { setDisplayName(n); };
   const saveMed = useCallback((m) => { setMeds((ms) => (ms.find((x) => x.id === m.id) ? ms.map((x) => (x.id === m.id ? m : x)) : [m, ...ms])); }, [setMeds]);
@@ -134,6 +146,23 @@ export default function PatientDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!user?.id) return;
+    const key = `mt_theme_user_${user.id}`;
+    const saved = localStorage.getItem(key);
+    if (saved === "light" || saved === "dark") {
+      const wantsLight = saved === "light";
+      if (wantsLight !== light) setLight(wantsLight);
+      return;
+    }
+    localStorage.setItem(key, light ? "light" : "dark");
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    localStorage.setItem(`mt_theme_user_${user.id}`, light ? "light" : "dark");
+  }, [user?.id, light]);
+
   const refreshHeaderAlerts = useCallback(() => {
     if (!user?.id) return;
     Promise.all([
@@ -149,6 +178,22 @@ export default function PatientDashboard() {
     const c2 = supabase.channel(`hdr-m-${user.id}`).on("postgres_changes", { event: "*", schema: "public", table: "patient_messages", filter: `recipient_id=eq.${user.id}` }, refreshHeaderAlerts).subscribe();
     return () => { supabase.removeChannel(c1); supabase.removeChannel(c2); };
   }, [user?.id, refreshHeaderAlerts]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    if (pageRestoreDoneRef.current) return;
+    const saved = localStorage.getItem(`${PATIENT_PAGE_STORAGE_KEY}_${user.id}`);
+    if (saved && PATIENT_ALLOWED_PAGES.has(saved)) {
+      setPage(saved);
+      setActiveNavId(saved);
+    }
+    pageRestoreDoneRef.current = true;
+  }, [user?.id, pageRestoreDoneRef]);
+
+  useEffect(() => {
+    if (!user?.id || !pageRestoreDoneRef.current || !PATIENT_ALLOWED_PAGES.has(page)) return;
+    localStorage.setItem(`${PATIENT_PAGE_STORAGE_KEY}_${user.id}`, page);
+  }, [page, user?.id, pageRestoreDoneRef]);
 
   const goToPage = useCallback((navId, pageId, opts = {}) => {
     startNavTransition(() => {

@@ -1,4 +1,3 @@
-/** Refill request workflow — DB status keys and UI labels */
 
 export const DEFAULT_REFILL_SAFETY_TEXT =
   "Verify patient profile, days supply, and insurance before releasing refills.";
@@ -23,7 +22,6 @@ export const REFILL_STATUS_LABEL = {
   completed: "Completed",
 };
 
-/** Background, border, text for status chips */
 export function refillStatusChipStyle(status) {
   switch (status) {
     case "pending":

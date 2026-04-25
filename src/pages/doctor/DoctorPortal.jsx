@@ -4,7 +4,7 @@ import {
   Pill, Calendar, LogOut, Moon, Sun, X, Plus, Send,
   Clock, Check, AlertCircle, Loader2, Bell, BellOff, User, ArrowRight,
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
-  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip, MoreHorizontal,
+  Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip, MoreHorizontal, Video,
   Sparkles, ChevronRight
 } from "lucide-react";
 import { supabase } from "../../supabase";
@@ -12,6 +12,7 @@ import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib
 import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
 import { notificationSuggestsPrescription, notificationSuggestsChat, notificationTextBlob } from "../../lib/notificationNavigation";
 import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
+import { buildVideoCallUrlFromRoom, buildVideoRoomId, createVideoApprovalMessageBody, parseVideoApprovalMessageBody } from "../../lib/videoCall";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
@@ -20,6 +21,8 @@ import OkBanner from "../../components/common/OkBanner";
 import NicknameModal from "../../components/modals/NicknameModal";
 import PrescribeModal from "../../components/modals/PrescribeModal";
 import RescheduleRequestRow from "../../components/appointments/RescheduleRequestRow";
+const DOCTOR_PAGE_STORAGE_KEY="mt_doctor_last_page";
+const DOCTOR_ALLOWED_PAGES=new Set(["dashboard","patients","messages","availability"]);
 export default function DoctorPortal({ user, light, setLight, userName, setDisplayName }) {
   const [page,setPage]=useState("dashboard");
   const [patients,setPatients]=useState([]);
@@ -46,6 +49,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [allAppointments,setAllAppointments]=useState([]);
   const [apptForm,setApptForm]=useState({date:"",time:"",type:"Follow-up",notes:""});
   const [apptBusy,setApptBusy]=useState(false);
+  const [bookingAvailability,setBookingAvailability]=useState({timezone:"America/New_York",slots:{}});
+  const [availDate,setAvailDate]=useState("");
+  const [availTime,setAvailTime]=useState("");
+  const [availBusy,setAvailBusy]=useState(false);
+  const [availMsg,setAvailMsg]=useState(null);
   const [rescheduleReqs,setRescheduleReqs]=useState([]);
   const [calView,setCalView]=useState("week");
   const [calDate,setCalDate]=useState(new Date());
@@ -57,6 +65,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [messages,setMessages]=useState([]);
   const [msgInput,setMsgInput]=useState("");
   const [msgSending,setMsgSending]=useState(false);
+  const [videoApprovalBusy,setVideoApprovalBusy]=useState(false);
   const [unreadCount,setUnreadCount]=useState(0);
   const [unreadPerContact,setUnreadPerContact]=useState({});
   const [msgMode,setMsgMode]=useState("pharmacy");
@@ -77,11 +86,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [sendToPharmacyBusy,setSendToPharmacyBusy]=useState(false);
   const [sendToPharmacyDone,setSendToPharmacyDone]=useState(false);
   const [selRxChat,setSelRxChat]=useState(null);
-  // Notifications
   const [docNotifs,setDocNotifs]=useState([]);
   const [showNotifPanel,setShowNotifPanel]=useState(false);
   const unreadNotifCount=docNotifs.filter(n=>!n.read_at).length;
-  // AI Chat
+  const pageRestoreDoneRef=useRef(false);
   const [showDocAI,setShowDocAI]=useState(false);
   const [aiMessages,setAiMessages]=useState([]);
   const [aiInput,setAiInput]=useState("");
@@ -113,6 +121,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const atBottomRef=useRef(true);
   const typingTimeoutRef=useRef(null);
   const typingBroadcastRef=useRef(null);
+  const selPatRef=useRef(selPat);
   const [peerTyping,setPeerTyping]=useState(false);
 
   useEffect(()=>{
@@ -130,15 +139,28 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   function sortMsgs(arr){ return [...arr].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)); }
 
   const doScroll=useCallback(()=>{
-    // Run immediately and again after next paint to catch any layout shifts
     if(msgListRef.current) msgListRef.current.scrollTop=msgListRef.current.scrollHeight;
     requestAnimationFrame(()=>{
       if(msgListRef.current) msgListRef.current.scrollTop=msgListRef.current.scrollHeight;
     });
   },[]);
   const isMob=useIsMobile();
+
+  useEffect(()=>{
+    if(!user?.id) return;
+    if(pageRestoreDoneRef.current) return;
+    const saved=localStorage.getItem(`${DOCTOR_PAGE_STORAGE_KEY}_${user.id}`);
+    if(saved&&DOCTOR_ALLOWED_PAGES.has(saved)) setPage(saved);
+    pageRestoreDoneRef.current=true;
+  },[user?.id]);
+
+  useEffect(()=>{
+    if(!user?.id||!pageRestoreDoneRef.current||!DOCTOR_ALLOWED_PAGES.has(page)) return;
+    localStorage.setItem(`${DOCTOR_PAGE_STORAGE_KEY}_${user.id}`,page);
+  },[page,user?.id]);
   const t1="var(--t1)",t2="var(--t2)",t3="var(--t3)",b1="var(--b1)";
   const DocAC="var(--doc-p)";
+  const formatVideoWindow=(startMs,endMs)=>`${new Date(startMs).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})} - ${new Date(endMs).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}`;
   const [localName,setLocalName]=useState(userName);
   useEffect(()=>{ if(userName) setLocalName(userName); },[userName]);
   const name=localName||userName||user?.displayName||user?.email?.split("@")[0]||"Doctor";
@@ -173,6 +195,27 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   function sortContacts(list){
     return [...list].sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||""));
   }
+  function normTimeValue(v){
+    const s=String(v||"").trim();
+    if(!s) return "";
+    if(s.length===5&&s[2]===":") return `${s}:00`;
+    return s.length>=8?s.slice(0,8):s;
+  }
+  function parseDocBookingAvailability(raw){
+    if(!raw||typeof raw!=="object") return {timezone:"America/New_York",slots:{}};
+    const slots=(raw.slots&&typeof raw.slots==="object")?raw.slots:{};
+    return {
+      timezone:typeof raw.timezone==="string"&&raw.timezone?raw.timezone:"America/New_York",
+      slots:Object.entries(slots).reduce((acc,[date,val])=>{
+        if(!Array.isArray(val)) return acc;
+        const clean=[...new Set(val.map(normTimeValue).filter(Boolean))].sort();
+        if(clean.length) acc[date]=clean;
+        return acc;
+      },{}),
+    };
+  }
+  const availabilityDateKeys=useMemo(()=>Object.keys(bookingAvailability.slots||{}).sort(),[bookingAvailability.slots]);
+  const availabilitySlotCount=useMemo(()=>availabilityDateKeys.reduce((sum,date)=>sum+(bookingAvailability.slots?.[date]?.length||0),0),[availabilityDateKeys,bookingAvailability.slots]);
   useEffect(()=>{
     if(!user?.id) return;
     (async()=>{
@@ -215,6 +258,18 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         setUnreadPerPatient(unreadMap);
         setUnreadPatientCount(unreadPt);
         setAllAppointments(apptData.data||[]);
+        const { data: docProfileData, error: docProfileErr } = await supabase.from("profiles").select("booking_availability").eq("id",user.id).single();
+        if(docProfileErr){
+          const msg=String(docProfileErr.message||"").toLowerCase();
+          if(msg.includes("booking_availability")){
+            setBookingAvailability(parseDocBookingAvailability(null));
+            setAvailMsg({type:"err",text:"Database is missing booking availability column. Run migration 009, then refresh."});
+          }else{
+            throw docProfileErr;
+          }
+        }else{
+          setBookingAvailability(parseDocBookingAvailability(docProfileData?.booking_availability));
+        }
         const pharmacists=(pharmData.data||[]).map(p=>({id:p.id,name:[p.first_name,p.last_name].filter(Boolean).join(" ")||p.email||"Pharmacist",pharmacy:p.pharmacy_name||"Pharmacy",email:p.email||"",lastMessageAt:null}));
         if(pharmacists.length>0){
           const pharmIds=pharmacists.map(p=>p.id);
@@ -247,12 +302,26 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           if(payload.eventType==="INSERT"){
             if(payload.new.status!=="cancelled"){
               setAllAppointments(prev=>prev.some(a=>a.id===payload.new.id)?prev:[...prev,payload.new]);
-              setAppointments(prev=>prev.some(a=>a.id===payload.new.id)?prev:[...prev,payload.new]);
+              setAppointments(prev=>{
+                const openPatientId=selPatRef.current?.id;
+                if(!openPatientId||payload.new.patient_id!==openPatientId) return prev;
+                return prev.some(a=>a.id===payload.new.id)?prev:[...prev,payload.new];
+              });
             }
           } else if(payload.eventType==="UPDATE"){
             const updater=a=>a.id===payload.new.id?{...a,...payload.new}:a;
-            setAllAppointments(prev=>payload.new.status==="cancelled"?prev.filter(a=>a.id!==payload.new.id):prev.map(updater));
-            setAppointments(prev=>payload.new.status==="cancelled"?prev.filter(a=>a.id!==payload.new.id):prev.map(updater));
+            setAllAppointments(prev=>{
+              if(payload.new.status==="cancelled") return prev.filter(a=>a.id!==payload.new.id);
+              const hasRow=prev.some(a=>a.id===payload.new.id);
+              return hasRow?prev.map(updater):[...prev,payload.new];
+            });
+            setAppointments(prev=>{
+              const openPatientId=selPatRef.current?.id;
+              const hasRow=prev.some(a=>a.id===payload.new.id);
+              if(!hasRow&&(!openPatientId||payload.new.patient_id!==openPatientId)) return prev;
+              if(payload.new.status==="cancelled") return prev.filter(a=>a.id!==payload.new.id);
+              return hasRow?prev.map(updater):[...prev,payload.new];
+            });
             if(payload.new.status==="rescheduled"&&payload.new.reschedule_request){
               setRescheduleReqs(prev=>prev.some(r=>r.id===payload.new.id)?prev:[...prev,payload.new]);
             } else {
@@ -260,7 +329,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             }
           } else if(payload.eventType==="DELETE"){
             setAllAppointments(prev=>prev.filter(a=>a.id!==payload.old.id));
-            setAppointments(prev=>prev.filter(a=>a.id!==payload.old.id));
+            setAppointments(prev=>{
+              const openPatientId=selPatRef.current?.id;
+              if(!openPatientId) return prev;
+              return prev.filter(a=>a.id!==payload.old.id);
+            });
           }
         }).subscribe()
     );
@@ -290,6 +363,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const msgModeRef=useRef(msgMode);
   const chatContactsRef=useRef(chatContacts);
   const patientChatContactsRef=useRef(patientChatContacts);
+  useEffect(()=>{ selPatRef.current=selPat; },[selPat]);
   useEffect(()=>{ selChatRef.current=selChat; },[selChat]);
   useEffect(()=>{ msgModeRef.current=msgMode; },[msgMode]);
   useEffect(()=>{ chatContactsRef.current=chatContacts; },[chatContacts]);
@@ -348,12 +422,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     loadMessages(selChat.id);
   },[selChat?.id]);
 
-  // Scroll to bottom whenever messages or typing indicator changes AND user is at bottom
   useLayoutEffect(()=>{
     if(atBottomRef.current) doScroll();
   },[messages,peerTyping,doScroll]);
 
-  // Also scroll after selChat changes - chat just opened, always go to bottom
   useEffect(()=>{
     if(!selChat) return;
     atBottomRef.current=true;
@@ -720,7 +792,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         sentAt:new Date().toISOString(),
       };
       const body="PATREF:"+JSON.stringify(payload);
-      // ensure pharmacist is in chatContacts, add if not
       let pharmContact=chatContacts.find(c=>c.id===pharmacist.id);
       if(!pharmContact){
         pharmContact=pharmacist;
@@ -744,7 +815,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     finally{ setSendToPharmacyBusy(false); }
   }
 
-  // Load doctor notifications + poll fallback; realtime keeps read/delete in sync across tabs
   useEffect(()=>{
     if(!user?.id) return;
     const load=()=>supabase.from("notifications").select("*").eq("user_id",user.id).order("created_at",{ascending:false}).limit(30).then(({data})=>setDocNotifs(data||[]));
@@ -791,7 +861,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     if(error){ console.error("notifications.delete all:",error.message); setDocNotifs(snapshot); }
   }
 
-  // Doctor AI chat
   const OPENAI_KEY=import.meta.env.VITE_OPENAI_API_KEY;
   async function sendDocAI(){
     if(!aiInput.trim()||aiLoading) return;
@@ -823,7 +892,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     if(!rxMsgInput.trim()||!selRxChat||rxMsgSending) return;
     const body=rxMsgInput.trim();
     setRxMsgInput("");
-    // Optimistic insert
     const tempId=`temp-${Date.now()}`;
     const tempMsg={id:tempId,prescription_id:selRxChat,sender_id:user.id,body,created_at:new Date().toISOString()};
     setRxMessages(prev=>[...prev,tempMsg]);
@@ -857,10 +925,66 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }
   }
 
+  const openVideoVisit=useCallback(async ()=>{
+    if(!user?.id||!selChat?.id||!peerIsPatient||videoApprovalBusy) return;
+    const nowMs=Date.now();
+    const candidate=(allAppointments||[])
+      .filter(a=>a?.status==="scheduled"&&a?.patient_id===selChat.id&&a?.date&&a?.time&&/virtual/i.test(String(a?.type||"")))
+      .map(a=>{
+        const rawTime=String(a.time||"");
+        const timePart=rawTime.length>=8?rawTime.slice(0,8):(rawTime.length===5?`${rawTime}:00`:rawTime);
+        const startMs=Date.parse(`${a.date}T${timePart}`);
+        if(Number.isNaN(startMs)) return null;
+        const windowStartMs=startMs-(10*60*1000);
+        const windowEndMs=startMs+(50*60*1000);
+        return {windowStartMs,windowEndMs};
+      })
+      .filter(Boolean)
+      .find(w=>nowMs>=w.windowStartMs&&nowMs<=w.windowEndMs);
+    if(!candidate){
+      if(typeof window!=="undefined"){
+        window.alert("Video can only be approved during this patient's scheduled virtual appointment time.");
+      }
+      return;
+    }
+    const roomId=buildVideoRoomId(user.id,selChat.id);
+    const body=createVideoApprovalMessageBody({
+      roomId,
+      windowStartIso:new Date(candidate.windowStartMs).toISOString(),
+      windowEndIso:new Date(candidate.windowEndMs).toISOString(),
+    });
+    const tempId=`temp-video-${Date.now()}`;
+    const nowIso=new Date().toISOString();
+    const tempMsg={id:tempId,sender_id:user.id,recipient_id:selChat.id,body,created_at:nowIso,read_at:null};
+    setVideoApprovalBusy(true);
+    setMessages(prev=>sortMsgs([...prev,tempMsg]));
+    try{
+      const{data:msg,error}=await supabase.from("patient_messages")
+        .insert({sender_id:user.id,recipient_id:selChat.id,body})
+        .select("*").single();
+      if(error) throw error;
+      setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+      notifyRecipientNewChatMessage({
+        recipientId:selChat.id,
+        senderName:`Dr. ${name}`,
+        messageText:"Video visit approved for your current appointment window.",
+        relatedMessageId:msg?.id,
+      });
+      const url=buildVideoCallUrlFromRoom(roomId);
+      if(typeof window!=="undefined"&&url) window.open(url,"_blank","noopener,noreferrer");
+    }catch{
+      setMessages(prev=>prev.filter(m=>m.id!==tempId));
+      if(typeof window!=="undefined"){
+        window.alert("Could not approve video visit right now. Please try again.");
+      }
+    }finally{
+      setVideoApprovalBusy(false);
+    }
+  },[allAppointments,name,peerIsPatient,selChat?.id,user?.id,videoApprovalBusy]);
+
   useEffect(()=>{
     if(!selRxChat) return;
     loadRxMessages(selRxChat);
-    // Poll every 3s as fallback in case realtime misses a message
     const poll=setInterval(()=>loadRxMessages(selRxChat),3000);
     const ch=supabase.channel(`rx-msg-doc-${selRxChat}`)
       .on("postgres_changes",{event:"INSERT",schema:"public",table:"prescription_messages",filter:`prescription_id=eq.${selRxChat}`},(payload)=>{
@@ -980,6 +1104,20 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }
     setPage("dashboard");
   }
+  async function openCalendarAppointment(appt){
+    if(!appt?.patient_id) return;
+    setPage("patients");
+    let pat=patients.find(p=>p.id===appt.patient_id);
+    if(!pat){
+      const { data:prof }=await supabase.from("profiles").select("id,first_name,last_name,email,dob,blood_type,allergies,medical_conditions").eq("id",appt.patient_id).maybeSingle();
+      if(prof){
+        pat={id:prof.id,fullName:[prof.first_name,prof.last_name].filter(Boolean).join(" ")||prof.email||"Patient",email:prof.email||"",dob:prof.dob||null,bloodType:prof.blood_type||null,allergies:prof.allergies||[],conditions:prof.medical_conditions||[]};
+      }
+    }
+    if(!pat) return;
+    await openPatient(pat);
+    setActiveTab("appointments");
+  }
 
   function saveToLocal(patch){const key=`doc_${user.id}_pat_${selPat?.id}`;try{const e=JSON.parse(localStorage.getItem(key)||"{}");localStorage.setItem(key,JSON.stringify({...e,...patch}));}catch{}}
   async function saveFlag(flag){setPatFlag(flag);saveToLocal({flag});}
@@ -997,6 +1135,71 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   async function deleteAppointment(id){
     await supabase.from("appointments").update({status:"cancelled",updated_at:new Date().toISOString()}).eq("id",id);
     setAppointments(p=>p.filter(a=>a.id!==id));setAllAppointments(p=>p.filter(a=>a.id!==id));
+  }
+  function addAvailabilitySlot(){
+    if(!availDate||!availTime){
+      setAvailMsg({type:"err",text:"Choose both date and time."});
+      return;
+    }
+    const nt=normTimeValue(availTime);
+    setBookingAvailability(prev=>{
+      const existing=Array.isArray(prev.slots?.[availDate])?prev.slots[availDate]:[];
+      if(existing.includes(nt)) return prev;
+      const nextTimes=[...existing,nt].sort();
+      return {...prev,slots:{...prev.slots,[availDate]:nextTimes}};
+    });
+    setAvailMsg({type:"ok",text:"Slot added. Click Save Availability to publish."});
+  }
+  function removeAvailabilitySlot(date,time){
+    setBookingAvailability(prev=>{
+      const list=Array.isArray(prev.slots?.[date])?prev.slots[date]:[];
+      const next=list.filter(t=>t!==time);
+      const nextSlots={...prev.slots};
+      if(next.length) nextSlots[date]=next;
+      else delete nextSlots[date];
+      return {...prev,slots:nextSlots};
+    });
+    setAvailMsg({type:"ok",text:"Slot removed. Click Save Availability to publish."});
+  }
+  function removeAvailabilityDate(date){
+    setBookingAvailability(prev=>{
+      const nextSlots={...(prev.slots||{})};
+      delete nextSlots[date];
+      return {...prev,slots:nextSlots};
+    });
+    setAvailMsg({type:"ok",text:"Date removed. Click Save Availability to publish."});
+  }
+  function editAvailabilityDate(date){
+    const list=Array.isArray(bookingAvailability.slots?.[date])?bookingAvailability.slots[date]:[];
+    setAvailDate(date);
+    setAvailTime(list[0]?normTimeValue(list[0]).slice(0,5):"");
+  }
+  async function saveAvailability(){
+    if(!user?.id||availBusy) return;
+    setAvailBusy(true); setAvailMsg(null);
+    try{
+      const payload={timezone:bookingAvailability.timezone||"America/New_York",slots:bookingAvailability.slots||{}};
+      const { data, error }=await supabase
+        .from("profiles")
+        .update({booking_availability:payload})
+        .eq("id",user.id)
+        .select("id,booking_availability")
+        .single();
+      if(error) throw error;
+      const saved=parseDocBookingAvailability(data?.booking_availability);
+      const count=Object.values(saved.slots||{}).reduce((n,arr)=>n+(Array.isArray(arr)?arr.length:0),0);
+      setBookingAvailability(saved);
+      setAvailMsg({type:"ok",text:`Availability saved (${count} slots). Patients can now book.`});
+    }catch(e){
+      const raw=String(e?.message||"");
+      if(raw.toLowerCase().includes("booking_availability")){
+        setAvailMsg({type:"err",text:"Database is missing booking availability column. Run migration 009, then refresh."});
+      }else{
+        setAvailMsg({type:"err",text:raw||"Could not save availability."});
+      }
+    }finally{
+      setAvailBusy(false);
+    }
   }
   async function confirmReschedule(appt,newDate,newTime){
     await supabase.from("appointments").update({date:newDate,time:newTime,status:"scheduled",reschedule_request:null,updated_at:new Date().toISOString()}).eq("id",appt.id);
@@ -1074,9 +1277,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             <p style={{color:DocAC,fontSize:26,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>{patients.length}</p>
           </div>
           <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:2}}>
-            {[["dashboard","Dashboard",HeartPulse],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
               <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
                 <I size={15}/>{l}
+                {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
                 {id==="patients"&&patients.length>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{patients.length}</span>}
                 {id==="messages"&&totalChatUnread>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{totalChatUnread}</span>}
               </div>
@@ -1152,9 +1356,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   <h2 style={{color:t1,fontSize:15,fontWeight:700,margin:0,display:"flex",alignItems:"center",gap:8}}>
                     <MessageSquare size={14} color={DocAC}/> {msgMode==="pharmacy"?"Pharmacy chat":"Patient messages"}
                   </h2>
-                  {msgMode==="pharmacy"?(
-                  <p style={{color:t3,fontSize:11,margin:"6px 0 0",lineHeight:1.45}}>Secure chat with pharmacists about prescriptions and fills.</p>
-                  ):null}
                   {msgMode==="pharmacy"?(
                   <div style={{marginTop:10,display:"flex",flexDirection:isMob?"column":"row",gap:7}}>
                     <input className="inp" type="email" value={chatSearchEmail} onChange={e=>setChatSearchEmail(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")findPharmacistByEmail();}} placeholder="Find pharmacist by email…" style={{flex:1,padding:"7px 11px",borderRadius:10,fontSize:isMob?16:12}}/>
@@ -1274,6 +1475,30 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         </div>
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                        {peerIsPatient&&(
+                        <button
+                          type="button"
+                          onClick={openVideoVisit}
+                          disabled={videoApprovalBusy}
+                          title="Approve and start video visit"
+                          style={{
+                            width:isMob?44:40,
+                            height:isMob?44:40,
+                            borderRadius:10,
+                            border:`1px solid ${b1}`,
+                            background:"var(--s1)",
+                            color:DocAC,
+                            display:"grid",
+                            placeItems:"center",
+                            cursor:videoApprovalBusy?"not-allowed":"pointer",
+                            opacity:videoApprovalBusy?0.55:1,
+                            fontFamily:"inherit",
+                          }}
+                          aria-label="Approve and start video call"
+                        >
+                          {videoApprovalBusy?<Loader2 size={18} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={18}/>}
+                        </button>
+                        )}
                         <button
                           type="button"
                           onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}}
@@ -1353,14 +1578,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         const isPatRef=bodyLines[0]?.startsWith("📋 Re:");
                         const isNewPatRef=rawBody.startsWith("PATREF:");
                         let patCard=null;
-                        // Handle new PATREF:{JSON} format
                         if(isNewPatRef){
                           try{
                             const json=JSON.parse(rawBody.slice(7));
                             patCard={name:json.name,dob:json.dob,blood:json.blood,allergies:Array.isArray(json.allergies)?json.allergies.join(", "):json.allergies,conditions:Array.isArray(json.conditions)?json.conditions.join(", "):json.conditions};
                           }catch{}
                         }
-                        // Handle legacy 📋 Re: format
                         if(isPatRef&&!patCard){
                           const refLine=bodyLines[0].replace("📋 Re:","").trim();
                           const nameMatch=refLine.match(/^([^(·]+)/);
@@ -1370,7 +1593,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           const condMatch=refLine.match(/Conditions:\s*([^·]+)/);
                           patCard={name:nameMatch?.[1]?.replace(/\(.*$/,"").trim(),dob:dobMatch?.[1]?.trim(),blood:bloodMatch?.[1]?.trim(),allergies:allergyMatch?.[1]?.trim(),conditions:condMatch?.[1]?.trim()};
                         }
-                        const displayBody=(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():rawBody;
+                        const parsedVideoApproval=parseVideoApprovalMessageBody(rawBody);
+                        const parsedVideoLink=parsedVideoApproval?.roomId?buildVideoCallUrlFromRoom(parsedVideoApproval.roomId):"";
+                        const displayBody=parsedVideoApproval
+                          ?`Video visit approved for ${formatVideoWindow(parsedVideoApproval.windowStartMs,parsedVideoApproval.windowEndMs)}.`
+                          :(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():rawBody;
                         return (
                           <div key={msg.id} style={{display:"block",width:"100%",marginTop:groupTop?14:3}}>
                             {showDate&&(<div style={{textAlign:"center",margin:"16px 0 14px"}}><span style={{padding:"4px 16px",borderRadius:99,fontSize:10,background:"var(--s2)",border:"1px solid var(--b0)",color:t3,fontWeight:700,letterSpacing:".03em"}}>{new Date(msg.created_at).toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"})}</span></div>)}
@@ -1428,6 +1655,23 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                     </a>
                                   )}
                                   {displayBody&&<p style={{color:isMe?"#fff":t1,fontSize:13.5,lineHeight:1.6,margin:0,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{displayBody}</p>}
+                                  {parsedVideoLink&&(
+                                    <a
+                                      href={parsedVideoLink}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      style={{
+                                        display:"block",
+                                        marginTop:6,
+                                        color:isMe?"rgba(255,255,255,.95)":DocAC,
+                                        fontSize:11.5,
+                                        textDecoration:"underline",
+                                        wordBreak:"break-all",
+                                      }}
+                                    >
+                                      {parsedVideoLink}
+                                    </a>
+                                  )}
                                 </div>
                                 )}
                                 {groupBottom&&(
@@ -1545,8 +1789,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 {[
                   {l:"Total patients",v:patients.length,c:DocAC,bg:"var(--doc-pd)",
                     items:patients,render:p=><div key={p.id} onClick={()=>{setPage("patients");openPatient(p);}} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer",display:"flex",alignItems:"center",gap:10}} onMouseEnter={e=>e.currentTarget.style.background="var(--pd)"} onMouseLeave={e=>e.currentTarget.style.background="var(--s2)"}><div style={{width:32,height:32,borderRadius:"50%",background:"var(--doc-pd)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><User size={13} color={DocAC}/></div><div style={{minWidth:0,flex:1}}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.fullName}</p><p style={{color:t3,fontSize:11,margin:0}}>{p.email||"No email"}</p></div></div>},
-                  {l:"Today's appts",v:allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()).length,c:"var(--gr)",bg:"rgba(5,150,105,.1)",
-                    items:allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()),render:a=><div key={a.id} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0}}>{a.type}</p><p style={{color:t3,fontSize:11,margin:"3px 0 0"}}>{new Date("2000-01-01T"+a.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})} · {patientNames?.[a.patient_id]||"Patient"}</p></div>},
+                  {l:"Today's appts",v:allAppointments.filter(a=>a.status!=="cancelled"&&new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()).length,c:"var(--gr)",bg:"rgba(5,150,105,.1)",
+                    items:allAppointments.filter(a=>a.status!=="cancelled"&&new Date(a.date+"T12:00:00").toDateString()===new Date().toDateString()),render:a=><div key={a.id} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0}}>{a.type}</p><p style={{color:t3,fontSize:11,margin:"3px 0 0"}}>{new Date("2000-01-01T"+a.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})} · {patientNames?.[a.patient_id]||"Patient"}</p></div>},
                   {l:"With allergies",v:patients.filter(p=>p.allergies?.length>0).length,c:"var(--ro)",bg:"rgba(185,28,28,.09)",
                     items:patients.filter(p=>p.allergies?.length>0),render:p=><div key={p.id} onClick={()=>{setPage("patients");openPatient(p);}} style={{padding:"10px 14px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="var(--pd)"} onMouseLeave={e=>e.currentTarget.style.background="var(--s2)"}><p style={{color:t1,fontSize:13,fontWeight:700,margin:0}}>{p.fullName}</p><p style={{color:"var(--ro)",fontSize:11,margin:"3px 0 0"}}>{(p.allergies||[]).join(", ")}</p></div>},
                   {l:"With conditions",v:patients.filter(p=>p.conditions?.length>0).length,c:"var(--am)",bg:"rgba(217,119,6,.09)",
@@ -1582,16 +1826,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   const today=new Date();
                   const dayCard=(day)=>{
                     const isToday=day.toDateString()===today.toDateString();
-                    const dayAppts=allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===day.toDateString());
+                    const dayAppts=allAppointments.filter(a=>a.status!=="cancelled"&&new Date(a.date+"T12:00:00").toDateString()===day.toDateString());
                     return (
-                      <div key={day.toISOString()} style={{borderRadius:isMob?12:14,overflow:"hidden",border:`1.5px solid ${isToday?"var(--doc-p)":"var(--b0)"}`,background:isToday?"rgba(14,116,144,.04)":"var(--s2)",minHeight:isMob?0:100,width:"100%",minWidth:0}}>
+                      <div key={day.toISOString()} onClick={()=>{if(dayAppts.length) void openCalendarAppointment(dayAppts[0]);}} style={{borderRadius:isMob?12:14,overflow:"hidden",border:`1.5px solid ${isToday?"var(--doc-p)":"var(--b0)"}`,background:isToday?"rgba(14,116,144,.04)":"var(--s2)",minHeight:isMob?0:100,width:"100%",minWidth:0,cursor:dayAppts.length?"pointer":"default"}}>
                         <div style={{padding:isMob?"8px 10px":"8px 10px",borderBottom:"1px solid var(--b0)",background:isToday?"var(--doc-pd)":"transparent",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
                           <p style={{color:isToday?DocAC:t3,fontSize:10,fontWeight:800,textTransform:"uppercase",margin:0}}>{day.toLocaleDateString("en-US",{weekday:isMob?"long":"short"})}</p>
                           <span style={{width:24,height:24,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:isToday?DocAC:"transparent",color:isToday?"#fff":t2,fontSize:12,fontWeight:700,flexShrink:0}}>{day.getDate()}</span>
                         </div>
                         <div style={{padding:isMob?"8px 10px":"6px",display:"flex",flexDirection:"column",gap:isMob?6:4}}>
                           {dayAppts.length===0?<p style={{color:t3,fontSize:11,opacity:.45,margin:0}}>No appointments</p>:dayAppts.map(a=>(
-                            <div key={a.id} style={{padding:"6px 8px",borderRadius:8,background:"rgba(14,116,144,.12)",border:"1px solid rgba(14,116,144,.2)"}}>
+                            <div key={a.id} onClick={(e)=>{e.stopPropagation();void openCalendarAppointment(a);}} style={{padding:"6px 8px",borderRadius:8,background:"rgba(14,116,144,.12)",border:"1px solid rgba(14,116,144,.2)",cursor:"pointer"}}>
                               <p style={{color:DocAC,fontSize:11,fontWeight:700,margin:0}}>{new Date("2000-01-01T"+a.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>
                               <p style={{color:t2,fontSize:11,margin:0,lineHeight:1.3,wordBreak:"break-word"}}>{a.type}</p>
                             </div>
@@ -1630,15 +1874,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         {cells.map((day,i)=>{
                           if(!day)return <div key={`e${i}`} style={{minHeight:isMob?36:44}}/>;
                           const isToday=day.toDateString()===today.toDateString();
-                          const dayAppts=allAppointments.filter(a=>new Date(a.date+"T12:00:00").toDateString()===day.toDateString());
+                          const dayAppts=allAppointments.filter(a=>a.status!=="cancelled"&&new Date(a.date+"T12:00:00").toDateString()===day.toDateString());
                           return (
-                            <div key={day.toISOString()} className="min-w-0 overflow-hidden" style={{borderRadius:isMob?6:10,border:`1.5px solid ${isToday?"var(--doc-p)":"var(--b0)"}`,background:isToday?"rgba(14,116,144,.05)":"var(--s2)",padding:isMob?"3px 2px":"6px 8px",minHeight:isMob?40:56}}>
+                            <div key={day.toISOString()} onClick={()=>{if(dayAppts.length) void openCalendarAppointment(dayAppts[0]);}} className="min-w-0 overflow-hidden" style={{borderRadius:isMob?6:10,border:`1.5px solid ${isToday?"var(--doc-p)":"var(--b0)"}`,background:isToday?"rgba(14,116,144,.05)":"var(--s2)",padding:isMob?"3px 2px":"6px 8px",minHeight:isMob?40:56,cursor:dayAppts.length?"pointer":"default"}}>
                               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:2,marginBottom:isMob?0:4}}>
                                 <span style={{width:isMob?18:22,height:isMob?18:22,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:isToday?DocAC:"transparent",color:isToday?"#fff":t2,fontSize:isMob?10:12,fontWeight:700,flexShrink:0}}>{day.getDate()}</span>
                                 {dayAppts.length>0&&<span style={{background:DocAC,color:"#fff",borderRadius:99,fontSize:isMob?7:9,fontWeight:800,padding:"1px 4px",flexShrink:0}}>{dayAppts.length}</span>}
                               </div>
                               {!isMob&&dayAppts.slice(0,2).map(a=>(
-                                <div key={a.id} style={{borderRadius:4,background:"rgba(14,116,144,.12)",padding:"2px 5px",marginBottom:2}}>
+                                <div key={a.id} onClick={(e)=>{e.stopPropagation();void openCalendarAppointment(a);}} style={{borderRadius:4,background:"rgba(14,116,144,.12)",padding:"2px 5px",marginBottom:2,cursor:"pointer"}}>
                                   <p style={{color:DocAC,fontSize:8.5,fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{new Date("2000-01-01T"+a.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})} {a.type}</p>
                                 </div>
                               ))}
@@ -1683,6 +1927,51 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 ))}
               </motion.div>
             </div>
+            </div>
+          )}
+          {page==="availability"&&(
+            <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(66px + env(safe-area-inset-bottom,0px))":0}}>
+              <div className="w-full min-w-0 max-w-[920px] mx-auto" style={{padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
+                <motion.div className="au" style={{marginBottom:isMob?18:22}}>
+                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Availability Slots</h2>
+                  <p style={{color:t3,fontSize:13,marginTop:4}}>Set the appointment times your patients can see and book.</p>
+                </motion.div>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"20px 22px"}}>
+                  <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:8}}>Manage Available Time Slots</h4>
+                  <p style={{color:t3,fontSize:12.5,margin:"0 0 12px"}}>These slots are shared across all your patients.</p>
+                  <div style={{display:"grid",gridTemplateColumns:isMob?"1fr":"1fr 1fr auto",gap:10,marginBottom:14}}>
+                    <div className="min-w-0"><label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".09em",textTransform:"uppercase",color:t3,marginBottom:5}}>Date</label><input className="inp w-full min-w-0" type="date" value={availDate} onChange={e=>setAvailDate(e.target.value)} style={{borderRadius:11,fontSize:16,height:42}}/></div>
+                    <div className="min-w-0"><label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".09em",textTransform:"uppercase",color:t3,marginBottom:5}}>Time</label><input className="inp w-full min-w-0" type="time" value={availTime} onChange={e=>setAvailTime(e.target.value)} style={{borderRadius:11,fontSize:16,height:42}}/></div>
+                    <button type="button" onClick={addAvailabilitySlot} style={{alignSelf:"end",padding:"10px 16px",borderRadius:11,border:"none",background:DocAC,color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:12.5,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:6,height:42,boxShadow:"0 6px 16px rgba(14,116,144,.22)"}}><Plus size={13}/> Add</button>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:12,maxHeight:340,overflowY:"auto"}}>
+                    {availabilityDateKeys.length===0?<p style={{color:t3,fontSize:12.5,margin:0}}>No slots yet.</p>:availabilityDateKeys.map(date=>(
+                      <div key={date} style={{padding:isMob?"10px":"11px",borderRadius:13,border:`1px solid ${b1}`,background:"var(--s2)",display:"grid",gridTemplateColumns:isMob?"1fr":"auto 1fr auto",gap:10,alignItems:"center"}}>
+                        <div style={{minWidth:isMob?0:72,padding:isMob?"0":"8px 8px",borderRight:isMob?"none":`1px solid ${b1}`}}>
+                          <p style={{margin:0,color:t3,fontSize:10,fontWeight:800,textTransform:"uppercase",letterSpacing:".07em"}}>{new Date(`${date}T12:00:00`).toLocaleDateString("en-US",{weekday:"short"})}</p>
+                          <p style={{margin:"2px 0 0",color:t1,fontSize:14,fontWeight:700}}>{new Date(`${date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</p>
+                        </div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:6,minWidth:0}}>
+                          {(bookingAvailability.slots[date]||[]).map(tm=>(
+                            <button key={`${date}-${tm}`} type="button" onClick={()=>removeAvailabilitySlot(date,tm)} style={{padding:"6px 10px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",color:t2,cursor:"pointer",fontFamily:"inherit",fontSize:11.5,fontWeight:600}}>
+                              {new Date(`2000-01-01T${tm}`).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})} ×
+                            </button>
+                          ))}
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,justifyContent:isMob?"flex-start":"flex-end"}}>
+                          <button type="button" onClick={()=>editAvailabilityDate(date)} style={{width:34,height:34,borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:DocAC}} title="Edit date"><Pencil size={13}/></button>
+                          <button type="button" onClick={()=>removeAvailabilityDate(date)} style={{width:34,height:34,borderRadius:10,border:"1px solid rgba(185,28,28,.25)",background:"rgba(185,28,28,.06)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--ro)"}} title="Remove date"><Trash2 size={13}/></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {availMsg&&<p style={{margin:"0 0 10px",fontSize:12,fontWeight:600,color:availMsg.type==="ok"?"var(--gr)":"var(--ro)"}}>{availMsg.text}</p>}
+                  <div style={{display:"grid",gridTemplateColumns:isMob?"1fr":"auto 1fr",gap:10,alignItems:"center"}}>
+                    <motion.button type="button" whileHover={{scale:1.02}} whileTap={{scale:.97}} className={`btn-doc ${isMob?"w-full justify-center py-2.5":""}`} disabled={availBusy} onClick={saveAvailability} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:"10px 20px",fontSize:13,borderRadius:12}}>{availBusy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:"Save Availability"}</motion.button>
+                    <div style={{padding:"10px 12px",borderRadius:11,border:`1px solid ${b1}`,background:"var(--s2)",color:t3,fontSize:12}}>Tip: Keep your availability updated to help patients book easily.</div>
+                  </div>
+                </motion.div>
+              </div>
             </div>
           )}
           {}
@@ -2107,12 +2396,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       {/* ── Mobile bottom nav — hidden inside open chat so it never overlaps input ── */}
       {isMob&&!(page==="messages"&&selChat)&&(
         <nav className="btabs">
-          {[["dashboard",HeartPulse,"Dashboard"],["patients",User,"Patients"],["messages",MessageSquare,"Msgs"]].map(([id,I,l])=>(
+          {[["dashboard",HeartPulse,"Dashboard"],["availability",Calendar,"Slots"],["patients",User,"Patients"],["messages",MessageSquare,"Msgs"]].map(([id,I,l])=>(
             <button key={id} className={`bt ${page===id?"on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
               <I size={19}/>
               {id==="messages"&&totalChatUnread>0
                 ?<span style={{position:"relative"}}>{l}<span style={{position:"absolute",top:-6,right:-10,background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:8,fontWeight:800,padding:"1px 4px"}}>{totalChatUnread}</span></span>
-                :l}
+                :id==="availability"&&availabilitySlotCount>0
+                  ?<span style={{position:"relative"}}>{l}<span style={{position:"absolute",top:-6,right:-10,background:DocAC,color:"#fff",borderRadius:99,fontSize:8,fontWeight:800,padding:"1px 4px"}}>{availabilitySlotCount}</span></span>
+                  :l}
             </button>
           ))}
         </nav>
@@ -2136,9 +2427,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
               <div style={{height:1,background:"var(--b0)",margin:"0 12px 8px"}}/>
               <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:1}}>
-                {[["dashboard","Dashboard",HeartPulse],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
                   <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);setMobMenu(false);}}>
                     <I size={15}/>{l}
+                    {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
                     {id==="patients"&&patients.length>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{patients.length}</span>}
                     {id==="messages"&&totalChatUnread>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{totalChatUnread}</span>}
                   </div>

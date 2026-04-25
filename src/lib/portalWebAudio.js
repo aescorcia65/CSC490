@@ -1,7 +1,3 @@
-/**
- * Shared Web Audio for doctor / pharmacist in-app notification tones.
- * Browsers block playback until a user gesture; call ensurePortalAudioContext from pointerdown/touchstart.
- */
 
 let sharedCtx = null;
 
@@ -20,7 +16,6 @@ function primeOutput(ctx) {
     src.start(t);
     src.stop(t + dur);
   } catch {
-    /* ignore */
   }
 }
 
@@ -40,10 +35,6 @@ export async function ensurePortalAudioContext() {
   return sharedCtx;
 }
 
-/**
- * @param {Array<[number, string, number, number]>} tones [freq, wave, delay, dur]
- * @param {number} volume 0.1–1
- */
 export async function playPortalNotificationSound(tones, volume = 0.7) {
   if (!tones?.length) return;
   const ctx = await ensurePortalAudioContext();
@@ -77,6 +68,5 @@ export async function playPortalNotificationSound(tones, volume = 0.7) {
       o.stop(t0 + delay + dur + 0.02);
     });
   } catch {
-    /* ignore */
   }
 }

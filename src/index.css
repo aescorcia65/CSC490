@@ -27,12 +27,6 @@ html, body {
   -webkit-text-size-adjust: 100%;
 }
 
-#root {
-  min-height: 100vh;
-  min-height: 100dvh;
-}
-
-
 :root {
   --bg: #f0f4fc;
   --bg2: #e8eef8;
@@ -82,7 +76,6 @@ html, body {
   --signout-border: rgba(239, 68, 68, .18);
 }
 
-/* Calm soft dark: navy / slate — not pure black */
 body:not(.light) {
   --bg: #1a2332;
   --bg2: #151d2b;
@@ -229,7 +222,6 @@ body {
   transition: background .28s;
 }
 
-/* Patient portal — premium sidebar */
 .sidebar.patient-sidebar {
   position: relative;
   align-self: stretch;
@@ -275,7 +267,6 @@ body {
   opacity: 0.65;
 }
 
-/* Care Hub — simple title, not all-caps */
 .patient-sidebar-section-label--care-hub {
   margin: 0 0 8px 10px;
   padding-top: 6px;
@@ -302,7 +293,6 @@ body {
   background: var(--b0);
 }
 
-/* Care Hub — premium minimal tiles (patient sidebar) */
 .patient-care-hub {
   flex: none;
   padding: 4px 8px 16px;
@@ -568,7 +558,6 @@ body:not(.light) .patient-care-hub-item.on .patient-care-hub-icon-wrap {
   transition: background .28s;
 }
 
-/* Appointments: same surface as rest of app (respects dark mode) */
 .patient-main-wrap--appointments .tb {
   background: var(--bg);
   border-bottom: 1px solid var(--b0);

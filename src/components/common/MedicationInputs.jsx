@@ -2,7 +2,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { ChevronDown, Search } from "lucide-react";
 import { searchMedications, DOSAGE_UNITS, FREQUENCY_OPTIONS } from "../../lib/medicationDatabase";
 
-/** Autocomplete input for medication names (shared by PrescribeModal, MedModal). */
 export function MedAutocomplete({ value, onChange, onSelect, style }) {
   const [suggestions, setSuggestions] = useState([]);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -111,7 +110,6 @@ export function MedAutocomplete({ value, onChange, onSelect, style }) {
   );
 }
 
-/** Amount + standardized unit dropdown + common dosage chips. */
 export function DosageSelector({ dosageAmount, dosageUnit, commonDosages, onAmountChange, onUnitChange, style }) {
   return (
     <div style={style}>
@@ -160,7 +158,6 @@ export function DosageSelector({ dosageAmount, dosageUnit, commonDosages, onAmou
   );
 }
 
-/** Standardized frequency dropdown. */
 export function FrequencySelect({ value, onChange, style }) {
   return (
     <div style={{ position: "relative", ...style }}>

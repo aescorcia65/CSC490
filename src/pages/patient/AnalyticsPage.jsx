@@ -34,7 +34,6 @@ const PAGE_FONT = "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif";
 
 const MED_ROW_COLORS = ["blue", "rose", "cyan", "emerald", "amber"];
 
-/** Patient education — URLs verified as live site sections (replaces older pages that 404). */
 const ADHERENCE_TIP_RESOURCES = [
   {
     text: "Take medications at the same time daily",

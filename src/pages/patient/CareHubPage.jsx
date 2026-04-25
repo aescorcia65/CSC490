@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Stethoscope, MessageCircle, Users, Settings2, ArrowRight, LifeBuoy } from "lucide-react";
+import { Stethoscope, MessageCircle, Users, Settings2, ArrowRight } from "lucide-react";
 import { supabase } from "../../supabase";
 import { useIsMobile } from "../../hooks/useIsMobile";
 
-export default function CareHubPage({ userId, onCareAdvisor, onFeedback, onHelpSupport, onManageCareTeam }) {
+export default function CareHubPage({ userId, onCareAdvisor, onFeedback, onManageCareTeam }) {
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t2 = "var(--t2)", t3 = "var(--t3)", b1 = "var(--b1)";
   const [careTeam, setCareTeam] = useState([]);
@@ -55,7 +55,6 @@ export default function CareHubPage({ userId, onCareAdvisor, onFeedback, onHelpS
   const items = [
     { label: "Care Advisor", sub: "Ask questions about your medications and wellness.", Icon: Stethoscope, onClick: onCareAdvisor, accent: "var(--p)", bg: "var(--pd)" },
     { label: "Send Feedback", sub: "Share ideas, report issues, or rate your experience.", Icon: MessageCircle, onClick: onFeedback, accent: "var(--gr)", bg: "rgba(16,185,129,.1)" },
-    { label: "Help & support", sub: "Account, preferences, and where to get help.", Icon: LifeBuoy, onClick: onHelpSupport, accent: "var(--t2)", bg: "var(--s2)" },
   ];
 
   return (

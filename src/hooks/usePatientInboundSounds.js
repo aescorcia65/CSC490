@@ -8,10 +8,6 @@ import {
 } from "../lib/messageNotificationSettings";
 import { loadPatientMessagingSoundSettings, playPatientInboundChimeDeduped } from "../lib/patientMessagingSounds";
 
-/**
- * In-app sounds for inbound patient_messages and notifications (while app is open).
- * Message chimes require a prior tap/keypress on the app (see PatientDashboard audio unlock).
- */
 export function usePatientInboundSounds(userId) {
   useEffect(() => {
     if (!userId) return;

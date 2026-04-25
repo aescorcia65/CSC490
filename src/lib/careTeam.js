@@ -1,4 +1,3 @@
-/** Doctor rows from patient profile (matches Settings → Care team). */
 export function careTeamDoctorEntries(profile) {
   if (!profile) return [];
   const ct = profile.care_team;
@@ -19,7 +18,6 @@ export function careTeamDoctorEntries(profile) {
   return [];
 }
 
-/** All doctor ids on the patient's care team (for notifications, etc.). */
 export function careTeamDoctorIdSet(profile) {
   const ids = new Set();
   for (const { doctorId } of careTeamDoctorEntries(profile)) {

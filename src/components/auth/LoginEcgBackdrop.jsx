@@ -1,9 +1,5 @@
 import { useId } from "react";
 
-/**
- * Subtle scrolling ECG line for the login hero (desktop) and a thin strip on mobile.
- * Seamless loop: two identical 320-unit segments, translate -320 in sync with dur.
- */
 export default function LoginEcgBackdrop({ light, variant = "desktop" }) {
   const id = useId().replace(/:/g, "");
   const gradId = `login-ecg-grad-${id}`;
@@ -11,7 +7,6 @@ export default function LoginEcgBackdrop({ light, variant = "desktop" }) {
 
   const isDesktop = variant === "desktop";
 
-  /* One wavelength: baseline → P → QRS → T → flat (320×100 user units, baseline y=50) */
   const segmentD =
     "M0,50 L52,50 C58,50 62,48 66,45 C70,42 74,44 78,50 L86,50 L88,46 L90,24 L93,76 L96,40 L100,50 L118,50 C128,50 134,46 140,50 C146,54 152,50 162,50 L320,50";
 

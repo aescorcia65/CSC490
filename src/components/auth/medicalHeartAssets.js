@@ -1,37 +1,20 @@
-/**
- * Shared SVG paths: smooth heart + single-beat ECG (P → QRS → T), viewBox 0 0 24 24, baseline ~12.
- */
 
-/** Symmetric rounded heart (stroke / clip) */
 export const HEART_PATH_24 =
   "M12 20.15 C8.55 16.85 3.85 13.55 3.85 8.95 C3.85 5.65 6.15 3.4 8.95 3.4 C10.15 3.4 11.25 4 12 5.05 C12.75 4 13.85 3.4 15.05 3.4 C17.85 3.4 20.15 5.65 20.15 8.95 C20.15 13.55 15.45 16.85 12 20.15 Z";
 
-/**
- * Sinus rhythm: flat → P bump → PR → QRS (sharp R, S) → ST → T wave → flat.
- * Keep line inside heart; sharp vertices use L, no round caps on trace.
- */
 export const ECG_PATH_24 =
   "M4.35 12 L7.55 12 C7.9 11.52 8.15 11.48 8.5 12 L9.05 12 L9.35 12.38 L9.55 10.85 L9.78 12.42 L10.02 9.05 L10.28 13.22 L10.55 11.88 L10.95 12 L11.85 12 C12.55 10.78 13.35 11.95 14.45 12 L19.65 12";
 
-/** One beat width in the 24×24 ECG viewBox (end x − start x); tiles seamlessly. */
 export const ECG_BEAT_WIDTH = 19.65 - 4.35;
 
-/**
- * Login hero strip: one full cycle in viewBox "0 0 160 38", baseline y=19.
- * Long flat segments → smooth P → QRS (tall R) → rounded T → flat (loops seamlessly).
- */
 export const ECG_HERO_PATH =
   "M0 19 L44 19 C45.8 19 47 18.2 48.2 17.65 C49.4 17.15 50.6 17.85 51.8 18.55 C52.8 19.05 53.4 19 54 19 L58 19 L62 19 L64 19 L64.6 19.85 L65.5 21.6 L67.2 3.8 L68.9 22.1 L70.6 25.4 L73.2 19.45 L77 19 C79.2 19 83.2 15.4 89 19 L160 19";
 
 export const ECG_HERO_CYCLE_WIDTH = 160;
 export const ECG_HERO_VIEW_H = 38;
 
-/**
- * Marketing-style hero ECG (matches login decorative waveform), viewBox 0 0 320 90.
- */
 export const ECG_REFERENCE_HERO_PATH =
   "M0,45 L52,45 C58,45 62,43 66,40 C70,37 74,39 78,45 L86,45 L88,41 L90,19 L93,71 L96,35 L100,45 L118,45 C128,45 134,41 140,45 C146,49 152,45 162,45 L320,45";
 
-/** Hero-sized filled heart (100×100 viewBox), matches proportions of HEART_PATH_24 */
 export const HEART_PATH_100 =
   "M50 84 C22 70 6 56 6 37 C6 20 22 6 37 6 C42 6 47 11 50 17 C53 11 58 6 63 6 C78 6 94 20 94 37 C94 56 78 70 50 84 Z";

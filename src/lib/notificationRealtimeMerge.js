@@ -1,7 +1,3 @@
-/**
- * Apply a Supabase postgres_changes payload to a local notification list
- * so INSERT / UPDATE / DELETE stay in sync without a full refetch.
- */
 export function mergeNotificationRows(prev, payload, maxLen = 50) {
   const ev = payload?.eventType;
   const row = payload?.new;

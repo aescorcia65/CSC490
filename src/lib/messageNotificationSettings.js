@@ -1,4 +1,3 @@
-/** Patient message & alert sound preferences (localStorage). */
 
 export const MESSAGE_NOTIF_STORAGE_KEY = "mt_message_notif_v1";
 
@@ -35,7 +34,6 @@ export function saveMessageNotifSettings(partial) {
   try {
     window.dispatchEvent(new CustomEvent("mt-message-notif-settings", { detail: next }));
   } catch {
-    /* ignore */
   }
   return next;
 }
@@ -62,11 +60,9 @@ function primeNotifAudioOutput(ctx) {
     src.start(t);
     src.stop(t + dur);
   } catch {
-    /* ignore */
   }
 }
 
-/** Call from a user gesture (tap/key) so notification tones can play later from realtime. */
 export async function ensureMessageNotifAudioUnlocked() {
   if (typeof window === "undefined") return;
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -76,7 +72,6 @@ export async function ensureMessageNotifAudioUnlocked() {
     try {
       await audioCtx.resume();
     } catch {
-      /* ignore */
     }
   }
   primeNotifAudioOutput(audioCtx);
@@ -96,9 +91,6 @@ function playTone(ctx, freq, start, dur, gain, type = "sine") {
   osc.stop(start + dur + 0.05);
 }
 
-/**
- * Play notification sound (Web Audio). Respects soundId and volume 0–1.
- */
 export async function playMessageNotificationSound(soundId, volume = 0.75) {
   const ctx = getAudioContext();
   if (!ctx) return;
@@ -128,7 +120,6 @@ export async function playMessageNotificationSound(soundId, volume = 0.75) {
     }
     return;
   }
-  /* default */
   playTone(ctx, 523.25, t0, 0.14, baseGain, "sine");
   playTone(ctx, 659.25, t0 + 0.13, 0.16, baseGain * 0.95, "sine");
 }
@@ -139,7 +130,6 @@ export function shouldPlayMessageFromSender(settings, senderIsDoctor) {
   return !!settings.notifyPharmacistMessage;
 }
 
-/** Map in-app notification row to sound category. */
 export function notificationRowSoundCategory(row) {
   const type = String(row?.type || "");
   const title = String(row?.title || "");

@@ -1,15 +1,8 @@
-/**
- * Patient portal: new-message sounds (separate from doctor mt_* keys and notification prefs).
- * Stored in localStorage so tones stay distinct from the doctor app.
- *
- * Uses one shared AudioContext + resume() so browsers allow playback after a user gesture.
- */
 
 const STORAGE_KEY = "pt_messaging_sound_v1";
 
 let sharedCtx = null;
 
-/** Short silent buffer + destination tap — helps Safari/iOS unlock the graph after resume(). */
 function primePatientAudioOutput(ctx) {
   if (!ctx || ctx.state !== "running") return;
   try {
@@ -25,7 +18,6 @@ function primePatientAudioOutput(ctx) {
     src.start(t);
     src.stop(t + dur);
   } catch {
-    /* ignore */
   }
 }
 
@@ -38,7 +30,6 @@ export async function ensurePatientMessagingAudioUnlocked() {
     try {
       await sharedCtx.resume();
     } catch {
-      /* ignore */
     }
   }
   primePatientAudioOutput(sharedCtx);
@@ -49,7 +40,6 @@ function getPatientAudioContext() {
   return sharedCtx;
 }
 
-/** Resume + prime only if the user already unlocked audio (sharedCtx exists). Used for realtime inbound sounds. */
 async function resumePatientAudioIfPrimed() {
   if (!sharedCtx) return;
   if (sharedCtx.state === "suspended") {
@@ -62,7 +52,6 @@ async function resumePatientAudioIfPrimed() {
   primePatientAudioOutput(sharedCtx);
 }
 
-/** Preset id -> { label, desc, tones: [freq, wave, delaySec, durSec][] } */
 export const PATIENT_MESSAGING_SOUND_PRESETS = {
   breeze: {
     label: "Breeze",
@@ -132,17 +121,10 @@ export function savePatientMessagingSoundSettings(partial) {
   try {
     window.dispatchEvent(new CustomEvent("pt-messaging-sound", { detail: next }));
   } catch {
-    /* ignore */
   }
   return next;
 }
 
-/**
- * Preview / inbound chime using Web Audio (distinct timbres from doctor portal).
- * @param {string} presetId
- * @param {number} volume 0–1
- * @param {{ fromUserGesture?: boolean }} [options] Pass fromUserGesture: true from click/tap handlers so a context can be created under autoplay rules.
- */
 export async function playPatientMessagingSound(presetId, volume, options = {}) {
   const { fromUserGesture = false } = options;
   const profile = PATIENT_MESSAGING_SOUND_PRESETS[presetId] || PATIENT_MESSAGING_SOUND_PRESETS.breeze;
@@ -184,14 +166,12 @@ export async function playPatientMessagingSound(presetId, volume, options = {}) 
       o.stop(t0 + delay + dur + 0.04);
     });
   } catch {
-    /* ignore */
   }
 }
 
 let lastInboundChimeKey = "";
 let lastInboundChimeAt = 0;
 
-/** Dedupe when hook + message page both see the same INSERT. */
 export async function playPatientInboundChimeDeduped(messageId, presetId, volume, options = {}) {
   const key = messageId != null ? String(messageId) : `${Date.now()}`;
   const now = Date.now();

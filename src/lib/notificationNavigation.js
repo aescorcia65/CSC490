@@ -1,4 +1,3 @@
-/** Shared text signals for provider notification routing (doctor / pharmacist). */
 
 export function notificationTextBlob(n) {
   return `${n?.title || ""} ${n?.body || ""}`.toLowerCase();

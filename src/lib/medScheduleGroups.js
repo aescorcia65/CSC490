@@ -5,7 +5,6 @@ const FREQ_RANK = FREQUENCY_OPTIONS.reduce((acc, f, i) => {
   return acc;
 }, {});
 
-/** "8:00:00" | "08:00" -> "08:00" */
 export function normalizeTimeHM(t) {
   const s = String(t || "08:00").trim();
   const parts = s.split(":");
@@ -30,7 +29,6 @@ function addHoursHM(hm, hours) {
   return minsToHM(timeHMToMins(hm) + Math.round(hours * 60));
 }
 
-/** All clock times in a day, every `nHours` starting from anchor, until cycle repeats. */
 function expandEveryNHours(anchorHM, nHours) {
   const first = normalizeTimeHM(anchorHM);
   const out = [];
@@ -46,10 +44,6 @@ function expandEveryNHours(anchorHM, nHours) {
   return out.sort((a, b) => timeHMToMins(a) - timeHMToMins(b));
 }
 
-/**
- * Typical hours between doses for ring UI / spacing (null = use app default, e.g. once daily).
- * Matches the spacing used inside `expandDoseTimesForToday` for each frequency.
- */
 export function getDoseSpacingHoursForMed(med) {
   const freq = String(med?.freq ?? "Once daily").trim() || "Once daily";
   if (/as needed|prn/i.test(freq)) return null;
@@ -75,16 +69,12 @@ export function getDoseSpacingHoursForMed(med) {
   }
 }
 
-/** Seconds to scale “next dose” ring: one dosing interval, clamped (falls back for PRN / once daily). */
 export function ringMaxSecForMedSpacing(med, fallbackSec = 8 * 3600) {
   const h = getDoseSpacingHoursForMed(med);
   if (h == null) return fallbackSec;
   return Math.max(3600, Math.min(24 * 3600, h * 3600));
 }
 
-/**
- * All dose times today for one medication row (uses `time` as first/anchor dose and `freq`).
- */
 export function expandDoseTimesForToday(med) {
   const anchor = normalizeTimeHM(med?.time);
   const freq = String(med?.freq ?? "Once daily").trim() || "Once daily";
@@ -136,7 +126,6 @@ export function expandDoseTimesForToday(med) {
   }
 }
 
-/** Time-of-day buckets (24h clock, minute precision). */
 export const DAY_PERIOD_DEFS = [
   {
     id: "morning",
@@ -176,10 +165,6 @@ export const DAY_PERIOD_DEFS = [
   },
 ];
 
-/**
- * Build schedule rows grouped by time of day. Each row is one dose slot (expanded from freq).
- * @returns {Array<{ id: string, label: string, rangeLabel: string, rows: Array<{ med: object, slotTime: string }> }>}
- */
 export function groupMedicationsByDayPeriod(meds) {
   const flat = [];
   for (const med of meds) {
@@ -197,16 +182,11 @@ export function groupMedicationsByDayPeriod(meds) {
   })).filter((block) => block.rows.length > 0);
 }
 
-/** Normalize frequency label for grouping (trim; default Once daily). */
 export function medFrequencyGroupKey(freq) {
   const f = String(freq ?? "").trim();
   return f || "Once daily";
 }
 
-/**
- * Group medications by their `freq` field, in the same order as the app's frequency dropdown.
- * Within each group, sort by reminder time.
- */
 export function groupMedicationsByFrequency(meds) {
   const by = new Map();
   for (const m of meds) {

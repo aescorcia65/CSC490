@@ -13,7 +13,6 @@ export function to12h(t24) {
   return `${h12}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")} ${ampm}`;
 }
 
-/** 12-hour label without seconds (e.g. dose lists). */
 export function to12hNoSeconds(t24) {
   if (!t24 || !String(t24).includes(":")) return t24;
   const parts = String(t24).trim().split(":");
@@ -25,7 +24,6 @@ export function to12hNoSeconds(t24) {
   return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
 }
 
-/** Human-readable overdue length from minutes after scheduled dose (today, same calendar day). */
 export function formatOverdueDurationMinutes(mins) {
   const m = Math.max(0, Math.round(Number(mins) || 0));
   if (m < 1) return "less than a minute";

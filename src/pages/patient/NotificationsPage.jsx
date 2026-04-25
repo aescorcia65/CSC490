@@ -5,7 +5,6 @@ import { supabase } from "../../supabase";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
 
-/** Map free-form "general" notifications to a sensible patient tab. */
 function inferNavigateFromGeneralNotification(n) {
   const title = (n.title || "").toLowerCase();
   const body = (n.body || "").toLowerCase();

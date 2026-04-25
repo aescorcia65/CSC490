@@ -3,7 +3,6 @@ import { Loader2, Plus, Trash2 } from "lucide-react";
 import { supabase } from "../../../supabase";
 import OkBanner from "../../../components/common/OkBanner";
 
-/** Preset roles — "Primary care" syncs to profiles.primary_doctor_id for app workflows */
 export const CARE_TEAM_LABEL_PRESETS = [
   "Primary care",
   "Neurology",

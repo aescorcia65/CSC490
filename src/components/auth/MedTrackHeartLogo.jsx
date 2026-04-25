@@ -1,10 +1,6 @@
 import { useId } from "react";
 import { ECG_PATH_24, HEART_PATH_24 } from "./medicalHeartAssets";
 
-/**
- * MedTrack mark: rounded heart + realistic ECG trace.
- * beat={true}: line draws like a monitor (stroke trace), no vertical bouncing.
- */
 export default function MedTrackHeartLogo({ size = 24, className, style, beat = false }) {
   const uid = useId().replace(/:/g, "");
   const traceClass = beat ? `medtrack-ecg-trace-${uid}` : undefined;

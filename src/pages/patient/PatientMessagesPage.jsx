@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Send, Loader2, Check, CheckCheck, Stethoscope, Pill, ArrowRight, Paperclip, FileText, UserRound, ShieldCheck, SquarePen, ArrowLeft, Bell, BellOff, Volume1, Volume2 } from "lucide-react";
+import { Send, Loader2, Check, CheckCheck, Stethoscope, Pill, ArrowRight, Paperclip, FileText, UserRound, ShieldCheck, SquarePen, ArrowLeft, Bell, BellOff, Volume1, Volume2, Video } from "lucide-react";
 import { supabase } from "../../supabase";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { careTeamDoctorEntries } from "../../lib/careTeam";
@@ -13,6 +13,7 @@ import {
   playPatientInboundChimeDeduped,
 } from "../../lib/patientMessagingSounds";
 import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
+import { buildVideoCallUrlFromRoom, parseVideoApprovalMessageBody } from "../../lib/videoCall";
 
 function sortMsgs(rows) {
   return [...(rows || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
@@ -43,6 +44,12 @@ function formatThreadTime(v) {
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+function formatVideoWindow(startMs, endMs) {
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  return `${start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} - ${end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
 function sameDay(a, b) {
   const da = new Date(a);
   const db = new Date(b);
@@ -57,7 +64,6 @@ function safeFileName(name) {
   return s.length > 180 ? s.slice(0, 180) : s;
 }
 
-/** Smaller uploads on slow networks; skip if already small or non-raster. */
 async function shrinkImageForUpload(file, maxEdge = 1680, quality = 0.82) {
   if (!file?.type?.startsWith("image/")) return null;
   if (file.type === "image/gif" || file.type === "image/svg+xml") return null;
@@ -99,7 +105,6 @@ function mergeServerRow(prev, tempId, row) {
   return sortMsgs([...rest, row]);
 }
 
-/** Maps Storage/DB errors to short copy (details stay in console). */
 function friendlyAttachmentError(err) {
   const msg = String(err?.message ?? err?.error ?? err?.msg ?? err ?? "");
   const raw = msg.toLowerCase();
@@ -167,6 +172,10 @@ function friendlyAttachmentError(err) {
 
 function previewText(row) {
   if (!row) return null;
+  const parsedVideoApproval = parseVideoApprovalMessageBody(row.body || "");
+  if (parsedVideoApproval) {
+    return `Video visit approved for ${formatVideoWindow(parsedVideoApproval.windowStartMs, parsedVideoApproval.windowEndMs)}.`;
+  }
   if (row.attachment_name || row.attachment_url) {
     const cap = (row.body || "").trim();
     const att = "📎 " + (row.attachment_name || "File");
@@ -218,11 +227,11 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
   const [threadMetaTick, setThreadMetaTick] = useState(0);
   const [showSoundSettings, setShowSoundSettings] = useState(false);
   const [ptSound, setPtSound] = useState(() => loadPatientMessagingSoundSettings());
+  const [videoNowMs, setVideoNowMs] = useState(() => Date.now());
   const listRef = useRef(null);
   const fileInputRef = useRef(null);
   const typingTimer = useRef(null);
   const typingChRef = useRef(null);
-  /** Current open chat peer — realtime uses this ref so one stable channel works when switching threads. */
   const activePeerRef = useRef(null);
 
   const activeDoctor = useMemo(() => doctors.find((d) => d.id === selectedDoctorId) || doctors[0] || null, [doctors, selectedDoctorId]);
@@ -256,6 +265,32 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       : [];
     return [...docs, ...pharm];
   }, [doctors, pharmacist]);
+  const latestDoctorVideoApproval = useMemo(() => {
+    if (peerTab !== "doctor" || !activePeer?.id) return null;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (m?.sender_id !== activePeer.id) continue;
+      const parsed = parseVideoApprovalMessageBody(m?.body);
+      if (parsed) return parsed;
+    }
+    return null;
+  }, [messages, peerTab, activePeer?.id]);
+  const canJoinDoctorVideo = !!latestDoctorVideoApproval && videoNowMs >= latestDoctorVideoApproval.windowStartMs && videoNowMs <= latestDoctorVideoApproval.windowEndMs;
+  const latestDoctorVideoUrl = useMemo(() => {
+    if (!latestDoctorVideoApproval?.roomId) return "";
+    return buildVideoCallUrlFromRoom(latestDoctorVideoApproval.roomId) || "";
+  }, [latestDoctorVideoApproval?.roomId]);
+  const videoJoinHint = useMemo(() => {
+    if (!latestDoctorVideoApproval) return "Doctor must approve video during appointment time.";
+    if (videoNowMs < latestDoctorVideoApproval.windowStartMs) return `Video opens at ${new Date(latestDoctorVideoApproval.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
+    if (videoNowMs > latestDoctorVideoApproval.windowEndMs) return "Video approval window ended. Ask your doctor to approve again.";
+    return "Join approved video visit";
+  }, [latestDoctorVideoApproval, videoNowMs]);
+  const openVideoVisit = useCallback(() => {
+    if (!canJoinDoctorVideo || !latestDoctorVideoUrl) return;
+    const url = latestDoctorVideoUrl;
+    if (typeof window !== "undefined" && url) window.open(url, "_blank", "noopener,noreferrer");
+  }, [canJoinDoctorVideo, latestDoctorVideoUrl]);
 
   useEffect(() => {
     setSuggestionDismissed(false);
@@ -273,6 +308,11 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     const onResize = () => setViewportWidth(window.innerWidth);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setVideoNowMs(Date.now()), 15000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -943,27 +983,53 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowSoundSettings((p) => !p)}
-              title={ptSound.enabled ? "Message sounds on" : "Message sounds off"}
-              style={{
-                width: isPhone ? 44 : 40,
-                height: isPhone ? 44 : 40,
-                borderRadius: 10,
-                border: `1px solid ${b1}`,
-                background: showSoundSettings ? "rgba(37,99,235,.12)" : "var(--s1)",
-                color: ptSound.enabled ? "var(--p)" : t3,
-                display: "grid",
-                placeItems: "center",
-                cursor: "pointer",
-                flexShrink: 0,
-              }}
-              aria-expanded={showSoundSettings}
-              aria-label="Message notification sounds"
-            >
-              {ptSound.enabled ? <Bell size={18} /> : <BellOff size={18} />}
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+              {peerTab === "doctor" && activePeer?.id ? (
+                <button
+                  type="button"
+                  onClick={openVideoVisit}
+                  title={videoJoinHint}
+                  disabled={!canJoinDoctorVideo}
+                  style={{
+                    width: isPhone ? 44 : 40,
+                    height: isPhone ? 44 : 40,
+                    borderRadius: 10,
+                    border: `1px solid ${b1}`,
+                    background: "var(--s1)",
+                    color: "var(--p)",
+                    display: "grid",
+                    placeItems: "center",
+                    cursor: canJoinDoctorVideo ? "pointer" : "not-allowed",
+                    opacity: canJoinDoctorVideo ? 1 : 0.5,
+                    flexShrink: 0,
+                  }}
+                  aria-label="Join approved video call"
+                >
+                  <Video size={18} />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setShowSoundSettings((p) => !p)}
+                title={ptSound.enabled ? "Message sounds on" : "Message sounds off"}
+                style={{
+                  width: isPhone ? 44 : 40,
+                  height: isPhone ? 44 : 40,
+                  borderRadius: 10,
+                  border: `1px solid ${b1}`,
+                  background: showSoundSettings ? "rgba(37,99,235,.12)" : "var(--s1)",
+                  color: ptSound.enabled ? "var(--p)" : t3,
+                  display: "grid",
+                  placeItems: "center",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+                aria-expanded={showSoundSettings}
+                aria-label="Message notification sounds"
+              >
+                {ptSound.enabled ? <Bell size={18} /> : <BellOff size={18} />}
+              </button>
+            </div>
           </div>
           {showSoundSettings ? (
             <div style={{ padding: "12px 14px", borderBottom: `1px solid ${b1}`, background: "var(--s2)" }}>
@@ -1047,10 +1113,16 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                 {messages.map((m, idx) => {
                   const mine = m.sender_id === userId;
                   const bodyText = (m.body || "").trim();
+                  const videoApproval = parseVideoApprovalMessageBody(bodyText);
+                  const isVideoApproval = !!videoApproval;
+                  const videoApprovalUrl = isVideoApproval && videoApproval?.roomId ? buildVideoCallUrlFromRoom(videoApproval.roomId) : "";
+                  const displayBodyText = isVideoApproval
+                    ? `Video visit approved by doctor for ${formatVideoWindow(videoApproval.windowStartMs, videoApproval.windowEndMs)}.`
+                    : bodyText;
                   const attUrl = m.attachment_url;
                   const pendingUp = m._pendingUpload === true;
                   const isImg = attUrl && (m.attachment_mime || "").startsWith("image/");
-                  const showBubble = attUrl || bodyText || (pendingUp && m.attachment_name);
+                  const showBubble = attUrl || displayBodyText || (pendingUp && m.attachment_name);
                   const prev = messages[idx - 1];
                   const showDayBreak = !prev || !sameDay(prev.created_at, m.created_at);
                   const msgDate = new Date(m.created_at);
@@ -1169,7 +1241,24 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                               {m.attachment_name || "View attachment"}
                             </a>
                           )}
-                          {bodyText ? <span style={{ whiteSpace: "pre-wrap" }}>{m.body}</span> : null}
+                          {displayBodyText ? <span style={{ whiteSpace: "pre-wrap" }}>{displayBodyText}</span> : null}
+                          {videoApprovalUrl ? (
+                            <a
+                              href={videoApprovalUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: "block",
+                                marginTop: 6,
+                                color: mine ? "rgba(255,255,255,.95)" : "var(--p)",
+                                fontSize: 11.5,
+                                textDecoration: "underline",
+                                wordBreak: "break-all",
+                              }}
+                            >
+                              {videoApprovalUrl}
+                            </a>
+                          ) : null}
                         </div>
                         )}
                         <div style={{ display: "flex", alignItems: "center", justifyContent: mine ? "flex-end" : "flex-start", gap: 6, marginTop: 4, paddingLeft: 4, paddingRight: 4 }}>

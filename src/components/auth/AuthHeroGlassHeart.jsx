@@ -1,16 +1,11 @@
 import { useId, useEffect, useState } from "react";
 import { ECG_REFERENCE_HERO_PATH } from "./medicalHeartAssets";
 
-/** Draw → hold full trace → quick reset → pause (steady cadence, ~52 BPM feel). */
 const CYCLE_SEC = 1.15;
 const KEY_DRAW_END = 0.72;
 const KEY_HOLD_END = 0.78;
 const KEY_RESET_END = 0.785;
 
-/**
- * Login hero ECG — reference style: large white trace, cyan/blue neon glow,
- * draws left-to-right with a bright leading spark; translucent over page gradient.
- */
 export default function AuthHeroGlassHeart({ light = true }) {
   const uid = useId().replace(/:/g, "");
   const pathId = `auth-ecg-hero-${uid}`;

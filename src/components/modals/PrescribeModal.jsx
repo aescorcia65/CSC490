@@ -4,7 +4,6 @@ import { X, Loader2, Plus, Trash2 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { MedAutocomplete, DosageSelector, FrequencySelect } from "../common/MedicationInputs";
 
-/* ─── Main PrescribeModal ─── */
 export default function PrescribeModal({ patient, patientProfile, doctor, onClose, onSuccess }) {
   const emptyMed = () => ({
     medication_name: "", dosage_amount: "", dosage_unit: "mg",
@@ -47,7 +46,6 @@ export default function PrescribeModal({ patient, patientProfile, doctor, onClos
         .select("id").single();
       if (rxErr) throw rxErr;
 
-      // Bulk insert all medications in one query instead of sequential loop
       const medRows = valid.map(m => ({
         prescription_id: rx.id,
         medication_name: m.medication_name.trim(),
@@ -60,7 +58,6 @@ export default function PrescribeModal({ patient, patientProfile, doctor, onClos
       const medNames = valid.map(m => m.medication_name.trim()).join(", ");
       const docName = doctor.first_name || doctor.email?.split("@")[0] || "Doctor";
 
-      // Fire notifications in parallel without blocking close
       const notifPromises = [];
       if (pharmacistId) {
         notifPromises.push(
@@ -80,7 +77,6 @@ export default function PrescribeModal({ patient, patientProfile, doctor, onClos
           related_id: rx.id
         })
       );
-      // Don't await — fire and forget so modal closes instantly
       Promise.allSettled(notifPromises);
 
       onSuccess?.(); onClose();

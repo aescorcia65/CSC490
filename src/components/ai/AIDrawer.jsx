@@ -4,10 +4,6 @@ import { X, Stethoscope, Info, Loader2, Send, User, AlertTriangle } from "lucide
 import { supabase } from "../../supabase";
 import { to12h } from "../../lib/utils";
 
-/**
- * Uses VITE_OPENAI_API_KEY (see .env.example). The key is bundled into the client —
- * acceptable for local/dev only. For production, proxy chat through your backend.
- */
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const MODEL = "gpt-4o-mini";
 

@@ -6,10 +6,6 @@ function clip(s, max = 140) {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
-/**
- * Insert a notification row so the recipient sees a bell/inbox alert when a chat message arrives.
- * Does not block the UI; logs insert errors only.
- */
 export function notifyRecipientNewChatMessage({ recipientId, senderName, messageText, relatedMessageId }) {
   if (!recipientId) return;
   const preview = clip(messageText) || "Open Messages to read.";

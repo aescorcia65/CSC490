@@ -11,7 +11,6 @@ import { supabase } from "../../supabase";
 
 const FDA_LABEL_ENDPOINT = "https://api.fda.gov/drug/label.json";
 
-/** True when the DB has no refill_requests table / PostgREST can't see it (migration not applied). */
 function isRefillRequestsTableMissing(error) {
   if (!error) return false;
   const msg = String(error.message || "").toLowerCase();
@@ -27,7 +26,6 @@ function isRefillRequestsTableMissing(error) {
   );
 }
 
-/** Distinct search phrases: full name, text outside parens, text inside parens (e.g. brand). */
 function fdaSearchTerms(medName) {
   const raw = String(medName || "").trim();
   if (!raw) return [];
@@ -48,7 +46,6 @@ function fdaEscapePhrase(s) {
   return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-/** One openFDA label request; returns first result or null. */
 async function fdaLabelQuery(search) {
   if (!search?.trim()) return null;
   try {
@@ -66,19 +63,11 @@ async function fdaLabelQuery(search) {
   }
 }
 
-/**
- * Brand OR generic for one phrase. openFDA uses +OR+ between clauses; bare + between fields is AND,
- * which is why brand_name:X+generic_name:X almost never matched.
- */
 function fdaBrandOrGeneric(term) {
   const ph = fdaEscapePhrase(term);
   return `openfda.brand_name:"${ph}"+OR+openfda.generic_name:"${ph}"`;
 }
 
-/**
- * Fetch SPL label from openFDA. Tries OR queries and parenthetical brands — the old query
- * required the same token on brand AND generic, which rarely matches.
- */
 async function fetchDrugInfo(medName) {
   const terms = fdaSearchTerms(medName);
   if (!terms.length) return null;
@@ -115,7 +104,6 @@ async function fetchDrugInfo(medName) {
 
 const FDA_SECTION_CHAR_CAP = 6000;
 
-/** Join first SPL-style string fields from openFDA label JSON. */
 function fdaFirstString(data, ...fieldNames) {
   if (!data) return "";
   for (const name of fieldNames) {
@@ -130,7 +118,6 @@ function fdaFirstString(data, ...fieldNames) {
   return "";
 }
 
-/** Split dense FDA paragraphs into list-friendly chunks. */
 function fdaReadableChunks(text, maxChunks = 36) {
   const t = String(text || "")
     .replace(/\u00a0/g, " ")
@@ -249,7 +236,6 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
   const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
   const now = new Date();
   const curMins = now.getHours() * 60 + now.getMinutes();
-  /** One row per overdue scheduled time (same med × multiple times = multiple rows). */
   const overdueDoseRows = useMemo(() => {
     const rows = [];
     for (const m of meds) {

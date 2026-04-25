@@ -1,8 +1,6 @@
-# AGENTS.md — MedTrack-Web
 
 Coding agent guidelines for the MedTrack-Web repository.
 
-## Build & Dev Commands
 
 | Command              | Description                                      |
 |----------------------|--------------------------------------------------|
@@ -17,7 +15,6 @@ Coding agent guidelines for the MedTrack-Web repository.
 ESLint is configured (`eslint.config.js`, flat config) but there is no `lint` script; run manually with `npx eslint .` if needed.
 Always run `npm run build` after changes to verify there are no compilation errors.
 
-## Tech Stack
 
 - **Framework**: React 19 (Vite 5, ESM)
 - **Language**: JavaScript only (`.js` / `.jsx`). No TypeScript.
@@ -29,7 +26,6 @@ Always run `npm run build` after changes to verify there are no compilation erro
 - **Mobile**: Capacitor (iOS + Android hybrid)
 - **Deployment**: Vercel (SPA catch-all rewrite)
 
-## Project Structure
 
 ```
 src/
@@ -46,28 +42,23 @@ src/
 supabase/migrations/         # Sequential SQL migrations (001–007)
 ```
 
-## Code Style
 
-### Formatting
 - **Double quotes** everywhere (imports, strings, JSX attributes).
 - **Semicolons** required at end of statements.
 - **2-space indentation**.
 - No enforced line length limit; long inline style objects on a single line are normal.
 - Multiple short statements may share one line: `setBusy(true); setErr("");`
 
-### Imports
 Keep this order (no blank lines between groups):
 1. React: `import { useState, useEffect } from "react";`
 2. Third-party: `framer-motion`, `lucide-react`, `react-router-dom`
 3. Local (relative): supabase client, contexts, hooks, lib, components
 
-### Components
 - Use **function declarations** with **default export**: `export default function MyComponent({ prop1, prop2 }) {}`
 - Destructure props in the function signature.
 - No PropTypes or TypeScript interfaces.
 - **Named exports** only for hooks and context: `export function useTheme()`, `export const useAuth = () => ...`
 
-### Naming Conventions
 | What | Convention | Example |
 |------|-----------|---------|
 | Component files | PascalCase `.jsx` | `MedModal.jsx`, `Dashboard.jsx` |
@@ -81,30 +72,25 @@ Keep this order (no blank lines between groups):
 
 Short variable names are common in UI code: `t1` (text primary), `t3` (text muted), `b0`/`b1` (borders), `isMob` (mobile check), `m` (medication), `ms` (meds array).
 
-### State Management
 - **AuthContext** for global state (user, role, meds, display name).
 - **useState + useEffect** for component state. No Redux/Zustand.
 - **localStorage** caching with `mt_` prefix for offline resilience.
 - **useCallback** for handlers passed as props; **useMemo** for derived values.
 - **Optimistic UI**: update React state first, then fire async Supabase call.
 
-### Error Handling
 - Wrap all Supabase operations in **try/catch**.
 - Log errors with descriptive prefix: `console.error("loadMedications error:", e);`
 - Show user-facing errors via `err` state + `ErrBanner` component.
 - Graceful fallbacks: return empty arrays/defaults on failure, fall back to localStorage cache.
 - Retry logic in critical paths (e.g., `AuthContext.fetchProfile` retries up to 6 times with backoff).
 
-## Supabase Patterns
 
-### Client Usage
 - Single client in `src/supabase.js`; import as `import { supabase } from "../../supabase";`
 - Env vars: `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY`
 - Queries: `.from("table").select()`, `.insert()`, `.update()`, `.delete()`, `.upsert()`
 - RPC calls: `supabase.rpc("function_name", { p_param: value })`
 - Realtime: `supabase.channel()` + `.on("postgres_changes", ...)` with cleanup via `supabase.removeChannel()`
 
-### Migration Files
 - Location: `supabase/migrations/NNN_description.sql`
 - Sequential numbering: `001`, `002`, ..., `007`
 - Use `if not exists` / `create or replace` guards for idempotency.
@@ -113,7 +99,6 @@ Short variable names are common in UI code: `t1` (text primary), `t3` (text mute
 - RPC functions: prefix with `get_`, parameters with `p_`, language `sql` or `plpgsql`, `security definer`
 - All PKs: `uuid default gen_random_uuid()`; timestamps: `timestamptz default now()`
 
-## Roles & Routing
 
 Three user roles stored in `profiles.role`:
 | Role | Route | Color Theme |
@@ -124,7 +109,6 @@ Three user roles stored in `profiles.role`:
 
 Routes are guarded by `ProtectedRoute` (auth check) and `RoleProtectedRoute` (role check).
 
-## Styling Approach
 
 Inline `style={{}}` using CSS custom properties is the primary method. Tailwind classes are used sparingly for layout (`flex`, `gap-2`, `items-center`). Global component classes are defined in `src/index.css` with terse names:
 - `btn` / `btn-doc` / `btn-pha` — primary buttons per role
@@ -137,7 +121,6 @@ Inline `style={{}}` using CSS custom properties is the primary method. Tailwind 
 
 Animation uses framer-motion: `motion.div` with `initial`/`animate`/`exit`, `AnimatePresence` for mount/unmount, `whileHover`/`whileTap` for micro-interactions.
 
-## Key Architectural Notes
 
 - The `taken` state for medications is persisted to the `medication_logs` table, not just in-memory.
 - On login, `AuthContext` loads today's taken status and merges it into the meds array.

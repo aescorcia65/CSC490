@@ -1,43 +1,31 @@
 import { supabase } from "../supabase";
 import { normalizeTimeHM, expandDoseTimesForToday } from "./medScheduleGroups";
 
-/**
- * Get today's date string in YYYY-MM-DD (local time).
- */
 function todayStr() {
   return localDateStr(new Date());
 }
 
-/**
- * Format a Date as YYYY-MM-DD.
- */
 function fmtDate(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/**
- * Format a Date-like value as YYYY-MM-DD in local time.
- */
 export function localDateStr(dateLike) {
   const d = dateLike instanceof Date ? dateLike : new Date(dateLike);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** True if this scheduled time today is logged for the med (or legacy whole-day log). */
 export function doseRowLogged(med, slotHM) {
   if (med.loggedAllDay) return true;
   const slot = normalizeTimeHM(String(slotHM));
   return (med.loggedSlotTimes || []).includes(slot);
 }
 
-/** Every expanded slot for today has a log. */
 export function allDoseSlotsLogged(med) {
   const slots = expandDoseTimesForToday(med);
   if (!slots.length) return false;
   return slots.every((s) => doseRowLogged(med, s));
 }
 
-/** Optimistic local state after logging/unlogging one slot. */
 export function patchMedDoseToggle(med, slotHM, nowLogged) {
   const slot = normalizeTimeHM(String(slotHM));
   let loggedAllDay = !!med.loggedAllDay;
@@ -56,10 +44,6 @@ export function patchMedDoseToggle(med, slotHM, nowLogged) {
   return { ...med, loggedAllDay, loggedSlotTimes, taken };
 }
 
-/**
- * Log one scheduled dose (HH:MM today) or whole day if doseSlotHM omitted.
- * Granular logs clear a legacy whole-day row for that med; whole-day clears all rows for that med.
- */
 export async function logMedicationTaken(userId, medicationId, doseSlotHM) {
   const useWholeDay = doseSlotHM == null || String(doseSlotHM).trim() === "";
   const slotNorm = useWholeDay ? "" : normalizeTimeHM(String(doseSlotHM));
@@ -88,9 +72,6 @@ export async function logMedicationTaken(userId, medicationId, doseSlotHM) {
   return !error;
 }
 
-/**
- * Un-log: one slot if doseSlotHM provided, otherwise all logs for that med today.
- */
 export async function unlogMedicationTaken(userId, medicationId, doseSlotHM) {
   const useWholeDay = doseSlotHM == null || String(doseSlotHM).trim() === "";
   let q = supabase.from("medication_logs").delete()
@@ -103,7 +84,6 @@ export async function unlogMedicationTaken(userId, medicationId, doseSlotHM) {
   return !error;
 }
 
-/** Map medication_id -> { all: legacy whole-day, slots: Set<HH:MM> } */
 export async function loadTodaysTakenSlots(userId) {
   const { data, error } = await supabase.from("medication_logs")
     .select("medication_id, dose_slot")
@@ -125,18 +105,11 @@ export async function loadTodaysTakenSlots(userId) {
   return map;
 }
 
-/**
- * Load today's medication IDs that have at least one log row.
- */
 export async function loadTodaysTaken(userId) {
   const m = await loadTodaysTakenSlots(userId);
   return new Set(m.keys());
 }
 
-/**
- * Get daily adherence for a date range via the DB function.
- * Returns [{ log_date, taken_count, total_count, adherence_pct }]
- */
 export async function getDailyAdherence(userId, startDate, endDate) {
   const { data, error } = await supabase.rpc("get_daily_adherence", {
     p_user_id: userId,
@@ -150,9 +123,6 @@ export async function getDailyAdherence(userId, startDate, endDate) {
   return data || [];
 }
 
-/**
- * Get the current adherence streak (consecutive 100% days before today).
- */
 export async function getAdherenceStreak(userId) {
   const { data, error } = await supabase.rpc("get_adherence_streak", {
     p_user_id: userId,
@@ -164,10 +134,6 @@ export async function getAdherenceStreak(userId) {
   return data ?? 0;
 }
 
-/**
- * Longest run of 100% adherence days in a lookback window (calendar consecutive).
- * Returns { days, endDate: 'YYYY-MM-DD' | null } where endDate is the last day of the best run.
- */
 export async function getBestAdherenceStreak(userId, lookbackDays = 400) {
   const end = new Date();
   const start = new Date();
@@ -202,10 +168,6 @@ export async function getBestAdherenceStreak(userId, lookbackDays = 400) {
   return { days: best, endDate: bestEnd };
 }
 
-/**
- * Get per-medication adherence for a date range.
- * Returns [{ medication_id, medication_name, color, days_taken, total_days, adherence_pct }]
- */
 export async function getMedicationAdherence(userId, startDate, endDate) {
   const { data, error } = await supabase.rpc("get_medication_adherence", {
     p_user_id: userId,
@@ -219,9 +181,6 @@ export async function getMedicationAdherence(userId, startDate, endDate) {
   return data || [];
 }
 
-/**
- * Compute the start of the current week (Monday).
- */
 export function getWeekStart() {
   const now = new Date();
   const day = now.getDay(); // 0=Sun, 1=Mon, ...
@@ -232,9 +191,6 @@ export function getWeekStart() {
   return mon;
 }
 
-/**
- * Get short day label for a date.
- */
 export function dayLabel(dateStr) {
   const today = todayStr();
   if (dateStr === today) return "Today";

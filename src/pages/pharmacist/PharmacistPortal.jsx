@@ -14,6 +14,8 @@ import { PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import NicknameModal from "../../components/modals/NicknameModal";
 import RefillRequestsPage from "./RefillRequestsPage";
+const PHARM_PAGE_STORAGE_KEY = "mt_pharmacist_last_page";
+const PHARM_ALLOWED_PAGES = new Set(["dashboard", "prescriptions", "messages", "refills"]);
 export default function PharmacistPortal({ user, light, setLight, userName, setDisplayName }) {
   const [page, setPage] = useState("dashboard");
   const [prescriptions, setPrescriptions] = useState([]);
@@ -66,6 +68,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const atBottomRef = useRef(true);
   const typingBroadcastRef = useRef(null);
   const [peerTyping, setPeerTyping] = useState(false);
+  const pageRestoreDoneRef = useRef(false);
 
   useEffect(() => {
     const unlock = () => { void ensurePortalAudioContext(); };
@@ -93,6 +96,19 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const [showNotifPanel, setShowNotifPanel] = useState(false);
   const unreadNotifCount = phaNotifs.filter(n => !n.read_at).length;
   const isMob = useIsMobile();
+
+  useEffect(() => {
+    if (!user?.id) return;
+    if (pageRestoreDoneRef.current) return;
+    const saved = localStorage.getItem(`${PHARM_PAGE_STORAGE_KEY}_${user.id}`);
+    if (saved && PHARM_ALLOWED_PAGES.has(saved)) setPage(saved);
+    pageRestoreDoneRef.current = true;
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id || !pageRestoreDoneRef.current || !PHARM_ALLOWED_PAGES.has(page)) return;
+    localStorage.setItem(`${PHARM_PAGE_STORAGE_KEY}_${user.id}`, page);
+  }, [page, user?.id]);
   const t1 = "var(--t1)", t2 = "var(--t2)", t3 = "var(--t3)", b1 = "var(--b1)";
   const PhAC = "var(--pha-p)";
   const [localName, setLocalName] = useState(userName);
@@ -837,7 +853,6 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     } catch (e) { console.error("updateStatus:", e); } finally { setActionBusy(false); }
   }
 
-  // Load pharmacist notifications + poll fallback; realtime keeps read/delete in sync
   useEffect(() => {
     if (!user?.id) return;
     const load = () => supabase.from("notifications").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(40).then(({ data }) => setPhaNotifs(data || []));
@@ -923,7 +938,6 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     if (!rxMsgInput.trim() || !selRx || rxMsgSending) return;
     const body = rxMsgInput.trim();
     setRxMsgInput("");
-    // Optimistic insert
     const tempId = `temp-${Date.now()}`;
     const tempMsg = { id: tempId, prescription_id: selRx.id, sender_id: user.id, body, created_at: new Date().toISOString() };
     setRxMessages(prev => [...prev, tempMsg]);
@@ -959,7 +973,6 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
 
   useEffect(() => {
     if (!selRx?.id) return;
-    // Poll every 3s as fallback
     const poll = setInterval(() => loadRxMessages(selRx.id), 3000);
     const ch = supabase.channel(`rx-msg-pha-${selRx.id}`)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "prescription_messages", filter: `prescription_id=eq.${selRx.id}` }, (payload) => {
@@ -1327,14 +1340,12 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                         const groupBottom = i === messages.length - 1 || messages[i + 1].sender_id !== msg.sender_id;
                         const isRead = isMe && msg.read_at;
 
-                        // Detect PATREF JSON referral (new format)
                         const isNewPatRef = !isMe && msg.body.startsWith("PATREF:");
                         let newPatData = null;
                         if (isNewPatRef) {
                           try { newPatData = JSON.parse(msg.body.slice(7)); } catch(e) {}
                         }
 
-                        // Detect legacy 📋 Re: format
                         const bodyLines = msg.body.split("\n");
                         const isLegacyRef = bodyLines[0]?.startsWith("📋 Re:");
                         const displayBody = isLegacyRef ? bodyLines.slice(1).join("\n").trim() : msg.body;
@@ -1349,7 +1360,6 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                           legacyCard = { name: nameMatch?.[1]?.replace(/\(.*/, "").trim(), dob: dobMatch?.[1]?.trim(), blood: bloodMatch?.[1]?.trim(), allergies: allergyMatch?.[1]?.trim(), conditions: condMatch?.[1]?.trim() };
                         }
 
-                        // If new PATREF format, render standalone referral card (not a bubble)
                         if (isNewPatRef && newPatData) {
                           return (
                             <div key={msg.id} style={{ display: "block", width: "100%", marginTop: 16, marginBottom: 4 }}>
@@ -1397,7 +1407,6 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                           ? `${groupTop ? "18px" : "6px"} 18px 18px ${groupBottom ? "18px" : "6px"}`
                           : `18px ${groupTop ? "18px" : "6px"} ${groupBottom ? "18px" : "6px"} 18px`;
 
-                        // Detect REFACTION reply to render nicely
                         const isRefAction = msg.body.startsWith("REFACTION:");
                         let refActionDisplay = msg.body;
                         if (isRefAction) {

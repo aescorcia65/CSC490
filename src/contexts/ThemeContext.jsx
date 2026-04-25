@@ -17,7 +17,6 @@ export function readExplicitPreference() {
       return leg;
     }
   } catch {
-    /* ignore */
   }
   return null;
 }
@@ -34,7 +33,6 @@ export function resolveInitialIsLight() {
   return !getSystemPrefersDark();
 }
 
-/** Apply visual theme to DOM (no localStorage writes). */
 export function applyDomTheme(isLight) {
   const dark = !isLight;
   try {
@@ -44,7 +42,6 @@ export function applyDomTheme(isLight) {
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", isLight ? "#2563eb" : "#1e293b");
   } catch {
-    /* ignore */
   }
   document.body.className = isLight ? "light" : "";
 }
@@ -54,7 +51,6 @@ function persistExplicitPreference(isLight) {
     localStorage.setItem(KEY_EXPLICIT, isLight ? "light" : "dark");
     localStorage.removeItem(KEY_LEGACY);
   } catch {
-    /* ignore */
   }
 }
 

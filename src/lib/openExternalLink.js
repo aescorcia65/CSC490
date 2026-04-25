@@ -1,9 +1,5 @@
 import { Capacitor } from "@capacitor/core";
 
-/**
- * Open a trusted https URL in the system browser (native) or a new tab (web).
- * Avoids in-app WebView navigation that often shows “page not found” for external sites.
- */
 export async function openExternalLink(url) {
   if (!url || typeof url !== "string") return;
   const trimmed = url.trim();

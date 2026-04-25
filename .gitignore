@@ -1,11 +1,9 @@
-# === General / OS ===
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
 *~
 
-# === IDE / Editor ===
 .idea/
 .vscode/*
 !.vscode/extensions.json
@@ -16,7 +14,6 @@ Thumbs.db
 *.sln
 *.sw?
 
-# === Python / Backend ===
 venv/
 .venv/
 env/
@@ -38,7 +35,6 @@ dist/
 *.egg
 */firebase_secret.json
 
-# === Node / WebUI ===
 node_modules/
 dist/
 dist-ssr/
@@ -53,7 +49,6 @@ lerna-debug.log*
 .pnp.*
 logs/
 
-# === Android / AndroidUI ===
 .gradle/
 **/build/
 local.properties
@@ -67,12 +62,10 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-# === Misc ===
 *.log
 .env.*
 !.env.example
 
-# Logs
 logs
 *.log
 npm-debug.log*
@@ -86,7 +79,6 @@ dist
 dist-ssr
 *.local
 
-# Capacitor native projects
 ios/App/Pods
 ios/App/App/public
 ios/App/build
@@ -96,7 +88,6 @@ android/.gradle
 android/build
 android/local.properties
 
-# Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea

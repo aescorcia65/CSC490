@@ -293,8 +293,6 @@ export default function Auth() {
       {/* ── Hero (desktop) ── */}
       <div style={{flex:1,position:"relative",overflow:"hidden",display:"none",alignSelf:isMob?"auto":"stretch"}} id="auth-lp">
         <style>{`
-          #auth-lp{position:relative}
-          #auth-lp::before{
             content:"";
             position:absolute;inset:0;pointer-events:none;z-index:0;
             background-image:
@@ -347,7 +345,6 @@ export default function Auth() {
 
         <style>{`
           @media(min-width:960px){
-            #auth-hero-mark{display:flex!important;align-items:center;justify-content:center}
           }
         `}</style>
 

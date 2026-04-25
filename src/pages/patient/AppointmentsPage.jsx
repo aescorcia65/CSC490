@@ -5,7 +5,6 @@ import {
   Calendar,
   CalendarCheck,
   Check,
-  ChevronDown,
   Clock,
   Info,
   Loader2,
@@ -16,6 +15,7 @@ import {
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { careTeamDoctorEntries } from "../../lib/careTeam";
 
 const PRIMARY = "var(--pl)";
 const SURFACE = "var(--s1)";
@@ -96,7 +96,11 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const [allAppts, setAllAppts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [doctorProfiles, setDoctorProfiles] = useState({});
+  const [bookingSchemaMissing, setBookingSchemaMissing] = useState(false);
   const [primaryDoctorId, setPrimaryDoctorId] = useState(null);
+  const [careTeamDoctorIds, setCareTeamDoctorIds] = useState([]);
+  const [linkedDoctorIds, setLinkedDoctorIds] = useState([]);
+  const [bookingDoctorId, setBookingDoctorId] = useState(null);
   const [tab, setTab] = useState(TAB.UPCOMING);
 
   const [rescheduleForId, setRescheduleForId] = useState(null);
@@ -105,10 +109,13 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
   const [bookOpen, setBookOpen] = useState(false);
   const [bookSelected, setBookSelected] = useState(null);
+  const [bookVisitMode, setBookVisitMode] = useState("in_person");
   const [bookBusy, setBookBusy] = useState(false);
   const [bookErr, setBookErr] = useState("");
+  const [bookNotice, setBookNotice] = useState("");
 
   const [calendarMonth, setCalendarMonth] = useState(() => new Date());
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [expandedRequestId, setExpandedRequestId] = useState(null);
   const autoExpandRescheduleRef = useRef(false);
 
@@ -131,10 +138,25 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     setLoading(true);
     supabase
       .from("profiles")
-      .select("primary_doctor_id")
+      .select("primary_doctor_id,care_team")
       .eq("id", userId)
       .single()
-      .then(({ data: prof }) => setPrimaryDoctorId(prof?.primary_doctor_id || null));
+      .then(({ data: prof }) => {
+        const nextPrimary = prof?.primary_doctor_id || null;
+        setPrimaryDoctorId(nextPrimary);
+        const teamIds = careTeamDoctorEntries(prof).map((e) => e.doctorId).filter(Boolean);
+        setCareTeamDoctorIds([...new Set(teamIds)]);
+        setBookingDoctorId(nextPrimary);
+      });
+    supabase
+      .from("doctor_patients")
+      .select("doctor_id")
+      .eq("patient_id", userId)
+      .then(({ data }) => {
+        const ids = [...new Set((data || []).map((r) => r.doctor_id).filter(Boolean))];
+        setLinkedDoctorIds(ids);
+        setBookingDoctorId((prev) => prev || ids[0] || null);
+      });
     refresh().finally(() => setLoading(false));
 
     const ch = supabase
@@ -149,23 +171,84 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   useEffect(() => {
     const ids = [...new Set(allAppts.map((a) => a.doctor_id).filter(Boolean))];
     if (primaryDoctorId) ids.push(primaryDoctorId);
+    if (careTeamDoctorIds.length) ids.push(...careTeamDoctorIds);
+    if (linkedDoctorIds.length) ids.push(...linkedDoctorIds);
     const uniq = [...new Set(ids)];
-    if (!uniq.length) {
-      setDoctorProfiles({});
-      return;
-    }
-    supabase
-      .from("profiles")
-      .select("id,first_name,last_name,specialty,clinic_name,booking_availability")
-      .in("id", uniq)
-      .then(({ data }) => {
-        const m = {};
-        (data || []).forEach((d) => {
-          m[d.id] = d;
+    (async () => {
+      let rpcDoctors = [];
+      const rpcRes = await supabase.rpc("get_patient_booking_doctors", { p_patient_id: userId });
+      if (!rpcRes.error) {
+        rpcDoctors = rpcRes.data || [];
+      }
+      const loadProfiles = async (idList) => {
+        if (!idList.length) return [];
+        const withAvail = await supabase
+          .from("profiles")
+          .select("id,first_name,last_name,specialty,clinic_name,booking_availability")
+          .in("id", idList);
+        if (withAvail.error) {
+          const missingAvail = String(withAvail.error.message || "").toLowerCase().includes("booking_availability");
+          if (missingAvail) {
+            setBookingSchemaMissing(true);
+            const fallback = await supabase
+              .from("profiles")
+              .select("id,first_name,last_name,specialty,clinic_name")
+              .in("id", idList);
+            return fallback.data || [];
+          }
+          setBookingSchemaMissing(false);
+          return [];
+        }
+        setBookingSchemaMissing(false);
+        return withAvail.data || [];
+      };
+
+      const loadGlobalDoctorsWithSlots = async () => {
+        const rows = await supabase
+          .from("profiles")
+          .select("id,first_name,last_name,specialty,clinic_name,booking_availability");
+        if (rows.error) return [];
+        return (rows.data || []).filter((d) => {
+          const b = parseBookingAvailability(d.booking_availability);
+          return Object.values(b.slots || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
         });
-        setDoctorProfiles(m);
+      };
+
+      let data = await loadProfiles(uniq);
+      if (rpcDoctors.length) {
+        const byId = {};
+        [...data, ...rpcDoctors].forEach((d) => {
+          byId[d.id] = d;
+        });
+        data = Object.values(byId);
+      }
+      const linkedHasSlots = data.some((d) => {
+        const b = parseBookingAvailability(d.booking_availability);
+        return Object.values(b.slots || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
       });
-  }, [allAppts, primaryDoctorId]);
+
+      if (!uniq.length || (!linkedHasSlots && !bookingSchemaMissing)) {
+        const global = await loadGlobalDoctorsWithSlots();
+        if (global.length) {
+          const byId = {};
+          [...data, ...global].forEach((d) => {
+            byId[d.id] = d;
+          });
+          data = Object.values(byId);
+        }
+      }
+
+      const m = {};
+      (data || []).forEach((d) => {
+        m[d.id] = d;
+      });
+      setDoctorProfiles(m);
+      const idsLoaded = Object.keys(m);
+      if (idsLoaded.length) {
+        setBookingDoctorId((prev) => (prev && m[prev] ? prev : (primaryDoctorId && m[primaryDoctorId] ? primaryDoctorId : idsLoaded[0])));
+      }
+    })();
+  }, [allAppts, primaryDoctorId, careTeamDoctorIds, linkedDoctorIds, userId]);
 
   const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
@@ -216,7 +299,44 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const primaryDoc = primaryAppt ? doctorProfiles[primaryAppt.doctor_id] : null;
   const primaryBooking = primaryDoc ? parseBookingAvailability(primaryDoc.booking_availability) : { timezone: "America/New_York", slots: {} };
 
-  const bookDoc = primaryDoctorId ? doctorProfiles[primaryDoctorId] : null;
+  const doctorsWithSlots = useMemo(() => {
+    return Object.values(doctorProfiles)
+      .map((doc) => {
+        const booking = parseBookingAvailability(doc.booking_availability);
+        const slotCount = Object.entries(booking.slots || {}).reduce((sum, [dateKey, arr]) => {
+          if (dateKey < todayStr) return sum;
+          return sum + (Array.isArray(arr) ? arr.length : 0);
+        }, 0);
+        return { ...doc, slotCount };
+      })
+      .filter((doc) => doc.slotCount > 0);
+  }, [doctorProfiles, todayStr]);
+  const slotsPreviewByDoctor = useMemo(() => {
+    return doctorsWithSlots
+      .map((doc) => {
+        const booking = parseBookingAvailability(doc.booking_availability);
+        const preview = [];
+        Object.keys(booking.slots || {})
+          .filter((dateKey) => dateKey >= todayStr)
+          .sort()
+          .forEach((dateKey) => {
+            const times = Array.isArray(booking.slots[dateKey]) ? booking.slots[dateKey] : [];
+            times.forEach((tm) => preview.push({ date: dateKey, time: normTime(tm) }));
+          });
+        return { doctor: doc, slots: preview.slice(0, 8) };
+      })
+      .filter((row) => row.slots.length > 0);
+  }, [doctorsWithSlots, todayStr]);
+
+  useEffect(() => {
+    if (!bookOpen) return;
+    const hasCurrent = bookingDoctorId && doctorsWithSlots.some((d) => d.id === bookingDoctorId);
+    if (hasCurrent) return;
+    const preferred = primaryDoctorId && doctorsWithSlots.some((d) => d.id === primaryDoctorId) ? primaryDoctorId : null;
+    setBookingDoctorId(preferred || doctorsWithSlots[0]?.id || primaryDoctorId || null);
+  }, [bookOpen, doctorsWithSlots, bookingDoctorId, primaryDoctorId]);
+
+  const bookDoc = bookingDoctorId ? doctorProfiles[bookingDoctorId] : null;
   const bookBooking = bookDoc ? parseBookingAvailability(bookDoc.booking_availability) : { timezone: "America/New_York", slots: {} };
 
   const rescheduleAppt = rescheduleForId ? allAppts.find((a) => a.id === rescheduleForId) : null;
@@ -227,16 +347,16 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const activeDoctor = rescheduleAppt ? rescheduleDoc : primaryDoc;
 
   const slotDateKeys = useMemo(() => {
-    const keys = Object.keys(activeBooking.slots || {}).filter((d) => Array.isArray(activeBooking.slots[d]) && activeBooking.slots[d].length > 0);
+    const keys = Object.keys(activeBooking.slots || {}).filter((d) => d >= todayStr && Array.isArray(activeBooking.slots[d]) && activeBooking.slots[d].length > 0);
     keys.sort();
     return keys;
-  }, [activeBooking.slots]);
+  }, [activeBooking.slots, todayStr]);
 
   const bookSlotDateKeys = useMemo(() => {
-    const keys = Object.keys(bookBooking.slots || {}).filter((d) => Array.isArray(bookBooking.slots[d]) && bookBooking.slots[d].length > 0);
+    const keys = Object.keys(bookBooking.slots || {}).filter((d) => d >= todayStr && Array.isArray(bookBooking.slots[d]) && bookBooking.slots[d].length > 0);
     keys.sort();
     return keys;
-  }, [bookBooking.slots]);
+  }, [bookBooking.slots, todayStr]);
 
   useEffect(() => {
     if (!rescheduleForId) return;
@@ -246,9 +366,18 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
   useEffect(() => {
     if (!bookOpen) return;
+    const selectedDate = bookSelected?.date;
+    const selectedTimes = selectedDate ? bookBooking.slots[selectedDate] : null;
+    if (selectedDate && Array.isArray(selectedTimes) && selectedTimes.length > 0) {
+      const safeTime = normTime(bookSelected?.time);
+      const fallback = normTime(selectedTimes[0]);
+      const nextTime = selectedTimes.map(normTime).includes(safeTime) ? safeTime : fallback;
+      setBookSelected((prev) => (prev?.date === selectedDate && prev?.time === nextTime ? prev : { date: selectedDate, time: nextTime }));
+      return;
+    }
     const first = bookSlotDateKeys[0];
     setBookSelected(first ? { date: first, time: normTime(bookBooking.slots[first][0]) } : null);
-  }, [bookOpen, bookSlotDateKeys, bookBooking.slots]);
+  }, [bookOpen, bookSlotDateKeys, bookBooking.slots, bookSelected]);
 
   const calendarMarkers = useMemo(() => {
     const m = { confirmed: new Set(), pending: new Set() };
@@ -262,6 +391,18 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     }
     return m;
   }, [allAppts]);
+
+  const selectedDateAppointments = useMemo(() => {
+    const rows = allAppts.filter((a) => a.date === selectedCalendarDate);
+    rows.sort((a, b) => apptSortKey(a).localeCompare(apptSortKey(b)));
+    return rows;
+  }, [allAppts, selectedCalendarDate]);
+
+  useEffect(() => {
+    if (!bookNotice) return;
+    const t = setTimeout(() => setBookNotice(""), 8000);
+    return () => clearTimeout(t);
+  }, [bookNotice]);
 
   useEffect(() => {
     if (loading || autoExpandRescheduleRef.current || tab !== TAB.UPCOMING) return;
@@ -277,28 +418,61 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     }
   }, [loading, tab, upcomingConfirmed, doctorProfiles]);
 
-  async function confirmReschedule() {
+  async function submitRescheduleRequest() {
     if (!rescheduleAppt || !selectedSlot?.date || !selectedSlot?.time || rescheduleBusy) return;
     if (!slotAllowed(activeBooking.slots, selectedSlot.date, selectedSlot.time)) return;
     setRescheduleBusy(true);
+    const reqTime = selectedSlot.time.length === 5 ? `${selectedSlot.time}:00` : selectedSlot.time;
     await supabase
       .from("appointments")
       .update({
-        date: selectedSlot.date,
-        time: selectedSlot.time.length === 5 ? `${selectedSlot.time}:00` : selectedSlot.time,
-        status: "scheduled",
-        reschedule_request: null,
+        status: "rescheduled",
+        reschedule_request: { date: selectedSlot.date, time: reqTime },
         updated_at: new Date().toISOString(),
       })
       .eq("id", rescheduleAppt.id);
+    await supabase
+      .from("notifications")
+      .insert({
+        user_id: rescheduleAppt.doctor_id,
+        type: "general",
+        title: "Reschedule request",
+        body: `A patient requested to move an appointment to ${new Date(`${selectedSlot.date}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} at ${format12hFromTime(reqTime)}.`,
+        related_id: rescheduleAppt.id,
+      })
+      .catch(() => {});
     setRescheduleBusy(false);
     setRescheduleForId(null);
     setSelectedSlot(null);
+    setTab(TAB.REQUESTS);
+    setExpandedRequestId(rescheduleAppt.id);
     await refresh();
   }
 
   async function cancelAppointment(appt) {
     await supabase.from("appointments").update({ status: "cancelled", updated_at: new Date().toISOString() }).eq("id", appt.id);
+    const cancelLabel = new Date(`${appt.date}T${normTime(appt.time) || "00:00:00"}`).toLocaleString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const cancelNotifRes = await supabase.from("notifications").insert({
+      user_id: appt.doctor_id,
+      type: "general",
+      title: "Appointment cancelled",
+      body: `A patient cancelled an appointment scheduled for ${cancelLabel}.`,
+      related_id: appt.id,
+    });
+    if (cancelNotifRes.error) {
+      await supabase.from("patient_messages").insert({
+        sender_id: userId,
+        recipient_id: appt.doctor_id,
+        body: `Appointment cancelled: ${appt.type || "Visit"} on ${cancelLabel}.`,
+      }).catch(() => {});
+    }
+    setAllAppts((prev) => prev.map((a) => (a.id === appt.id ? { ...a, status: "cancelled" } : a)));
     await refresh();
     if (rescheduleForId === appt.id) {
       setRescheduleForId(null);
@@ -307,7 +481,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   }
 
   async function bookAppointment() {
-    if (!userId || !primaryDoctorId || bookBusy) return;
+    if (!userId || !bookingDoctorId || bookBusy) return;
     if (!bookSelected?.date || !bookSelected?.time) {
       setBookErr("Select an available time.");
       return;
@@ -318,23 +492,53 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     }
     setBookBusy(true);
     setBookErr("");
-    const { error } = await supabase.from("appointments").insert({
+    setBookNotice("");
+    const visitType = bookVisitMode === "virtual" ? "Virtual Visit" : "In-person Visit";
+    const bookingTime = bookSelected.time.length === 5 ? `${bookSelected.time}:00` : bookSelected.time;
+    const { data: createdAppt, error } = await supabase.from("appointments").insert({
       patient_id: userId,
-      doctor_id: primaryDoctorId,
+      doctor_id: bookingDoctorId,
       date: bookSelected.date,
-      time: bookSelected.time.length === 5 ? `${bookSelected.time}:00` : bookSelected.time,
-      type: "Follow-up",
+      time: bookingTime,
+      type: visitType,
       notes: null,
       status: "scheduled",
-    });
+    }).select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request").single();
     setBookBusy(false);
     if (error) {
       setBookErr(error.message || "Could not book. Check your care team in Settings.");
       return;
     }
+    const apptLabel = new Date(`${bookSelected.date}T${bookingTime}`).toLocaleString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const notifRes = await supabase.from("notifications").insert({
+      user_id: bookingDoctorId,
+      type: "general",
+      title: "New appointment booked",
+      body: `A patient booked a ${visitType.toLowerCase()} for ${apptLabel}.`,
+    });
+    if (notifRes.error) {
+      await supabase.from("patient_messages").insert({
+        sender_id: userId,
+        recipient_id: bookingDoctorId,
+        body: `Appointment booked: ${visitType} on ${apptLabel}.`,
+      }).catch(() => {});
+    }
     setBookOpen(false);
+    setTab(TAB.UPCOMING);
+    setCalendarMonth(new Date(`${bookSelected.date}T12:00:00`));
+    setSelectedCalendarDate(bookSelected.date);
     setBookSelected(null);
-    await refresh();
+    setBookVisitMode("in_person");
+    if (createdAppt) {
+      setAllAppts((prev) => (prev.some((a) => a.id === createdAppt.id) ? prev : [...prev, createdAppt]));
+    }
+    setBookNotice(`Successfully booked for ${apptLabel}.`);
   }
 
   const font = "'Inter', 'DM Sans', system-ui, -apple-system, sans-serif";
@@ -348,7 +552,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   };
 
   const tabRow = (
-    <div style={{ display: "flex", alignItems: "center", gap: 0, borderBottom: `1px solid ${BORDER}`, marginBottom: 20 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 0, borderBottom: `1px solid ${BORDER}`, marginBottom: 20, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       {[
         { id: TAB.UPCOMING, label: "Upcoming" },
         { id: TAB.PAST, label: "Past" },
@@ -363,18 +567,20 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             onClick={() => selectTab(t.id)}
             style={{
               position: "relative",
-              padding: "12px 18px",
+              padding: isMob ? "11px 14px" : "12px 18px",
               margin: 0,
               border: "none",
               background: "transparent",
               cursor: "pointer",
               fontFamily: font,
-              fontSize: 14,
+              fontSize: isMob ? 13 : 14,
               fontWeight: on ? 600 : 500,
               color: on ? PRIMARY : TEXT_MUTED,
               display: "inline-flex",
               alignItems: "center",
               gap: 8,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
             }}
           >
             {t.label}
@@ -425,11 +631,6 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           <div>
             <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: TEXT, fontFamily: font, letterSpacing: "-0.02em" }}>{title}</h3>
             <p style={{ margin: "6px 0 0", fontSize: 13, color: TEXT_MUTED, fontFamily: font, maxWidth: 520 }}>{subtitle}</p>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>
-            <span style={{ fontWeight: 500 }}>Time zone:</span>
-            <span style={{ fontWeight: 600, color: TEXT }}>{booking.timezone}</span>
-            <ChevronDown size={14} style={{ opacity: 0.5 }} aria-hidden />
           </div>
         </div>
 
@@ -678,7 +879,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           </div>
         </div>
 
-        {rescheduleForId === appt.id ? renderReschedulePanel(activeBooking, selectedSlot, setSelectedSlot, confirmReschedule, rescheduleBusy, "Confirm reschedule", {}) : null}
+        {rescheduleForId === appt.id ? renderReschedulePanel(activeBooking, selectedSlot, setSelectedSlot, submitRescheduleRequest, rescheduleBusy, "Send request", {}) : null}
       </div>
     );
   }
@@ -770,6 +971,30 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     );
   }
 
+  function handleCalendarDateClick(dateStr) {
+    setSelectedCalendarDate(dateStr);
+    const requestHit = requestList.find((a) => a.date === dateStr);
+    if (requestHit) {
+      setTab(TAB.REQUESTS);
+      setExpandedRequestId(requestHit.id);
+      return;
+    }
+    const confirmedHit = allAppts.find((a) => a.date === dateStr && (a.status === "scheduled" || a.status === "completed"));
+    if (confirmedHit) {
+      setTab(confirmedHit.date < todayStr ? TAB.PAST : TAB.UPCOMING);
+      setExpandedRequestId(null);
+      return;
+    }
+    const cancelledHit = allAppts.find((a) => a.date === dateStr && a.status === "cancelled");
+    if (cancelledHit) {
+      setTab(TAB.CANCELLED);
+      setExpandedRequestId(null);
+      return;
+    }
+    setTab(TAB.UPCOMING);
+    setExpandedRequestId(null);
+  }
+
   function miniCalendar() {
     const y = calendarMonth.getFullYear();
     const mo = calendarMonth.getMonth();
@@ -804,14 +1029,15 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             const isToday = ds === todayStr;
             const hasC = calendarMarkers.confirmed.has(ds);
             const hasP = calendarMarkers.pending.has(ds);
+            const isSelected = selectedCalendarDate === ds;
             const isPrimary = primaryAppt && primaryAppt.date === ds;
             const todayFill = isToday;
-            const apptRing = isPrimary && !todayFill;
+            const apptRing = (isPrimary || isSelected) && !todayFill;
             return (
               <button
                 key={ds}
                 type="button"
-                onClick={() => setCalendarMonth(new Date(y, mo, d))}
+                onClick={() => handleCalendarDateClick(ds)}
                 style={{
                   aspectRatio: "1",
                   maxHeight: 36,
@@ -819,7 +1045,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                   border: todayFill ? "none" : apptRing ? `2px solid ${PRIMARY}` : "1px solid transparent",
                   background: todayFill ? PRIMARY : apptRing ? "var(--pd)" : "transparent",
                   fontSize: 12,
-                  fontWeight: isPrimary || isToday ? 700 : 600,
+                  fontWeight: isPrimary || isToday || isSelected ? 700 : 600,
                   color: todayFill ? "#fff" : TEXT,
                   cursor: "pointer",
                   fontFamily: font,
@@ -854,27 +1080,77 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     );
   }
 
+  function selectedDateCard() {
+    const label = new Date(`${selectedCalendarDate}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+    return (
+      <div style={{ background: SURFACE, borderRadius: 12, border: `1px solid ${BORDER}`, boxShadow: SHADOW, padding: 16, marginTop: 12 }}>
+        <p style={{ margin: "0 0 2px", fontSize: 12, fontWeight: 700, color: TEXT_MUTED, fontFamily: font, letterSpacing: "0.04em", textTransform: "uppercase" }}>Selected date</p>
+        <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: TEXT, fontFamily: font }}>{label}</p>
+        {selectedDateAppointments.length === 0 ? (
+          <p style={{ margin: "10px 0 0", fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>No appointments on this date.</p>
+        ) : (
+          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+            {selectedDateAppointments.map((a) => {
+              const doc = doctorProfiles[a.doctor_id];
+              const statusColor = a.status === "cancelled" ? "#ef4444" : a.status === "rescheduled" ? "#d97706" : "#10b981";
+              return (
+                <div key={a.id} style={{ border: `1px solid ${BORDER}`, borderRadius: 10, background: "var(--s2)", padding: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: TEXT, fontFamily: font }}>{a.type || "Visit"}</p>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: statusColor, textTransform: "capitalize", fontFamily: font }}>{a.status}</span>
+                  </div>
+                  <p style={{ margin: "5px 0 0", fontSize: 12, color: TEXT_MUTED, fontFamily: font }}>
+                    {format12hFromTime(a.time)} · Dr. {doctorDisplayName(doc)}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function summaryCard() {
     const rows = [
-      { label: "Upcoming", n: counts.upcoming, Icon: CalendarCheck, iconColor: "#10b981", iconBg: "rgba(16, 185, 129, 0.12)" },
-      { label: "Pending", n: counts.pending, Icon: Clock, iconColor: "#f59e0b", iconBg: "rgba(245, 158, 11, 0.14)" },
-      { label: "Cancelled", n: counts.cancelled, Icon: Ban, iconColor: "#ef4444", iconBg: "rgba(239, 68, 68, 0.1)" },
+      { label: "Upcoming", n: counts.upcoming, Icon: CalendarCheck, iconColor: "#10b981", iconBg: "rgba(16, 185, 129, 0.12)", tab: TAB.UPCOMING },
+      { label: "Pending", n: counts.pending, Icon: Clock, iconColor: "#f59e0b", iconBg: "rgba(245, 158, 11, 0.14)", tab: TAB.REQUESTS },
+      { label: "Cancelled", n: counts.cancelled, Icon: Ban, iconColor: "#ef4444", iconBg: "rgba(239, 68, 68, 0.1)", tab: TAB.CANCELLED },
     ];
     return (
       <div style={{ background: SURFACE, borderRadius: 12, border: `1px solid ${BORDER}`, boxShadow: SHADOW, padding: 18, marginTop: 16 }}>
         <p style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 700, color: TEXT, fontFamily: font }}>Appointment summary</p>
         {rows.map((row, i) => {
           const Ic = row.Icon;
+          const active = tab === row.tab;
           return (
-            <div key={row.label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 0", borderTop: i === 0 ? "none" : `1px solid ${BORDER}` }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>
-                <span style={{ width: 32, height: 32, borderRadius: 10, background: row.iconBg, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-                  <Ic size={16} strokeWidth={2} color={row.iconColor} />
+            <button
+              key={row.label}
+              type="button"
+              onClick={() => selectTab(row.tab)}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "12px 0",
+                borderTop: i === 0 ? "none" : `1px solid ${BORDER}`,
+                borderLeft: "none",
+                borderRight: "none",
+                borderBottom: "none",
+                background: "transparent",
+                cursor: "pointer",
+                borderRadius: 0,
+              }}
+            >
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 13, color: active ? TEXT : TEXT_MUTED, fontFamily: font, fontWeight: active ? 700 : 500 }}>
+                <span style={{ width: 32, height: 32, borderRadius: 10, background: active ? "var(--pd)" : row.iconBg, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                  <Ic size={16} strokeWidth={2} color={active ? PRIMARY : row.iconColor} />
                 </span>
                 {row.label}
               </span>
-              <span style={{ fontSize: 15, fontWeight: 700, color: TEXT, fontFamily: font }}>{row.n}</span>
-            </div>
+              <span style={{ fontSize: 15, fontWeight: 700, color: active ? PRIMARY : TEXT, fontFamily: font }}>{row.n}</span>
+            </button>
           );
         })}
       </div>
@@ -941,9 +1217,78 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     );
   }
 
+  function renderUpcomingExtras() {
+    if (upcomingConfirmed.length <= 1) return null;
+    return (
+      <div style={{ background: SURFACE, borderRadius: 14, border: `1px solid ${BORDER}`, boxShadow: SHADOW, padding: 16, marginTop: 14 }}>
+        <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: TEXT, fontFamily: font }}>More upcoming appointments</h3>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {upcomingConfirmed.slice(1).map((a) => {
+            const doc = doctorProfiles[a.doctor_id];
+            return (
+              <div key={a.id} style={{ padding: 12, borderRadius: 10, border: `1px solid ${BORDER}`, background: "var(--s2)" }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: TEXT, fontFamily: font }}>{a.type || "Visit"}</p>
+                <p style={{ margin: "6px 0 0", fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>
+                  {new Date(`${a.date}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} · {format12hFromTime(a.time)} · Dr. {doctorDisplayName(doc)}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  function renderAvailableSlotsSection() {
+    return (
+      <div style={{ background: SURFACE, borderRadius: 14, border: `1px solid ${BORDER}`, boxShadow: SHADOW, padding: isMob ? 14 : 16, marginTop: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: TEXT, fontFamily: font }}>Available booking slots</h3>
+          <span style={{ color: TEXT_MUTED, fontSize: 12, fontFamily: font }}>
+            {slotsPreviewByDoctor.reduce((n, row) => n + row.slots.length, 0)} slots shown
+          </span>
+        </div>
+        {bookingSchemaMissing ? (
+          <p style={{ margin: 0, color: "#dc2626", fontSize: 13, fontFamily: font }}>Booking slots are not available yet because the database migration is not applied.</p>
+        ) : slotsPreviewByDoctor.length === 0 ? (
+          <p style={{ margin: 0, color: TEXT_MUTED, fontSize: 13, fontFamily: font }}>No available slots published yet.</p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {slotsPreviewByDoctor.map((row) => (
+              <div key={row.doctor.id} style={{ border: `1px solid ${BORDER}`, borderRadius: 12, background: "var(--s2)", padding: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <p style={{ margin: 0, color: TEXT, fontSize: 13, fontWeight: 700, fontFamily: font }}>Dr. {doctorDisplayName(row.doctor)}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBookingDoctorId(row.doctor.id);
+                      setBookOpen(true);
+                      setBookErr("");
+                    }}
+                    style={{ padding: "6px 10px", borderRadius: 9, border: "none", background: PRIMARY, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}
+                  >
+                    Book
+                  </button>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {row.slots.map((s) => (
+                    <span key={`${row.doctor.id}-${s.date}-${s.time}`} style={{ padding: "4px 8px", borderRadius: 99, border: `1px solid ${BORDER}`, background: SURFACE, color: TEXT_MUTED, fontSize: 11, fontFamily: font }}>
+                      {new Date(`${s.date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {format12hFromTime(s.time)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const rightCol = (
-    <div style={{ width: isMob ? "100%" : 320, flexShrink: 0 }}>
+    <div style={{ width: isMob ? "100%" : "min(340px,32vw)", flexShrink: 0 }}>
       {miniCalendar()}
+      {selectedDateCard()}
       {summaryCard()}
       {needHelpCard()}
     </div>
@@ -982,11 +1327,17 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             <Plus size={18} strokeWidth={2.5} /> Book appointment
           </button>
         </header>
+        {bookNotice ? (
+          <div style={{ marginBottom: 12, borderRadius: 10, padding: "10px 12px", background: "rgba(16,185,129,.12)", border: "1px solid rgba(16,185,129,.35)", color: "#065f46", fontSize: 13, fontWeight: 600, fontFamily: font }}>
+            {bookNotice}
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", gap: isMob ? 0 : 28, alignItems: "flex-start", flexDirection: isMob ? "column" : "row" }}>
           <main style={{ flex: 1, minWidth: 0 }}>
             {tabRow}
             {infoBanner}
+            {!loading ? renderAvailableSlotsSection() : null}
 
             {loading ? (
               <div style={{ display: "flex", alignItems: "center", gap: 10, color: TEXT_MUTED, padding: 24 }}>
@@ -998,7 +1349,10 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                 {tab === TAB.UPCOMING && (
                   <>
                     {primaryAppt ? (
-                      appointmentMainCard(primaryAppt)
+                      <>
+                        {appointmentMainCard(primaryAppt)}
+                        {renderUpcomingExtras()}
+                      </>
                     ) : (
                       <div style={{ background: SURFACE, borderRadius: 16, border: `1px solid ${BORDER}`, boxShadow: SHADOW, padding: 40, textAlign: "center" }}>
                         <Calendar size={36} color={TEXT_MUTED} style={{ opacity: 0.35, margin: "0 auto 12px" }} />
@@ -1033,6 +1387,11 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           {rightCol}
         </div>
       </div>
+      {bookNotice ? (
+        <div style={{ position: "fixed", top: "calc(12px + env(safe-area-inset-top,0px))", right: 12, zIndex: 200, borderRadius: 10, padding: "10px 12px", background: "rgba(16,185,129,.94)", color: "#fff", fontSize: 13, fontWeight: 700, boxShadow: "0 8px 20px rgba(6,95,70,.28)", maxWidth: isMob ? "92vw" : 420 }}>
+          {bookNotice}
+        </div>
+      ) : null}
 
       <AnimatePresence>
         {bookOpen && (
@@ -1045,12 +1404,61 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
               style={{ background: SURFACE, borderRadius: 18, padding: 24, width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto", border: `1px solid ${BORDER}`, boxShadow: "var(--shadow-modal)" }}
             >
               <h3 style={{ margin: "0 0 6px", fontSize: 20, fontWeight: 700, color: TEXT, fontFamily: font }}>Book appointment</h3>
-              {!primaryDoctorId ? (
+              {!primaryDoctorId && !bookingDoctorId ? (
                 <p style={{ color: TEXT_MUTED, fontSize: 14, fontFamily: font, lineHeight: 1.55 }}>Add a primary doctor under Settings → Care team before booking.</p>
               ) : (
                 <>
                   <p style={{ margin: "0 0 18px", fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>Choose from the times your doctor has made available.</p>
-                  {bookSlotDateKeys.length === 0 ? (
+                  <div style={{ marginBottom: 12 }}>
+                    <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: TEXT_MUTED, marginBottom: 6, fontFamily: font }}>Visit type</label>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      {[
+                        { id: "in_person", label: "In person" },
+                        { id: "virtual", label: "Virtual" },
+                      ].map((opt) => {
+                        const on = bookVisitMode === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setBookVisitMode(opt.id)}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: 10,
+                              border: on ? `2px solid ${PRIMARY}` : `1px solid ${BORDER}`,
+                              background: on ? "var(--pd)" : SURFACE,
+                              color: on ? PRIMARY : TEXT,
+                              fontFamily: font,
+                              fontSize: 13,
+                              fontWeight: 600,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {doctorsWithSlots.length > 1 ? (
+                    <div style={{ marginBottom: 12 }}>
+                      <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: TEXT_MUTED, marginBottom: 6, fontFamily: font }}>Doctor</label>
+                      <select
+                        value={bookingDoctorId || ""}
+                        onChange={(e) => setBookingDoctorId(e.target.value || null)}
+                        style={{ width: "100%", borderRadius: 10, border: `1px solid ${BORDER}`, background: SURFACE, color: TEXT, fontFamily: font, fontSize: 13, padding: "8px 10px" }}
+                      >
+                        {doctorsWithSlots.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            Dr. {doctorDisplayName(d)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
+                  {bookingSchemaMissing ? (
+                    <p style={{ margin: 0, fontSize: 14, color: "#dc2626", fontFamily: font }}>Booking slots are not available yet because the database migration is not applied. Run migration 009 and refresh.</p>
+                  ) : bookSlotDateKeys.length === 0 ? (
                     <p style={{ margin: 0, fontSize: 14, color: TEXT_MUTED, fontFamily: font }}>No published slots yet. Ask your care team to share availability.</p>
                   ) : (
                     renderReschedulePanel(bookBooking, bookSelected, setBookSelected, bookAppointment, bookBusy, "Confirm booking", {
