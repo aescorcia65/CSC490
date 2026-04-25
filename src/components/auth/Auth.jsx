@@ -293,6 +293,7 @@ export default function Auth() {
       {/* ── Hero (desktop) ── */}
       <div style={{flex:1,position:"relative",overflow:"hidden",display:"none",alignSelf:isMob?"auto":"stretch"}} id="auth-lp">
         <style>{`
+          #auth-lp::before{
             content:"";
             position:absolute;inset:0;pointer-events:none;z-index:0;
             background-image:
@@ -300,7 +301,7 @@ export default function Auth() {
               linear-gradient(90deg, ${L?"rgba(37,99,235,.055)":"rgba(96,165,250,.06)"} 1px, transparent 1px);
             background-size:28px 28px;
           }
-          @media(min-width:960px){#auth-lp{display:flex!important;flex-direction:column;justify-content:flex-start;padding:max(22px, env(safe-area-inset-top)) 64px max(56px, env(safe-area-inset-bottom))}}
+          @media(min-width:960px){#auth-lp{display:flex!important;flex-direction:column;justify-content:flex-start;padding:max(36px, env(safe-area-inset-top)) 64px max(84px, env(safe-area-inset-bottom))}}
         `}</style>
 
         <div aria-hidden style={{
@@ -344,7 +345,9 @@ export default function Auth() {
         </div>
 
         <style>{`
+          #auth-hero-mark{display:none}
           @media(min-width:960px){
+            #auth-hero-mark{display:flex!important;width:clamp(250px, 27vw, 360px)}
           }
         `}</style>
 
@@ -394,11 +397,11 @@ export default function Auth() {
             }}>beautifully organised.</span>
           </h1>
 
-          <p style={{fontSize:16,color:L?"#475569":"#cbd5e1",lineHeight:1.75,maxWidth:440,margin:"0 0 clamp(48px, 7.5vh, 92px)",fontWeight:400}}>
+          <p style={{fontSize:16,color:L?"#475569":"#cbd5e1",lineHeight:1.75,maxWidth:440,margin:"0 0 clamp(72px, 10vh, 128px)",fontWeight:400}}>
             Medications, reminders, and AI health guidance — all in one place.
           </p>
 
-          <div style={{display:"flex",flexWrap:"wrap",gap:"24px 16px",marginBottom:0}}>
+          <div style={{display:"flex",flexWrap:"wrap",gap:"28px 16px",marginBottom:0}}>
             {[
               { I:Bell, t:"Smart Reminders", c:"#2563eb", bg:"rgba(37,99,235,.1)" },
               { I:Brain, t:"AI Health Advisor", c:"#0284c7", bg:"rgba(2,132,199,.1)" },
