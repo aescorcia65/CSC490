@@ -34,7 +34,7 @@
         document.documentElement.classList.toggle('theme-dark', dark);
         document.documentElement.classList.toggle('theme-light', !dark);
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
-        document.body.className = dark ? '' : 'light';
+        if (document.body) document.body.className = dark ? '' : 'light';
         try {
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute('content', dark ? '#1e293b' : '#2563eb');
