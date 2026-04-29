@@ -814,41 +814,54 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     }
     let cancelled = false;
     (async () => {
-      const entries = await Promise.all(
-        conversationItems.map(async (peer) => {
+      const peerIds = conversationItems.map((p) => p.id);
+      const [{ data: unreadRows, error: unreadErr }, ...latestResults] = await Promise.all([
+        supabase
+          .from("patient_messages")
+          .select("id, sender_id")
+          .eq("recipient_id", userId)
+          .is("read_at", null),
+        ...conversationItems.map((peer) => {
           const q = `and(sender_id.eq.${userId},recipient_id.eq.${peer.id}),and(sender_id.eq.${peer.id},recipient_id.eq.${userId})`;
-          const [{ data: latest }, { count }] = await Promise.all([
-            supabase
-              .from("patient_messages")
-              .select("*")
-              .or(q)
-              .order("created_at", { ascending: false })
-              .limit(1),
-            supabase
-              .from("patient_messages")
-              .select("id", { count: "exact", head: true })
-              .eq("recipient_id", userId)
-              .eq("sender_id", peer.id)
-              .is("read_at", null),
-          ]);
-          const row = latest?.[0];
-          return [
-            peer.id,
-            {
-              preview: previewText(row) || `Start a secure chat with ${peer.name}.`,
-              time: row?.created_at || null,
-              unread: count || 0,
-            },
-          ];
-        })
-      );
+          return supabase
+            .from("patient_messages")
+            .select("*")
+            .or(q)
+            .order("created_at", { ascending: false })
+            .limit(1);
+        }),
+      ]);
       if (cancelled) return;
+      if (unreadErr) console.error("[PatientMessages] unread query failed:", unreadErr.message);
+      const unreadBySender = {};
+      (unreadRows || []).forEach((r) => {
+        unreadBySender[r.sender_id] = (unreadBySender[r.sender_id] || 0) + 1;
+      });
+      const entries = conversationItems.map((peer, i) => {
+        const row = latestResults[i]?.data?.[0];
+        return [
+          peer.id,
+          {
+            preview: previewText(row) || `Start a secure chat with ${peer.name}.`,
+            time: row?.created_at || null,
+            unread: unreadBySender[peer.id] || 0,
+          },
+        ];
+      });
       setThreadMeta(Object.fromEntries(entries));
     })();
     return () => {
       cancelled = true;
     };
   }, [userId, conversationItems, messages.length, threadMetaTick]);
+
+  // Fallback: periodically refresh unread counts for all conversations in case
+  // realtime events are delayed or not firing for non-active peers.
+  useEffect(() => {
+    if (!userId || !conversationItems.length) return;
+    const id = setInterval(() => setThreadMetaTick((n) => n + 1), 15000);
+    return () => clearInterval(id);
+  }, [userId, conversationItems.length]);
 
   useEffect(() => {
     if (!userId || !activePeer?.id) return;
@@ -1137,6 +1150,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
               .map((item) => {
                 const active = activePeer?.id === item.id;
                 const meta = threadMeta[item.id] || {};
+                const isOnline = !!onlineUsers[item.id];
                 return (
                   <button
                     key={item.id}
@@ -1151,40 +1165,51 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                     style={{
                       width: "100%",
                       textAlign: "left",
-                      padding: isPhone ? "10px 10px" : "9px 9px",
+                      padding: "12px 14px",
                       minHeight: isPhone ? 56 : 52,
-                      borderRadius: 12,
-                      border: active ? "1px solid rgba(37,99,235,.3)" : "1px solid transparent",
-                      background: active ? "rgba(37,99,235,.12)" : hoverConversationId === item.id ? "rgba(15,23,42,.04)" : "transparent",
+                      borderRadius: 0,
+                      border: "none",
+                      borderBottom: `1px solid var(--b0)`,
+                      borderLeft: `3px solid ${active ? "var(--p)" : meta.unread > 0 ? "var(--p)" : "transparent"}`,
+                      background: active ? "rgba(37,99,235,.07)" : meta.unread > 0 ? "rgba(37,99,235,.03)" : hoverConversationId === item.id ? "rgba(15,23,42,.04)" : "transparent",
                       cursor: "pointer",
                       display: "flex",
                       gap: 10,
                       alignItems: "center",
-                      marginBottom: 2,
+                      marginBottom: 0,
                       fontFamily: "inherit",
+                      transition: "all .15s",
                     }}
                   >
-                    <div style={{ width: 38, height: 38, borderRadius: "50%", background: active ? "var(--pd)" : "var(--s2)", border: `1px solid ${b1}`, display: "grid", placeItems: "center", color: active ? "var(--p)" : t3, fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
-                      {peerInitials(item.name, item.type === "doctor" ? "DR" : "PH")}
+                    <div style={{ position: "relative", flexShrink: 0 }}>
+                      <div style={{ width: 38, height: 38, borderRadius: "50%", background: item.type === "doctor" ? "linear-gradient(135deg,#2563eb,#1d4ed8)" : "linear-gradient(135deg,#7c3aed,#6d28d9)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <span style={{ color: "#fff", fontSize: 13, fontWeight: 800 }}>{peerInitials(item.name, item.type === "doctor" ? "DR" : "PH")}</span>
+                      </div>
+                      <div style={{ position: "absolute", bottom: 1, right: 1, width: 9, height: 9, borderRadius: "50%", background: isOnline ? "#22c55e" : "var(--b1)", border: "2px solid var(--s1)", transition: "background .4s" }} />
                     </div>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                        <p style={{ margin: 0, color: t1, fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 132 }}>{item.name}</p>
-                        <span style={{ color: t3, fontSize: 10, flexShrink: 0 }}>{formatThreadTime(meta.time)}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <p style={{ margin: 0, color: t1, fontSize: 13, fontWeight: meta.unread > 0 ? 800 : 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</p>
+                        <span style={{ display: "inline-block", fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 99, flexShrink: 0, background: item.type === "doctor" ? "rgba(37,99,235,.12)" : "rgba(124,58,237,.12)", color: item.type === "doctor" ? "var(--p)" : "#7c3aed", letterSpacing: ".03em", textTransform: "uppercase" }}>
+                          {item.roleLabel}
+                        </span>
                       </div>
-                      <p style={{ margin: "2px 0 0", color: t3, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.subtitle}</p>
-                      <p style={{ margin: "2px 0 0", color: t3, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta.preview}</p>
+                      <p style={{ margin: "2px 0 0", color: meta.unread > 0 ? "var(--p)" : t3, fontSize: 11, fontWeight: meta.unread > 0 ? 700 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {isOnline ? "Online now" : meta.preview || (item.subtitle && item.subtitle !== item.roleLabel ? item.subtitle : `Chat with ${item.name}`)}
+                      </p>
                     </div>
-                    {meta.unread ? (
-                      <span style={{ minWidth: 18, height: 18, borderRadius: 999, background: "var(--p)", color: "#fff", display: "grid", placeItems: "center", fontSize: 10, fontWeight: 700, padding: "0 4px", flexShrink: 0 }}>
+                    {meta.unread > 0 ? (
+                      <span style={{ background: "var(--p)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "2px 7px", flexShrink: 0, minWidth: 20, textAlign: "center" }}>
                         {meta.unread > 9 ? "9+" : meta.unread}
                       </span>
+                    ) : active ? (
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--p)", flexShrink: 0 }} />
                     ) : null}
                   </button>
                 );
               })}
             {!conversationItems.filter((item) => item.type === peerTab).length ? (
-              <p style={{ color: t3, fontSize: 12, margin: "8px 6px" }}>No conversations available in this tab.</p>
+              <p style={{ color: t3, fontSize: 12, margin: "8px 16px" }}>No conversations available in this tab.</p>
             ) : null}
           </div>
         </section>
