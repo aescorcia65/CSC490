@@ -48,5 +48,5 @@ export function formatChatNotificationPreview(rawBody) {
     if (trimmed.startsWith(`${VIDEO_VISIT_ENDED_PREFIX}|`)) return "Your doctor ended the video visit.";
     return "Video visit update — open Appointments.";
   }
-  return s;
+  return trimmed;
 }
