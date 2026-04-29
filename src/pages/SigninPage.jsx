@@ -1,10 +1,10 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import MarketingLanding from "../components/auth/MarketingLanding";
+import Auth from "../components/auth/Auth";
 import { clearStoredPortalLandingPage } from "../lib/clearStoredPortalLandingPage";
 
-export default function LoginPage() {
+export default function SigninPage() {
   const { user, userRole, onboardingComplete } = useAuth();
   const navigate = useNavigate();
 
@@ -42,5 +42,5 @@ export default function LoginPage() {
     return null;
   }
 
-  return <MarketingLanding variant="full" />;
+  return <Auth authMode="signin" />;
 }

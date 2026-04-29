@@ -49,8 +49,10 @@ export async function playPortalNotificationSound(tones, volume = 0.7) {
   primeOutput(ctx);
   if (ctx.state !== "running") return;
 
-  const v = Math.min(1, Math.max(0.05, Number(volume) || 0.7));
-  const peak = 0.22 * v;
+  const v = Math.min(1, Math.max(0, Number(volume) ?? 0.7));
+  if (v <= 0) return;
+  // Per-oscillator peak: scales with user volume; 100% is clearly loud (was ~0.22 max before).
+  const peak = 0.48 * v;
   const t0 = ctx.currentTime + 0.02;
 
   try {

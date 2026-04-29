@@ -30,7 +30,7 @@ export function resolveInitialIsLight() {
   const ex = readExplicitPreference();
   if (ex === "dark") return false;
   if (ex === "light") return true;
-  return !getSystemPrefersDark();
+  return true;
 }
 
 export function applyDomTheme(isLight) {
@@ -58,7 +58,7 @@ export function getIsLight() {
   const ex = readExplicitPreference();
   if (ex === "dark") return false;
   if (ex === "light") return true;
-  return !getSystemPrefersDark();
+  return true;
 }
 
 export function ThemeProvider({ children }) {
@@ -67,18 +67,6 @@ export function ThemeProvider({ children }) {
     applyDomTheme(light);
     return light;
   });
-
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => {
-      if (readExplicitPreference() != null) return;
-      const light = !mq.matches;
-      applyDomTheme(light);
-      setIsLightState(light);
-    };
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
 
   const setLight = useCallback((wantsLight) => {
     persistExplicitPreference(wantsLight);

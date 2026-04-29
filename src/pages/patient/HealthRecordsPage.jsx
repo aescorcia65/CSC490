@@ -5,6 +5,7 @@ import { supabase } from "../../supabase";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import HealthProfile from "./settings/HealthProfile";
 import EmergencyContact from "./settings/EmergencyContact";
+import { downloadTextAsPdf } from "../../lib/pdfExport";
 
 export default function HealthRecordsPage({ userId }) {
   const isMob = useIsMobile();
@@ -18,14 +19,20 @@ export default function HealthRecordsPage({ userId }) {
       .then(({ data }) => setRx(data || []));
   }, [userId]);
 
-  function downloadSummary(text, filename) {
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+  function downloadPrescriptionPdf(p) {
+    const body = [
+      "Prescription summary",
+      "",
+      `Recorded: ${new Date(p.created_at).toLocaleString()}`,
+      `Status: ${p.status}`,
+      "",
+      "Clinical notes are not included in this file. View the full record in Prescriptions in the portal.",
+    ].join("\n");
+    downloadTextAsPdf({
+      title: "MedTrack — Prescription",
+      body,
+      filename: `prescription-${p.id.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}`,
+    });
   }
 
   return (
@@ -86,8 +93,8 @@ export default function HealthRecordsPage({ userId }) {
               </div>
               <p style={{ color: t3, fontSize: 12, margin: "0 0 8px" }}>Created {new Date(docModal.created_at).toLocaleString()}</p>
               <p style={{ color: t1, fontSize: 13, lineHeight: 1.6, margin: 0 }}>{docModal.notes || "No clinical notes attached to this prescription."}</p>
-              <button type="button" onClick={() => downloadSummary(`Prescription ${docModal.id}\nDate: ${docModal.created_at}\nStatus: ${docModal.status}\n\n${docModal.notes || ""}`, `prescription-${docModal.id.slice(0, 8)}.txt`)} style={{ marginTop: 16, width: "100%", padding: "10px 14px", borderRadius: 11, border: "none", background: "var(--p)", color: "#fff", fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                <Download size={16} /> Download summary
+              <button type="button" onClick={() => downloadPrescriptionPdf(docModal)} style={{ marginTop: 16, width: "100%", padding: "10px 14px", borderRadius: 11, border: "none", background: "var(--p)", color: "#fff", fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                <Download size={16} /> Download PDF
               </button>
             </motion.div>
           </motion.div>

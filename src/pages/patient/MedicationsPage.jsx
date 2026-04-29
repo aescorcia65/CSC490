@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Pill, Pencil, Trash2, AlertCircle, Loader2, Package, History, Info, X, AlertTriangle } from "lucide-react";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
@@ -8,6 +8,7 @@ import { to12h, to12hNoSeconds, formatOverdueDurationMinutes } from "../../lib/u
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { logMedicationTaken, unlogMedicationTaken, doseRowLogged, patchMedDoseToggle, allDoseSlotsLogged } from "../../lib/adherence";
 import { supabase } from "../../supabase";
+import { useAuth } from "../../contexts/AuthContext";
 
 const FDA_LABEL_ENDPOINT = "https://api.fda.gov/drug/label.json";
 
@@ -232,6 +233,7 @@ function FdaLabelSections({ data, t1, t3 }) {
 }
 
 export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userId, focusMedicationId, onConsumedFocus }) {
+  const { loadUserMeds } = useAuth();
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
   const now = new Date();
@@ -262,6 +264,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
   const [refillBusy, setRefillBusy] = useState(null);
   const [refillNotice, setRefillNotice] = useState(null);
   const [refillRequests, setRefillRequests] = useState([]);
+  const doseReloadTimerRef = useRef(null);
   const [history, setHistory] = useState([]);
   const [histLoading, setHistLoading] = useState(false);
   const [detailMed, setDetailMed] = useState(null);
@@ -338,33 +341,67 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
       .then(({ data }) => { setHistory(data || []); setHistLoading(false); });
   }, [userId, meds]);
 
+  const scheduleDoseReload = useCallback(() => {
+    if (!userId) return;
+    if (doseReloadTimerRef.current) clearTimeout(doseReloadTimerRef.current);
+    doseReloadTimerRef.current = setTimeout(() => {
+      doseReloadTimerRef.current = null;
+      void loadUserMeds();
+    }, 1200);
+  }, [userId, loadUserMeds]);
+
+  useEffect(() => () => {
+    if (doseReloadTimerRef.current) clearTimeout(doseReloadTimerRef.current);
+  }, []);
+
   const toggle = useCallback(async (id, slotTime) => {
     const med = meds.find((m) => m.id === id);
     if (!med || slotTime == null || String(slotTime).trim() === "") return;
     const wasLogged = doseRowLogged(med, slotTime);
-    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, !wasLogged) : m)));
-    if (userId) {
-      if (wasLogged) await unlogMedicationTaken(userId, id, slotTime);
-      else await logMedicationTaken(userId, id, slotTime);
+    const turningOn = !wasLogged;
+    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, turningOn) : m)));
+    if (!userId) return;
+    const result = wasLogged
+      ? await unlogMedicationTaken(userId, id, slotTime)
+      : await logMedicationTaken(userId, id, slotTime);
+    if (result.ok) scheduleDoseReload();
+    else {
+      setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, wasLogged) : m)));
+      if (typeof window !== "undefined") {
+        window.alert(`Could not save this dose.\n\n${result.error || "Unknown error."}`);
+      }
     }
-  }, [meds, userId, setMeds]);
+  }, [meds, userId, setMeds, scheduleDoseReload]);
 
   const logDetailPrimary = useCallback(async () => {
     const m = detailMed;
     if (!m || !userId) return;
     if (allDoseSlotsLogged(m)) {
+      const prevSnap = { loggedAllDay: m.loggedAllDay, loggedSlotTimes: [...(m.loggedSlotTimes || [])], taken: m.taken };
       setMeds((ms) => ms.map((x) => (x.id === m.id ? { ...x, loggedAllDay: false, loggedSlotTimes: [], taken: false } : x)));
-      await unlogMedicationTaken(userId, m.id);
+      const unres = await unlogMedicationTaken(userId, m.id);
       setDetailMed((dm) => (dm && dm.id === m.id ? { ...dm, loggedAllDay: false, loggedSlotTimes: [], taken: false } : dm));
+      if (unres.ok) scheduleDoseReload();
+      else {
+        setMeds((ms) => ms.map((x) => (x.id === m.id ? { ...x, loggedAllDay: prevSnap.loggedAllDay, loggedSlotTimes: prevSnap.loggedSlotTimes, taken: prevSnap.taken } : x)));
+        setDetailMed((dm) => (dm && dm.id === m.id ? { ...dm, loggedAllDay: prevSnap.loggedAllDay, loggedSlotTimes: prevSnap.loggedSlotTimes, taken: prevSnap.taken } : dm));
+        if (typeof window !== "undefined") window.alert(`Could not update doses.\n\n${unres.error || "Try again."}`);
+      }
       return;
     }
     const slots = expandDoseTimesForToday(m);
     const next = slots.find((s) => !doseRowLogged(m, s));
     if (!next) return;
     setMeds((ms) => ms.map((x) => (x.id === m.id ? patchMedDoseToggle(x, next, true) : x)));
-    await logMedicationTaken(userId, m.id, next);
+    const logres = await logMedicationTaken(userId, m.id, next);
     setDetailMed((dm) => (dm && dm.id === m.id ? patchMedDoseToggle(dm, next, true) : dm));
-  }, [detailMed, userId, setMeds]);
+    if (logres.ok) scheduleDoseReload();
+    else {
+      setMeds((ms) => ms.map((x) => (x.id === m.id ? patchMedDoseToggle(x, next, false) : x)));
+      setDetailMed((dm) => (dm && dm.id === m.id ? patchMedDoseToggle(dm, next, false) : dm));
+      if (typeof window !== "undefined") window.alert(`Could not save this dose.\n\n${logres.error || "Try again."}`);
+    }
+  }, [detailMed, userId, setMeds, scheduleDoseReload]);
 
   async function openDetail(med) {
     setDetailMed(med);

@@ -4,11 +4,14 @@ import { Calendar, Pill, Pencil, Trash2, Clock, CheckCircle2, AlertCircle, Loade
 import { COLS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
-import { logMedicationTaken, unlogMedicationTaken, doseRowLogged, patchMedDoseToggle } from "../../lib/adherence";
+import { logMedicationTaken, unlogMedicationTaken, doseRowLogged, patchMedDoseToggle, reloadAfterDoseMark } from "../../lib/adherence";
 import { groupMedicationsByDayPeriod } from "../../lib/medScheduleGroups";
 import { supabase } from "../../supabase";
+import { useAuth } from "../../contexts/AuthContext";
+import { buildPatientRescheduleRequestPayload, hasActiveRescheduleRequest, normalizeRescheduleRequest } from "../../lib/rescheduleRequest";
 
 export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, scrollToSection }) {
+  const { loadUserMeds } = useAuth();
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
   const periodBlocks = useMemo(() => groupMedicationsByDayPeriod(meds), [meds]);
@@ -78,12 +81,14 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, 
   async function requestReschedule() {
     if (!rescheduleAppt || !rescheduleForm.date || !rescheduleForm.time || rescheduleBusy) return;
     setRescheduleBusy(true);
+    const timeNorm = rescheduleForm.time.length === 5 ? `${rescheduleForm.time}:00` : rescheduleForm.time;
+    const payload = buildPatientRescheduleRequestPayload({ date: rescheduleForm.date, time: timeNorm });
     await supabase.from("appointments").update({
-      status: "rescheduled",
-      reschedule_request: { date: rescheduleForm.date, time: rescheduleForm.time },
+      status: "scheduled",
+      reschedule_request: payload,
       updated_at: new Date().toISOString(),
     }).eq("id", rescheduleAppt.id);
-    setAppointments(prev => prev.map(a => a.id === rescheduleAppt.id ? { ...a, status: "rescheduled", reschedule_request: rescheduleForm } : a));
+    setAppointments(prev => prev.map(a => a.id === rescheduleAppt.id ? { ...a, status: "scheduled", reschedule_request: payload } : a));
     setRescheduleBusy(false);
     setRescheduleDone(true);
     setTimeout(() => { setRescheduleAppt(null); setRescheduleDone(false); setRescheduleForm({ date: "", time: "" }); }, 2000);
@@ -93,12 +98,20 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, 
     const med = meds.find((m) => m.id === id);
     if (!med || slotTime == null || String(slotTime).trim() === "") return;
     const wasLogged = doseRowLogged(med, slotTime);
-    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, !wasLogged) : m)));
-    if (userId) {
-      if (wasLogged) await unlogMedicationTaken(userId, id, slotTime);
-      else await logMedicationTaken(userId, id, slotTime);
+    const turningOn = !wasLogged;
+    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, turningOn) : m)));
+    if (!userId) return;
+    const result = wasLogged
+      ? await unlogMedicationTaken(userId, id, slotTime)
+      : await logMedicationTaken(userId, id, slotTime);
+    if (result.ok) await reloadAfterDoseMark(loadUserMeds);
+    else {
+      setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, wasLogged) : m)));
+      if (typeof window !== "undefined") {
+        window.alert(`Could not save this dose.\n\n${result.error || "Unknown error."}`);
+      }
     }
-  }, [meds, userId, setMeds]);
+  }, [meds, userId, setMeds, loadUserMeds]);
 
   const STATUS_CONFIG = {
     scheduled: { label: "Confirmed", color: "var(--gr)", bg: "rgba(5,150,105,.1)", border: "rgba(5,150,105,.25)", icon: CheckCircle2 },
@@ -125,11 +138,12 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, 
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
               {appointments.map(appt => {
-                const cfg = STATUS_CONFIG[appt.status] || STATUS_CONFIG.scheduled;
+                const isPending = hasActiveRescheduleRequest(appt);
+                const cfg = isPending ? STATUS_CONFIG.rescheduled : STATUS_CONFIG[appt.status] || STATUS_CONFIG.scheduled;
                 const StatusIcon = cfg.icon;
                 const apptDate = new Date(appt.date + "T12:00:00");
                 const isPast = apptDate < new Date();
-                const isPending = appt.status === "rescheduled";
+                const n = normalizeRescheduleRequest(appt.reschedule_request);
                 return (
                   <motion.div key={appt.id} className="card" style={{ padding: isMob ? "12px 14px" : "14px 18px", opacity: isPast ? 0.6 : 1 }}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
@@ -150,9 +164,11 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, 
                           {doctorNames[appt.doctor_id] && <><span>·</span><span>Dr. {doctorNames[appt.doctor_id]}</span></>}
                         </div>
                         {appt.notes && <p style={{ color: t3, fontSize: 11, margin: "4px 0 0" }}>{appt.notes}</p>}
-                        {isPending && appt.reschedule_request && (
+                        {isPending && n?.patient && (
                           <p style={{ color: "var(--am)", fontSize: 11, margin: "4px 0 0", fontWeight: 600 }}>
-                            Requested: {new Date(appt.reschedule_request.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} at {new Date("2000-01-01T" + appt.reschedule_request.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            {n.phase === "doctor_counter" && n.doctor
+                              ? `Doctor suggested: ${new Date(n.doctor.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} at ${new Date("2000-01-01T" + n.doctor.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                              : `Requested: ${new Date(n.patient.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} at ${new Date("2000-01-01T" + n.patient.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
                           </p>
                         )}
                       </div>

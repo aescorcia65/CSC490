@@ -7,19 +7,34 @@ import { careTeamDoctorEntries } from "../../lib/careTeam";
 import { MESSAGE_ATTACHMENTS_BUCKET } from "../../lib/storageConfig";
 import {
   PATIENT_MESSAGING_SOUND_PRESETS,
+  ensurePatientMessagingAudioUnlocked,
   loadPatientMessagingSoundSettings,
   savePatientMessagingSoundSettings,
   playPatientMessagingSound,
   playPatientInboundChimeDeduped,
 } from "../../lib/patientMessagingSounds";
 import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
-import { buildVideoCallUrlFromRoom, parseVideoApprovalMessageBody } from "../../lib/videoCall";
+import { getProtocolChatDisplay, formatChatNotificationPreview } from "../../lib/chatMessageDisplay";
+import {
+  buildVideoCallUrlFromRoom,
+  buildVideoRoomId,
+  getAppointmentVideoWindow,
+  parseVideoApprovalMessageBody,
+} from "../../lib/videoCall";
+import VirtualPreVisitModal from "../../components/appointments/VirtualPreVisitModal";
+import { isVirtualVisitCheckInComplete, patientEnterVirtualWaitingRoom } from "../../lib/virtualVisitCheckIn";
+import { formatProfileFullName } from "../../lib/profileName";
+import { getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
+import { useAuth } from "../../contexts/AuthContext";
+
+const FALLBACK_VISIT_PROFILE = Object.freeze({});
 
 function sortMsgs(rows) {
   return [...(rows || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 }
 
 function normalizeInitialPeer(p) {
+  if (p && typeof p === "object") return p;
   if (p === "pharmacy") return "pharmacist";
   return p;
 }
@@ -42,12 +57,6 @@ function formatThreadTime(v) {
   const sameDay = d.toDateString() === now.toDateString();
   if (sameDay) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
-function formatVideoWindow(startMs, endMs) {
-  const start = new Date(startMs);
-  const end = new Date(endMs);
-  return `${start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} - ${end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
 }
 
 function sameDay(a, b) {
@@ -103,6 +112,46 @@ async function shrinkImageForUpload(file, maxEdge = 1680, quality = 0.82) {
 function mergeServerRow(prev, tempId, row) {
   const rest = prev.filter((m) => m.id !== tempId && m.id !== row.id);
   return sortMsgs([...rest, row]);
+}
+
+function windowsOverlap(startA, endA, startB, endB) {
+  if (![startA, endA, startB, endB].every(Number.isFinite)) return false;
+  return Math.min(endA, endB) - Math.max(startA, startB) > 0;
+}
+
+function applyIncomingVideoEventToAppointments(prev, doctorId, parsed) {
+  if (!doctorId || !parsed?.eventType) return prev;
+  return (prev || []).map((appt) => {
+    if (String(appt?.doctor_id) !== String(doctorId)) return appt;
+    const w = getAppointmentVideoWindow(appt);
+    if (!w) return appt;
+    if (!windowsOverlap(w.windowStartMs, w.windowEndMs, parsed.windowStartMs, parsed.windowEndMs)) return appt;
+    if (parsed.eventType === "started") {
+      return { ...appt, virtual_visit_status: VS.VIDEO_STARTED };
+    }
+    if (parsed.eventType === "ended") {
+      return { ...appt, status: "completed", virtual_visit_status: VS.COMPLETED };
+    }
+    return appt;
+  });
+}
+
+function latestVideoRoomEventTypeSince(messages, doctorId, startedParsed, startedCreatedAt) {
+  if (!doctorId || !startedParsed?.roomId) return null;
+  const startedMs = Date.parse(startedCreatedAt || "");
+  let latest = null;
+  for (let i = 0; i < (messages || []).length; i += 1) {
+    const row = messages[i];
+    if (!row || row.sender_id !== doctorId) continue;
+    const parsed = parseVideoApprovalMessageBody(row.body || "");
+    if (!parsed || parsed.roomId !== startedParsed.roomId) continue;
+    const rowMs = Date.parse(row.created_at || "");
+    if (Number.isFinite(startedMs) && Number.isFinite(rowMs) && rowMs < startedMs) continue;
+    if (!latest || rowMs > latest.rowMs) {
+      latest = { rowMs, eventType: parsed.eventType };
+    }
+  }
+  return latest?.eventType || null;
 }
 
 function friendlyAttachmentError(err) {
@@ -172,16 +221,12 @@ function friendlyAttachmentError(err) {
 
 function previewText(row) {
   if (!row) return null;
-  const parsedVideoApproval = parseVideoApprovalMessageBody(row.body || "");
-  if (parsedVideoApproval) {
-    return `Video visit approved for ${formatVideoWindow(parsedVideoApproval.windowStartMs, parsedVideoApproval.windowEndMs)}.`;
-  }
+  const cap = String(formatChatNotificationPreview(row.body || "")).trim();
   if (row.attachment_name || row.attachment_url) {
-    const cap = (row.body || "").trim();
-    const att = "📎 " + (row.attachment_name || "File");
+    const att = "" + (row.attachment_name || "File");
     return cap ? `${cap} · ${att}` : att;
   }
-  return row.body || null;
+  return cap || null;
 }
 
 function useTypingSuggestion(input, peerTab) {
@@ -200,7 +245,8 @@ function useTypingSuggestion(input, peerTab) {
   }, [input, peerTab]);
 }
 
-export default function PatientMessagesPage({ userId, senderDisplayName, initialPeer, onOpenCareTeamSettings }) {
+export default function PatientMessagesPage({ userId, senderDisplayName, initialPeer, onOpenCareTeamSettings, onlineUsers = {} }) {
+  const { setDisplayName } = useAuth();
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
   const panelBg = "var(--s1)";
@@ -216,7 +262,6 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
   const [bootLoading, setBootLoading] = useState(true);
   const [threadLoading, setThreadLoading] = useState(false);
   const [peerTyping, setPeerTyping] = useState(false);
-  const [onlineUsers, setOnlineUsers] = useState({});
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
   const [threadMeta, setThreadMeta] = useState({});
   const [hoverConversationId, setHoverConversationId] = useState(null);
@@ -228,13 +273,18 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
   const [showSoundSettings, setShowSoundSettings] = useState(false);
   const [ptSound, setPtSound] = useState(() => loadPatientMessagingSoundSettings());
   const [videoNowMs, setVideoNowMs] = useState(() => Date.now());
+  const [videoDoctorAppointments, setVideoDoctorAppointments] = useState([]);
+  const [patientProfile, setPatientProfile] = useState(null);
+  const [videoPreVisitOpen, setVideoPreVisitOpen] = useState(false);
   const listRef = useRef(null);
   const fileInputRef = useRef(null);
+  const announcedVideoStartIdsRef = useRef(new Set());
+  const announcedInboundMsgAlertIdsRef = useRef(new Set());
   const typingTimer = useRef(null);
   const typingChRef = useRef(null);
   const activePeerRef = useRef(null);
 
-  const activeDoctor = useMemo(() => doctors.find((d) => d.id === selectedDoctorId) || doctors[0] || null, [doctors, selectedDoctorId]);
+  const activeDoctor = useMemo(() => doctors.find((d) => d.id === selectedDoctorId) || null, [doctors, selectedDoctorId]);
   const activePeer = peerTab === "doctor" ? activeDoctor : pharmacist;
   useEffect(() => {
     activePeerRef.current = activePeer?.id ?? null;
@@ -275,22 +325,117 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     }
     return null;
   }, [messages, peerTab, activePeer?.id]);
-  const canJoinDoctorVideo = !!latestDoctorVideoApproval && videoNowMs >= latestDoctorVideoApproval.windowStartMs && videoNowMs <= latestDoctorVideoApproval.windowEndMs;
-  const latestDoctorVideoUrl = useMemo(() => {
-    if (!latestDoctorVideoApproval?.roomId) return "";
-    return buildVideoCallUrlFromRoom(latestDoctorVideoApproval.roomId) || "";
-  }, [latestDoctorVideoApproval?.roomId]);
+  const activeDoctorVideoWindow = useMemo(() => {
+    if (peerTab !== "doctor" || !activePeer?.id) return null;
+    const windows = (videoDoctorAppointments || [])
+      .map((a) => ({ appt: a, window: getAppointmentVideoWindow(a) }))
+      .filter((row) => !!row.window)
+      .sort((a, b) => a.window.windowStartMs - b.window.windowStartMs);
+    const inRange = windows.find((row) => {
+      const pe = row.window.portalEndMs ?? row.window.windowEndMs;
+      return videoNowMs >= row.window.windowStartMs && videoNowMs <= pe;
+    });
+    if (inRange) return inRange;
+    const nextUp = windows.find((row) => videoNowMs < row.window.windowStartMs);
+    return nextUp || null;
+  }, [activePeer?.id, peerTab, videoDoctorAppointments, videoNowMs]);
+  const activeVideoRoomId = useMemo(() => {
+    if (!activePeer?.id || peerTab !== "doctor") return "";
+    if (activeDoctorVideoWindow?.window) return buildVideoRoomId(userId, activePeer.id);
+    if (latestDoctorVideoApproval?.roomId) return latestDoctorVideoApproval.roomId;
+    return "";
+  }, [activeDoctorVideoWindow?.window, activePeer?.id, latestDoctorVideoApproval?.roomId, peerTab, userId]);
+  const activeVideoUrl = useMemo(() => buildVideoCallUrlFromRoom(activeVideoRoomId), [activeVideoRoomId]);
+  const latestActiveRoomEventType = useMemo(() => {
+    if (peerTab !== "doctor" || !activePeer?.id || !userId) return null;
+    const roomId = buildVideoRoomId(userId, activePeer.id);
+    let latest = null;
+    for (let i = 0; i < (messages || []).length; i += 1) {
+      const row = messages[i];
+      if (!row || row.sender_id !== activePeer.id) continue;
+      const parsed = parseVideoApprovalMessageBody(row.body || "");
+      if (!parsed || parsed.roomId !== roomId) continue;
+      const rowMs = Date.parse(row.created_at || "");
+      if (!Number.isFinite(rowMs)) continue;
+      if (!latest || rowMs > latest.rowMs) latest = { rowMs, eventType: parsed.eventType };
+    }
+    return latest?.eventType || null;
+  }, [activePeer?.id, messages, peerTab, userId]);
+  const videoWindowState = useMemo(() => {
+    if (!activeDoctorVideoWindow?.window || !activeDoctorVideoWindow?.appt) return "none";
+    if (latestActiveRoomEventType === "ended") return "ended";
+    const w = activeDoctorVideoWindow.window;
+    const pe = w.portalEndMs ?? w.windowEndMs;
+    if (videoNowMs < w.windowStartMs) return "too_early";
+    if (videoNowMs > pe) return "expired";
+    if (latestActiveRoomEventType === "started") return "doctor_started";
+    return getEffectiveVirtualVisitStatus(activeDoctorVideoWindow.appt) === VS.VIDEO_STARTED ? "doctor_started" : "waiting";
+  }, [activeDoctorVideoWindow?.appt?.id, activeDoctorVideoWindow?.appt?.virtual_visit_status, activeDoctorVideoWindow?.window, latestActiveRoomEventType, videoNowMs]);
+  const hasCheckedIntoWaitingRoom = useMemo(() => {
+    if (!activeDoctorVideoWindow?.appt) return false;
+    const vs = getEffectiveVirtualVisitStatus(activeDoctorVideoWindow.appt);
+    return vs === VS.WAITING_FOR_DOCTOR || vs === VS.VIDEO_STARTED;
+  }, [activeDoctorVideoWindow?.appt?.virtual_visit_status, activeDoctorVideoWindow?.appt?.id]);
+  const isCheckedInWaiting = videoWindowState === "waiting" && hasCheckedIntoWaitingRoom;
   const videoJoinHint = useMemo(() => {
-    if (!latestDoctorVideoApproval) return "Doctor must approve video during appointment time.";
-    if (videoNowMs < latestDoctorVideoApproval.windowStartMs) return `Video opens at ${new Date(latestDoctorVideoApproval.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
-    if (videoNowMs > latestDoctorVideoApproval.windowEndMs) return "Video approval window ended. Ask your doctor to approve again.";
-    return "Join approved video visit";
-  }, [latestDoctorVideoApproval, videoNowMs]);
+    if (!activeDoctorVideoWindow?.window) return "No upcoming virtual appointment with this doctor.";
+    if (!isVirtualVisitCheckInComplete(patientProfile))
+      return "Complete virtual check-in first, then use Check In on Appointments during your window.";
+    if (videoWindowState === "too_early") {
+      return `Waiting room opens at ${new Date(activeDoctorVideoWindow.window.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
+    }
+    if (videoWindowState === "expired") return "Video reconnect period ended for this appointment.";
+    if (videoWindowState === "ended") return "This video session has ended.";
+    if (videoWindowState === "doctor_started") {
+      return "Your doctor has joined. Join video chat.";
+    }
+    return isCheckedInWaiting ? "Checked in. Waiting for doctor to start the video." : "Tap video to enter the waiting room.";
+  }, [activeDoctorVideoWindow?.window, patientProfile, hasCheckedIntoWaitingRoom, isCheckedInWaiting, videoWindowState]);
+  const canOpenPreVisitEarly =
+    !!activeDoctorVideoWindow?.window &&
+    !!activePeer?.id &&
+    !!activeVideoUrl &&
+    !isVirtualVisitCheckInComplete(patientProfile);
+  const videoActionEnabled =
+    canOpenPreVisitEarly ||
+    (!!activeVideoUrl && videoWindowState === "waiting" && isVirtualVisitCheckInComplete(patientProfile)) ||
+    (!!activeVideoUrl && videoWindowState === "doctor_started");
+
+  const performWaitingRoomCheckin = useCallback(async () => {
+    if (!activeDoctorVideoWindow?.window || !activeDoctorVideoWindow?.appt || !activePeer?.id || !userId) return;
+    const appt = activeDoctorVideoWindow.appt;
+    const win = activeDoctorVideoWindow.window;
+    const { error } = await patientEnterVirtualWaitingRoom({ userId, appt, videoWindow: win });
+    if (error) return;
+    setVideoDoctorAppointments((prev) =>
+      prev.map((row) => (row.id === appt.id ? { ...row, virtual_visit_status: VS.WAITING_FOR_DOCTOR } : row)),
+    );
+  }, [activeDoctorVideoWindow?.appt, activeDoctorVideoWindow?.window, activePeer?.id, userId]);
+
   const openVideoVisit = useCallback(() => {
-    if (!canJoinDoctorVideo || !latestDoctorVideoUrl) return;
-    const url = latestDoctorVideoUrl;
-    if (typeof window !== "undefined" && url) window.open(url, "_blank", "noopener,noreferrer");
-  }, [canJoinDoctorVideo, latestDoctorVideoUrl]);
+    if (!activeVideoUrl || !activePeer?.id || !userId || !activeDoctorVideoWindow?.window) return;
+
+    if (!isVirtualVisitCheckInComplete(patientProfile)) {
+      setVideoPreVisitOpen(true);
+      return;
+    }
+
+    if (videoWindowState !== "waiting" && videoWindowState !== "doctor_started") return;
+
+    if (videoWindowState === "waiting") {
+      void performWaitingRoomCheckin();
+      return;
+    }
+    if (typeof window !== "undefined") window.open(activeVideoUrl, "_blank", "noopener,noreferrer");
+  }, [
+    activeDoctorVideoWindow?.window,
+    activePeer?.id,
+    activeVideoUrl,
+    patientProfile,
+    performWaitingRoomCheckin,
+    userId,
+    videoWindowState,
+  ]);
 
   useEffect(() => {
     setSuggestionDismissed(false);
@@ -305,6 +450,20 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
   }, []);
 
   useEffect(() => {
+    const unlock = () => {
+      void ensurePatientMessagingAudioUnlocked();
+    };
+    window.addEventListener("pointerdown", unlock, { passive: true });
+    window.addEventListener("touchstart", unlock, { passive: true });
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("touchstart", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+
+  useEffect(() => {
     const onResize = () => setViewportWidth(window.innerWidth);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
@@ -314,6 +473,83 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     const timer = setInterval(() => setVideoNowMs(Date.now()), 15000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!userId || peerTab !== "doctor" || !activePeer?.id) {
+      setVideoDoctorAppointments([]);
+      return;
+    }
+    let cancelled = false;
+    const loadVideoAppointments = async () => {
+      const fromDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const { data } = await supabase
+        .from("appointments")
+        .select("id,date,time,type,status,doctor_id,virtual_visit_status")
+        .eq("patient_id", userId)
+        .eq("doctor_id", activePeer.id)
+        .in("status", ["scheduled", "rescheduled"])
+        .gte("date", fromDate)
+        .order("date", { ascending: true });
+      if (!cancelled) setVideoDoctorAppointments(data || []);
+    };
+    loadVideoAppointments();
+    const poll = setInterval(loadVideoAppointments, 30000);
+    const aptCh = supabase
+      .channel(`mt-pt-msg-vvisit-${userId}-${activePeer.id}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${userId}` },
+        (payload) => {
+          const row = payload?.new ?? payload?.old;
+          if (row?.doctor_id == null || String(row.doctor_id) !== String(activePeer.id)) return;
+          loadVideoAppointments();
+        },
+      )
+      .subscribe();
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+      void supabase.removeChannel(aptCh);
+    };
+  }, [activePeer?.id, peerTab, userId]);
+
+  useEffect(() => {
+    if (!userId) {
+      setPatientProfile(null);
+      return;
+    }
+    let cancelled = false;
+    supabase
+      .from("profiles")
+      .select("first_name,last_name,pre_visit_intake,allergies,medical_conditions")
+      .eq("id", userId)
+      .single()
+      .then(({ data }) => {
+        if (!cancelled) setPatientProfile(data || null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId) return undefined;
+    const cols = "first_name,last_name,pre_visit_intake,allergies,medical_conditions";
+    const ch = supabase
+      .channel(`mt-patient-profile-intake-msg-${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "profiles", filter: `id=eq.${userId}` },
+        async () => {
+          const { data } = await supabase.from("profiles").select(cols).eq("id", userId).single();
+          if (data) setPatientProfile(data);
+        },
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(ch);
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (!isPhone) {
@@ -359,9 +595,26 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
         return;
       }
       const entries = careTeamDoctorEntries(prof);
+      /** Include clinicians from upcoming/past bookings so Messaging works when care_team / primary_doctor weren’t populated yet. */
+      const mergedDoctorEntries = [...entries];
+      const doctorIdsSeen = new Set(entries.map((e) => e.doctorId));
+      const { data: aptDoctorRows } = await supabase
+        .from("appointments")
+        .select("doctor_id")
+        .eq("patient_id", userId)
+        .not("doctor_id", "is", null);
+      if (cancelled) return;
+      if (aptDoctorRows?.length) {
+        for (const row of aptDoctorRows) {
+          const did = row?.doctor_id;
+          if (!did || doctorIdsSeen.has(did)) continue;
+          doctorIdsSeen.add(did);
+          mergedDoctorEntries.push({ doctorId: did, label: "Appointment" });
+        }
+      }
       const seenDoc = new Set();
       const docList = [];
-      for (const e of entries) {
+      for (const e of mergedDoctorEntries) {
         if (seenDoc.has(e.doctorId)) continue;
         seenDoc.add(e.doctorId);
         docList.push({ id: e.doctorId, careLabel: e.label, role: "doctor", name: "Doctor" });
@@ -386,7 +639,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       }
       if (cancelled) return;
       setDoctors(docList);
-      setSelectedDoctorId(docList.find((d) => d.id === prof.primary_doctor_id)?.id ?? docList[0]?.id ?? null);
+      setSelectedDoctorId((prev) => (prev && docList.some((d) => d.id === prev) ? prev : null));
       setBootLoading(false);
     })();
     return () => {
@@ -404,54 +657,6 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     if (doctors.length && !pharmacist) setPeerTab("doctor");
     else if (!doctors.length && pharmacist) setPeerTab("pharmacist");
   }, [doctors.length, pharmacist]);
-
-  useEffect(() => {
-    if (!userId) return;
-    supabase
-      .from("user_presence")
-      .upsert({ user_id: userId, is_online: true, last_seen: new Date().toISOString() }, { onConflict: "user_id" })
-      .then(() => {});
-    supabase
-      .from("user_presence")
-      .select("user_id,is_online")
-      .then(({ data }) => {
-        if (!data) return;
-        const online = {};
-        data.forEach((r) => {
-          if (r.is_online) online[r.user_id] = true;
-        });
-        setOnlineUsers(online);
-      });
-    const ch = supabase
-      .channel("patient-msg-presence")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "user_presence" }, (payload) => {
-        if (!payload.new?.user_id) return;
-        if (payload.new.is_online) setOnlineUsers((prev) => ({ ...prev, [payload.new.user_id]: true }));
-        else setOnlineUsers((prev) => {
-          const n = { ...prev };
-          delete n[payload.new.user_id];
-          return n;
-        });
-      })
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "user_presence" }, (payload) => {
-        if (!payload.new?.user_id) return;
-        if (payload.new.is_online) setOnlineUsers((prev) => ({ ...prev, [payload.new.user_id]: true }));
-        else setOnlineUsers((prev) => {
-          const n = { ...prev };
-          delete n[payload.new.user_id];
-          return n;
-        });
-      })
-      .subscribe();
-    const markOffline = () => {
-      supabase.from("user_presence").upsert({ user_id: userId, is_online: false, last_seen: new Date().toISOString() }, { onConflict: "user_id" }).then(() => {});
-    };
-    window.addEventListener("beforeunload", markOffline);
-    return () => {
-      window.removeEventListener("beforeunload", markOffline);
-      supabase.removeChannel(ch);
-    };
-  }, [userId]);
 
   const loadMessages = useCallback(async (peerId) => {
     if (!userId || !peerId) {
@@ -489,6 +694,37 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
 
     const bumpMeta = () => setThreadMetaTick((n) => n + 1);
 
+    const announceIncomingMessageAlert = () => {};
+
+    const announceDoctorVideoStarted = (row) => {
+      if (!row?.id) return;
+      const key = String(row.id);
+      if (announcedVideoStartIdsRef.current.has(key)) return;
+      announcedVideoStartIdsRef.current.add(key);
+      const parsed = parseVideoApprovalMessageBody(row.body || "");
+      if (!parsed || parsed.eventType !== "started") return;
+      const joinUrl = buildVideoCallUrlFromRoom(parsed.roomId);
+      const alertText = "Your doctor started the video visit. Open Messages and tap Join video visit.";
+      if (typeof window === "undefined") return;
+      try {
+        if ("Notification" in window && window.Notification.permission === "granted") {
+          const n = new window.Notification("Doctor started your video visit", {
+            body: "Join now from Messages.",
+            tag: `doctor-video-started-${key}`,
+          });
+          n.onclick = () => {
+            try {
+              window.focus();
+              if (joinUrl) window.open(joinUrl, "_blank", "noopener,noreferrer");
+            } catch {}
+          };
+        }
+      } catch {}
+      try {
+        window.alert(alertText);
+      } catch {}
+    };
+
     const onInsert = (payload) => {
       const row = payload.new;
       if (!row) return;
@@ -496,6 +732,12 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       if (row.recipient_id === userId && row.sender_id !== userId) {
         const st = loadPatientMessagingSoundSettings();
         if (st.enabled) void playPatientInboundChimeDeduped(row.id, st.preset, st.volume);
+        announceIncomingMessageAlert(row);
+        announceDoctorVideoStarted(row);
+        const parsed = parseVideoApprovalMessageBody(row.body || "");
+        if (parsed && (parsed.eventType === "started" || parsed.eventType === "ended")) {
+          setVideoDoctorAppointments((prev) => applyIncomingVideoEventToAppointments(prev, row.sender_id, parsed));
+        }
       }
       bumpMeta();
       const peerId = activePeerRef.current;
@@ -534,7 +776,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     return () => {
       supabase.removeChannel(ch);
     };
-  }, [userId]);
+  }, [doctors, pharmacist?.id, pharmacist?.name, userId]);
 
   useEffect(() => {
     if (!userId || !activePeer?.id || bootLoading) return;
@@ -571,7 +813,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
           const [{ data: latest }, { count }] = await Promise.all([
             supabase
               .from("patient_messages")
-              .select("id,body,created_at,attachment_name,attachment_url")
+              .select("*")
               .or(q)
               .order("created_at", { ascending: false })
               .limit(1),
@@ -709,7 +951,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
         .single();
       if (error) throw error;
       setMessages((prev) => mergeServerRow(prev, tempId, row));
-      const attLabel = storedName ? `📎 ${storedName}` : "Sent an attachment";
+      const attLabel = storedName ? `${storedName}` : "Sent an attachment";
       notifyRecipientNewChatMessage({
         recipientId: activePeer.id,
         senderName: senderDisplayName || "Patient",
@@ -989,21 +1231,27 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                   type="button"
                   onClick={openVideoVisit}
                   title={videoJoinHint}
-                  disabled={!canJoinDoctorVideo}
+                  disabled={!videoActionEnabled}
                   style={{
                     width: isPhone ? 44 : 40,
                     height: isPhone ? 44 : 40,
                     borderRadius: 10,
-                    border: `1px solid ${b1}`,
-                    background: "var(--s1)",
-                    color: "var(--p)",
+                    border: `1px solid ${videoWindowState === "doctor_started" ? "rgba(16,185,129,.35)" : b1}`,
+                    background: videoWindowState === "doctor_started" ? "rgba(16,185,129,.12)" : (isCheckedInWaiting ? "rgba(37,99,235,.12)" : "var(--s1)"),
+                    color: videoWindowState === "doctor_started" ? "#059669" : "var(--p)",
                     display: "grid",
                     placeItems: "center",
-                    cursor: canJoinDoctorVideo ? "pointer" : "not-allowed",
-                    opacity: canJoinDoctorVideo ? 1 : 0.5,
+                    cursor: videoActionEnabled ? "pointer" : "not-allowed",
+                    opacity: videoActionEnabled ? 1 : 0.5,
                     flexShrink: 0,
                   }}
-                  aria-label="Join approved video call"
+                  aria-label={
+                    videoWindowState === "doctor_started"
+                      ? hasCheckedIntoWaitingRoom
+                        ? "Join video visit"
+                        : "Finish check-in before joining"
+                      : "Video visit (check in)"
+                  }
                 >
                   <Video size={18} />
                 </button>
@@ -1031,6 +1279,45 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
               </button>
             </div>
           </div>
+          {peerTab === "doctor" && activePeer?.id && activeDoctorVideoWindow?.window && videoWindowState !== "ended" ? (
+            <div
+              style={{
+                padding: "10px 12px",
+                borderBottom: `1px solid ${b1}`,
+                background: videoWindowState === "doctor_started" ? "rgba(16,185,129,.1)" : "var(--s2)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <p style={{ margin: 0, fontSize: 12.5, color: t1, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <ShieldCheck size={14} color={videoWindowState === "doctor_started" ? "#059669" : "var(--p)"} />
+                  Waiting room for{" "}
+                  {new Date(activeDoctorVideoWindow.window.startMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                </p>
+                <span
+                  style={{
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                    borderRadius: 99,
+                    padding: "3px 8px",
+                    background: videoWindowState === "doctor_started" ? "rgba(16,185,129,.18)" : "rgba(37,99,235,.1)",
+                    color: videoWindowState === "doctor_started" ? "#047857" : "var(--p)",
+                    border: `1px solid ${videoWindowState === "doctor_started" ? "rgba(16,185,129,.35)" : "rgba(37,99,235,.25)"}`,
+                  }}
+                >
+                  {videoWindowState === "doctor_started" ? "Doctor ready" : "Waiting room"}
+                </span>
+              </div>
+              <p style={{ margin: "6px 0 0", fontSize: 11.5, color: t3, lineHeight: 1.45 }}>
+                {videoWindowState === "doctor_started"
+                  ? "Your doctor has joined. Join video chat."
+                  : videoWindowState === "waiting"
+                    ? (isCheckedInWaiting ? "Checked in. Waiting for doctor to start the video." : "Tap the video button once to check in to the waiting room.")
+                    : videoWindowState === "too_early"
+                      ? `Waiting room opens at ${new Date(activeDoctorVideoWindow.window.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+                      : "Appointment window expired."}
+              </p>
+            </div>
+          ) : null}
           {showSoundSettings ? (
             <div style={{ padding: "12px 14px", borderBottom: `1px solid ${b1}`, background: "var(--s2)" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -1103,7 +1390,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
 
           <div ref={listRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "6px 12px 10px", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", touchAction: "pan-y" }}>
             {!activePeer?.id ? (
-              <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: 24 }}>Choose a care team member to start messaging.</p>
+              <p style={{ color: t3, fontSize: 13, textAlign: "center", padding: 24 }}>Select a conversation to view messages.</p>
             ) : threadLoading ? (
               <div style={{ display: "flex", justifyContent: "center", padding: 24 }}>
                 <Loader2 size={20} className="auth-spin" style={{ color: "var(--p)" }} />
@@ -1113,16 +1400,108 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                 {messages.map((m, idx) => {
                   const mine = m.sender_id === userId;
                   const bodyText = (m.body || "").trim();
-                  const videoApproval = parseVideoApprovalMessageBody(bodyText);
-                  const isVideoApproval = !!videoApproval;
-                  const videoApprovalUrl = isVideoApproval && videoApproval?.roomId ? buildVideoCallUrlFromRoom(videoApproval.roomId) : "";
-                  const displayBodyText = isVideoApproval
-                    ? `Video visit approved by doctor for ${formatVideoWindow(videoApproval.windowStartMs, videoApproval.windowEndMs)}.`
-                    : bodyText;
-                  const attUrl = m.attachment_url;
+                  const proto = getProtocolChatDisplay(bodyText, { role: "patient", isMine: mine });
+                  if (proto.kind === "video_started_invite" && proto.joinUrl) {
+                    const prev = messages[idx - 1];
+                    if (prev && String(prev.body || "") === String(m.body || "")) return null;
+                    const showDayBreak = !prev || !sameDay(prev.created_at, m.created_at);
+                    const msgDate = new Date(m.created_at);
+                    const isToday = msgDate.toDateString() === new Date().toDateString();
+                    const startedParsed = parseVideoApprovalMessageBody(m.body || "");
+                    const latestEventTypeForWindow = latestVideoRoomEventTypeSince(messages, m.sender_id, startedParsed, m.created_at);
+                    const inviteJoinEnabled =
+                      !!startedParsed &&
+                      startedParsed.eventType === "started" &&
+                      latestEventTypeForWindow !== "ended";
+                    const inviteHint = latestEventTypeForWindow === "ended" ? "This video session has ended." : "";
+                    return (
+                      <div key={m.id} style={{ display: "flex", flexDirection: "column" }}>
+                        {showDayBreak ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "0 0 8px" }}>
+                            <span style={{ height: 1, background: b1, flex: 1 }} />
+                            <span style={{ fontSize: 11, color: t3, fontWeight: 600 }}>{isToday ? "Today" : msgDate.toLocaleDateString([], { month: "short", day: "numeric" })}</span>
+                            <span style={{ height: 1, background: b1, flex: 1 }} />
+                          </div>
+                        ) : null}
+                        <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                          <motion.div
+                            layout
+                            initial={{ opacity: 0, y: 6 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            style={{ width: "fit-content", maxWidth: isMob ? "90%" : "72%", display: "flex", flexDirection: "column" }}
+                          >
+                            <div
+                              style={{
+                                padding: "12px 14px",
+                                borderRadius: "14px 14px 14px 4px",
+                                background: "rgba(16,185,129,.14)",
+                                border: "1px solid rgba(16,185,129,.38)",
+                                color: t1,
+                                boxShadow: "0 1px 3px rgba(15,23,42,.08)",
+                              }}
+                            >
+                              <p style={{ margin: 0, fontSize: 13.5, fontWeight: 700, color: "#047857", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                <Video size={17} color="#059669" />
+                                Your doctor joined the video visit
+                              </p>
+                              <p style={{ margin: "8px 0 0", fontSize: 12.5, color: t3, lineHeight: 1.45 }}>
+                                {inviteJoinEnabled
+                                  ? "Tap below to open the secure video room."
+                                  : inviteHint || "Join is unavailable for this invitation."}
+                              </p>
+                              {inviteJoinEnabled ? (
+                                <a
+                                  href={proto.joinUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    marginTop: 12,
+                                    padding: "8px 14px",
+                                    borderRadius: 10,
+                                    background: "#059669",
+                                    color: "#fff",
+                                    fontWeight: 700,
+                                    fontSize: 13,
+                                    textDecoration: "none",
+                                    fontFamily: "inherit",
+                                  }}
+                                >
+                                  Join video visit
+                                </a>
+                              ) : (
+                                <div
+                                  style={{
+                                    marginTop: 12,
+                                    padding: "8px 14px",
+                                    borderRadius: 10,
+                                    border: `1px solid ${b1}`,
+                                    background: "var(--s1)",
+                                    color: t3,
+                                    fontSize: 12.5,
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {inviteHint ? "Call ended" : "Join unavailable"}
+                                </div>
+                              )}
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-start", gap: 6, marginTop: 4, paddingLeft: 4, paddingRight: 4 }}>
+                              <span style={{ fontSize: 10, color: t3 }}>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                            </div>
+                          </motion.div>
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (proto.kind === "hidden") return null;
+                  const textToShow = proto.line;
+                  const attUrl = m?.attachment_url ? String(m.attachment_url).trim() : "";
                   const pendingUp = m._pendingUpload === true;
-                  const isImg = attUrl && (m.attachment_mime || "").startsWith("image/");
-                  const showBubble = attUrl || displayBodyText || (pendingUp && m.attachment_name);
+                  const isImg = !!(attUrl && (m.attachment_mime || "").startsWith("image/"));
+                  const showBubble = !!(attUrl || (textToShow && String(textToShow).trim()) || (pendingUp && m.attachment_name));
                   const prev = messages[idx - 1];
                   const showDayBreak = !prev || !sameDay(prev.created_at, m.created_at);
                   const msgDate = new Date(m.created_at);
@@ -1241,28 +1620,30 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                               {m.attachment_name || "View attachment"}
                             </a>
                           )}
-                          {displayBodyText ? <span style={{ whiteSpace: "pre-wrap" }}>{displayBodyText}</span> : null}
-                          {videoApprovalUrl ? (
-                            <a
-                              href={videoApprovalUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                          {String(textToShow || "").trim() ? (
+                            <p
                               style={{
-                                display: "block",
-                                marginTop: 6,
-                                color: mine ? "rgba(255,255,255,.95)" : "var(--p)",
-                                fontSize: 11.5,
-                                textDecoration: "underline",
-                                wordBreak: "break-all",
+                                margin: 0,
+                                paddingTop:
+                                  pendingUp && m.attachment_name
+                                    ? 8
+                                    : attUrl
+                                      ? 8
+                                      : 0,
+                                color: mine ? "#fff" : t1,
+                                fontSize: 13,
+                                lineHeight: 1.4,
+                                whiteSpace: "pre-wrap",
+                                wordBreak: "break-word",
                               }}
                             >
-                              {videoApprovalUrl}
-                            </a>
+                              {textToShow}
+                            </p>
                           ) : null}
                         </div>
                         )}
                         <div style={{ display: "flex", alignItems: "center", justifyContent: mine ? "flex-end" : "flex-start", gap: 6, marginTop: 4, paddingLeft: 4, paddingRight: 4 }}>
-                          <span style={{ fontSize: 10, color: mine ? "rgba(255,255,255,0.72)" : t3 }}>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                          <span style={{ fontSize: 10, color: t3 }}>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                           {mine ? (
                             m.read_at ? (
                               <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }} title="Read">
@@ -1494,6 +1875,27 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
         </section>
         )}
       </div>
+
+      <VirtualPreVisitModal
+        open={videoPreVisitOpen && !!userId && peerTab === "doctor"}
+        onClose={() => setVideoPreVisitOpen(false)}
+        userId={userId}
+        initialProfile={patientProfile ?? FALLBACK_VISIT_PROFILE}
+        apptSummary={
+          activeDoctorVideoWindow?.appt
+            ? `${new Date(`${activeDoctorVideoWindow.appt.date}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} virtual visit`
+            : ""
+        }
+        onSaved={async (updated) => {
+          if (!isVirtualVisitCheckInComplete(updated)) {
+            throw new Error("Please complete every required field before entering the waiting room.");
+          }
+          setPatientProfile(updated);
+          const dn = formatProfileFullName(updated);
+          if (dn) setDisplayName(dn);
+          performWaitingRoomCheckin();
+        }}
+      />
 
       {(!isPhone || mobileView === "list") && <div
         style={{

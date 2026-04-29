@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Moon, Sun, LogOut, ChevronDown, Loader2, Pencil, Mail, Trash2, UserCircle2, BellRing, ShieldCheck, HeartPulse, Siren, Stethoscope, MessageSquare, ArrowRight, Volume2 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { signOutClearPresence } from "../../lib/signOutClearPresence";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import ErrBanner from "../../components/common/ErrBanner";
 import OkBanner from "../../components/common/OkBanner";
@@ -74,7 +75,7 @@ export default function SettingsPage({ light, setLight, user, displayName, onEdi
       await supabase.from("user_medications").delete().eq("user_id", uid);
       await supabase.from("chats").delete().eq("user_id", uid);
       await supabase.from("feedback").delete().eq("user_id", uid);
-      await supabase.auth.signOut();
+      await signOutClearPresence(uid);
       localStorage.clear();
     } catch (e) { setDelErr(e.message || "Could not delete account. Please try again."); } finally { setDelBusy(false); }
   }
@@ -188,7 +189,7 @@ export default function SettingsPage({ light, setLight, user, displayName, onEdi
           ))}
         </motion.div>
         <motion.div className="au d4">
-          <button className="active:opacity-70" onClick={() => supabase.auth.signOut()} style={{ width: "100%", padding: "13px", borderRadius: 13, border: "1px solid rgba(239,68,68,.2)", background: "rgba(239,68,68,.07)", color: "var(--ro)", fontFamily: "inherit", fontWeight: 600, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "all .18s" }}>
+          <button className="active:opacity-70" onClick={() => void signOutClearPresence(user?.id)} style={{ width: "100%", padding: "13px", borderRadius: 13, border: "1px solid rgba(239,68,68,.2)", background: "rgba(239,68,68,.07)", color: "var(--ro)", fontFamily: "inherit", fontWeight: 600, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "all .18s" }}>
             <LogOut size={14} /> Sign Out
           </button>
         </motion.div>
