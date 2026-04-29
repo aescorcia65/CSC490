@@ -5,24 +5,108 @@ import {
   Clock, Check, AlertCircle, Loader2, Bell, BellOff, User, ArrowRight,
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
   Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip, MoreHorizontal, Video,
+  PhoneOff,
   Sparkles, ChevronRight
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib/portalWebAudio";
 import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
+import { signOutClearPresence } from "../../lib/signOutClearPresence";
 import { notificationSuggestsPrescription, notificationSuggestsChat, notificationTextBlob } from "../../lib/notificationNavigation";
+import { getProtocolChatDisplay, formatChatNotificationPreview } from "../../lib/chatMessageDisplay";
 import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
-import { buildVideoCallUrlFromRoom, buildVideoRoomId, createVideoApprovalMessageBody, parseVideoApprovalMessageBody } from "../../lib/videoCall";
+import { VIDEO_CALL_STARTED_PREFIX, VIDEO_VISIT_ENDED_PREFIX, VIDEO_VISIT_PORTAL_TAIL_MS, VIDEO_VISIT_LATE_JOIN_MS, VIDEO_WAITING_ROOM_EARLY_JOIN_MS, VIDEO_WAITING_CHECKIN_PREFIX, VIDEO_WAITING_DISMISSED_PREFIX, buildVideoCallUrlFromRoom, buildVideoRoomId, createVideoSessionMessageBody, createVideoSessionEndedMessageBody, createVideoWaitingDismissedMessageBody, getAppointmentVideoWindow, isVideoStyleVisitType, parseVideoApprovalMessageBody, parseVideoWaitingCheckinMessageBody, parseVideoWaitingDismissedMessageBody } from "../../lib/videoCall";
+import { buildDoctorCounterPayload, buildPatientRescheduleRequestPayload, hasActiveRescheduleRequest, normalizeRescheduleRequest } from "../../lib/rescheduleRequest";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
+import { formatProfileFullName } from "../../lib/profileName";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { usePresenceOnlineMap } from "../../hooks/usePresenceOnlineMap";
+import { doctorRequestCheckInRefill, downloadVirtualVisitCheckInPdf, doctorClearPatientVirtualVisitCheckIn } from "../../lib/virtualVisitCheckIn";
+import { findVirtualAppointmentForDoctorVideoStart, findVirtualAppointmentForDoctorVideoEnd, getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
+import DoctorVirtualCheckInReadout from "../../components/appointments/DoctorVirtualCheckInReadout";
 import ErrBanner from "../../components/common/ErrBanner";
 import OkBanner from "../../components/common/OkBanner";
 import NicknameModal from "../../components/modals/NicknameModal";
 import PrescribeModal from "../../components/modals/PrescribeModal";
 import RescheduleRequestRow from "../../components/appointments/RescheduleRequestRow";
 const DOCTOR_PAGE_STORAGE_KEY="mt_doctor_last_page";
-const DOCTOR_ALLOWED_PAGES=new Set(["dashboard","patients","messages","availability"]);
+const DOCTOR_ALLOWED_PAGES=new Set(["dashboard","patients","messages","availability","virtual"]);
+
+/** Used when doctor taps "video" from Messages — prefer an in-window virtual booking; otherwise anchor defaults so VIDEO_CALL_STARTED parses. */
+function resolveDoctorPatientInviteWindowMs(allAppointments, patientId, nowMs) {
+  const rows = (allAppointments || [])
+    .filter((a) =>
+      ["scheduled", "rescheduled"].includes(String(a?.status || "")) &&
+      String(a?.status || "") !== "completed" &&
+      a?.patient_id === patientId &&
+      a?.date &&
+      a?.time &&
+      isVideoStyleVisitType(a),
+    )
+    .map((a) => ({ a, window: getAppointmentVideoWindow(a) }))
+    .filter((r) => r.window);
+  for (const { window: w } of rows) {
+    const portalEnd = w.portalEndMs ?? w.windowEndMs;
+    if (nowMs >= w.windowStartMs && nowMs <= portalEnd)
+      return { windowStartMs: w.windowStartMs, windowEndMs: w.windowEndMs };
+  }
+  return {
+    windowStartMs: nowMs - VIDEO_WAITING_ROOM_EARLY_JOIN_MS,
+    windowEndMs: nowMs + VIDEO_VISIT_LATE_JOIN_MS,
+  };
+}
+
+function getAppointmentVideoWindowLoose(appt) {
+  const strict = getAppointmentVideoWindow(appt);
+  if (strict) return strict;
+  if (!appt?.date || !appt?.time) return null;
+  const raw = String(appt.time || "").trim();
+  const hhmmss = raw.length === 5 ? `${raw}:00` : raw.length >= 8 ? raw.slice(0, 8) : raw;
+  if (!hhmmss) return null;
+  const startMs = Date.parse(`${appt.date}T${hhmmss}`);
+  if (!Number.isFinite(startMs)) return null;
+  const windowEndMs = startMs + VIDEO_VISIT_LATE_JOIN_MS;
+  return {
+    startMs,
+    windowStartMs: startMs - VIDEO_WAITING_ROOM_EARLY_JOIN_MS,
+    windowEndMs,
+    portalEndMs: windowEndMs + VIDEO_VISIT_PORTAL_TAIL_MS,
+  };
+}
+
+function pickBestDoctorVideoStartCandidate(rows, anchorStartMs, anchorEndMs) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const anchorMidMs =
+    Number.isFinite(anchorStartMs) && Number.isFinite(anchorEndMs)
+      ? Math.round((anchorStartMs + anchorEndMs) / 2)
+      : Date.now();
+  const ranked = rows
+    .map((a) => {
+      const w = getAppointmentVideoWindowLoose(a);
+      if (!w) return null;
+      const portalEndMs = w.portalEndMs ?? w.windowEndMs;
+      const inPortal = anchorMidMs >= w.windowStartMs && anchorMidMs <= portalEndMs;
+      const vv = String(a?.virtual_visit_status || "").toLowerCase();
+      const statusPriority =
+        vv === VS.WAITING_FOR_DOCTOR || vv === VS.CHECKED_IN || vv === VS.VIDEO_STARTED
+          ? 0
+          : vv === VS.PENDING
+            ? 1
+            : 2;
+      const typePriority = isVideoStyleVisitType(a) ? 0 : 1;
+      const dist = Math.abs(w.startMs - anchorMidMs);
+      return { a, w, inPortal, statusPriority, typePriority, dist };
+    })
+    .filter(Boolean)
+    .sort((x, y) => {
+      if (x.inPortal !== y.inPortal) return x.inPortal ? -1 : 1;
+      if (x.statusPriority !== y.statusPriority) return x.statusPriority - y.statusPriority;
+      if (x.typePriority !== y.typePriority) return x.typePriority - y.typePriority;
+      return x.dist - y.dist;
+    });
+  return ranked.length ? ranked[0] : null;
+}
 export default function DoctorPortal({ user, light, setLight, userName, setDisplayName }) {
   const [page,setPage]=useState("dashboard");
   const [patients,setPatients]=useState([]);
@@ -47,6 +131,13 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [vitalsSaved,setVitalsSaved]=useState(false);
   const [appointments,setAppointments]=useState([]);
   const [allAppointments,setAllAppointments]=useState([]);
+  const [doctorVideoVisitRequests,setDoctorVideoVisitRequests]=useState([]);
+  const [urgentVisitBusyId,setUrgentVisitBusyId]=useState(null);
+  const [virtualCheckInPatientProfile,setVirtualCheckInPatientProfile]=useState(null);
+  /** Patient id awaiting confirmation when doctor deletes saved check-in. */
+  const [checkInClearAwaitingConfirmPatientId,setCheckInClearAwaitingConfirmPatientId]=useState(null);
+  const [clearCheckInBusy,setClearCheckInBusy]=useState(false);
+  const [refillRequestBusyPatientId,setRefillRequestBusyPatientId]=useState(null);
   const [apptForm,setApptForm]=useState({date:"",time:"",type:"Follow-up",notes:""});
   const [apptBusy,setApptBusy]=useState(false);
   const [bookingAvailability,setBookingAvailability]=useState({timezone:"America/New_York",slots:{}});
@@ -66,13 +157,17 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [msgInput,setMsgInput]=useState("");
   const [msgSending,setMsgSending]=useState(false);
   const [videoApprovalBusy,setVideoApprovalBusy]=useState(false);
+  const [videoStartTargetId,setVideoStartTargetId]=useState(null);
+  const [videoEndBusy,setVideoEndBusy]=useState(false);
+  const [videoNowMs,setVideoNowMs]=useState(()=>Date.now());
+  const [videoEventRows,setVideoEventRows]=useState([]);
   const [unreadCount,setUnreadCount]=useState(0);
   const [unreadPerContact,setUnreadPerContact]=useState({});
   const [msgMode,setMsgMode]=useState("pharmacy");
   const [patientChatContacts,setPatientChatContacts]=useState([]);
   const [unreadPatientCount,setUnreadPatientCount]=useState(0);
   const [unreadPerPatient,setUnreadPerPatient]=useState({});
-  const [onlineUsers,setOnlineUsers]=useState({});
+  const onlineUsers = usePresenceOnlineMap(user?.id);
   const [chatSearchEmail,setChatSearchEmail]=useState("");
   const [chatSearchBusy,setChatSearchBusy]=useState(false);
   const [chatSearchMsg,setChatSearchMsg]=useState(null);
@@ -102,12 +197,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [soundEnabled,setSoundEnabled]=useState(()=>localStorage.getItem("mt_sound_on")!=="false");
   const [soundType,setSoundType]=useState(()=>{
     const saved=localStorage.getItem("mt_sound_type");
-    const valid=["standard","urgent","subtle","chime","pulse"];
+    const valid=["standard","urgent","subtle","chime","pulse","ding","low","tri"];
     return valid.includes(saved)?saved:"standard";
   });
   const [soundVolume,setSoundVolume]=useState(()=>{
     const v=parseFloat(localStorage.getItem("mt_sound_vol"));
-    return isNaN(v)?0.7:Math.min(1,Math.max(0.1,v));
+    return isNaN(v)?0.7:Math.min(1,Math.max(0,v));
   });
   const [showSoundSettings,setShowSoundSettings]=useState(false);
   const soundEnabledRef=useRef(soundEnabled);
@@ -121,8 +216,27 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const atBottomRef=useRef(true);
   const typingTimeoutRef=useRef(null);
   const typingBroadcastRef=useRef(null);
+  const announcedInboundMsgAlertIdsRef=useRef(new Set());
   const selPatRef=useRef(selPat);
+  const patientIdsForRealtimeRef=useRef(new Set());
   const [peerTyping,setPeerTyping]=useState(false);
+  useEffect(()=>{ patientIdsForRealtimeRef.current=new Set((patients||[]).map(p=>p.id)); },[patients]);
+  useEffect(()=>{
+    if(!user?.id) return;
+    const ch=supabase.channel(`doc-patient-profiles-${user.id}`)
+      .on("postgres_changes",{ event:"UPDATE", schema:"public", table:"profiles" },(payload)=>{
+        const id=payload.new?.id;
+        if(!id||!patientIdsForRealtimeRef.current.has(id)) return;
+        const full=formatProfileFullName(payload.new);
+        if(!full) return;
+        setPatients(prev=>prev.map(p=>p.id===id?{...p,fullName:full}:p));
+        setPatientChatContacts(prev=>prev.map(c=>c.id===id?{...c,name:full}:c));
+        setSelPat((sp)=>(sp&&sp.id===id)?{...sp,fullName:full}:sp);
+        setPatProfile((prof)=>(prof&&prof.id===id)?{...prof,first_name:payload.new.first_name,last_name:payload.new.last_name,pre_visit_intake:Object.prototype.hasOwnProperty.call(payload.new||{},"pre_visit_intake")?payload.new.pre_visit_intake:prof.pre_visit_intake,allergies:Object.prototype.hasOwnProperty.call(payload.new||{},"allergies")?payload.new.allergies:prof.allergies,medical_conditions:Object.prototype.hasOwnProperty.call(payload.new||{},"medical_conditions")?payload.new.medical_conditions:prof.medical_conditions}:prof);
+      })
+      .subscribe();
+    return ()=>{ void supabase.removeChannel(ch); };
+  },[user?.id]);
 
   useEffect(()=>{
     const unlock=()=>{ void ensurePortalAudioContext(); };
@@ -145,6 +259,81 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     });
   },[]);
   const isMob=useIsMobile();
+  useEffect(()=>{
+    const timer=setInterval(()=>setVideoNowMs(Date.now()),15000);
+    return ()=>clearInterval(timer);
+  },[]);
+  useEffect(()=>{
+    if(!user?.id) return;
+    let cancelled=false;
+    const loadVideoEvents=async ()=>{
+      const sinceIso=new Date(Date.now()-(12*60*60*1000)).toISOString();
+      const [inRes,startedRes,dismissRes,endedRes]=await Promise.all([
+        supabase
+          .from("patient_messages")
+          .select("id,sender_id,recipient_id,body,created_at")
+          .eq("recipient_id",user.id)
+          .like("body",`${VIDEO_WAITING_CHECKIN_PREFIX}|%`)
+          .gte("created_at",sinceIso)
+          .order("created_at",{ascending:false})
+          .limit(250),
+        supabase
+          .from("patient_messages")
+          .select("id,sender_id,recipient_id,body,created_at")
+          .eq("sender_id",user.id)
+          .like("body",`${VIDEO_CALL_STARTED_PREFIX}|%`)
+          .gte("created_at",sinceIso)
+          .order("created_at",{ascending:false})
+          .limit(250),
+        supabase
+          .from("patient_messages")
+          .select("id,sender_id,recipient_id,body,created_at")
+          .eq("sender_id",user.id)
+          .like("body",`${VIDEO_WAITING_DISMISSED_PREFIX}|%`)
+          .gte("created_at",sinceIso)
+          .order("created_at",{ascending:false})
+          .limit(250),
+        supabase
+          .from("patient_messages")
+          .select("id,sender_id,recipient_id,body,created_at")
+          .eq("sender_id",user.id)
+          .like("body",`${VIDEO_VISIT_ENDED_PREFIX}|%`)
+          .gte("created_at",sinceIso)
+          .order("created_at",{ascending:false})
+          .limit(250),
+      ]);
+      if(cancelled) return;
+      const rows=[...(inRes.data||[]),...(startedRes.data||[]),...(dismissRes.data||[]),...(endedRes.data||[])];
+      const seen=new Set();
+      const merged=rows.filter((r)=>{if(seen.has(r.id)) return false; seen.add(r.id); return true;});
+      setVideoEventRows(merged);
+    };
+    loadVideoEvents();
+    const poll=setInterval(loadVideoEvents,8000);
+    const ch=supabase
+      .channel(`doc-video-${user.id}`)
+      .on("postgres_changes",{event:"INSERT",schema:"public",table:"patient_messages"},(payload)=>{
+        const m=payload.new;
+        if(!m) return;
+        if(m.recipient_id===user.id||m.sender_id===user.id){
+          const b=String(m.body||"");
+          if(
+            b.startsWith(`${VIDEO_WAITING_CHECKIN_PREFIX}|`) ||
+            b.startsWith(`${VIDEO_CALL_STARTED_PREFIX}|`) ||
+            b.startsWith(`${VIDEO_VISIT_ENDED_PREFIX}|`) ||
+            b.startsWith(`${VIDEO_WAITING_DISMISSED_PREFIX}|`)
+          ){
+            loadVideoEvents();
+          }
+        }
+      })
+      .subscribe();
+    return ()=>{
+      cancelled=true;
+      clearInterval(poll);
+      supabase.removeChannel(ch);
+    };
+  },[user?.id]);
 
   useEffect(()=>{
     if(!user?.id) return;
@@ -160,16 +349,13 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   },[page,user?.id]);
   const t1="var(--t1)",t2="var(--t2)",t3="var(--t3)",b1="var(--b1)";
   const DocAC="var(--doc-p)";
-  const formatVideoWindow=(startMs,endMs)=>`${new Date(startMs).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})} - ${new Date(endMs).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}`;
   const [localName,setLocalName]=useState(userName);
   useEffect(()=>{ if(userName) setLocalName(userName); },[userName]);
   const name=localName||userName||user?.displayName||user?.email?.split("@")[0]||"Doctor";
   const totalChatUnread=unreadCount+unreadPatientCount;
   const saveName=(n)=>{ setLocalName(n); if(setDisplayName) setDisplayName(n); };
   async function handleSignOut(){
-    setOnlineUsers(prev=>{const n={...prev};delete n[user.id];return n;});
-    await supabase.from("user_presence").upsert({user_id:user.id,is_online:false,last_seen:new Date().toISOString()},{onConflict:"user_id"});
-    await supabase.auth.signOut();
+    await signOutClearPresence(user?.id);
   }
 
   const SOUND_PROFILES={
@@ -222,7 +408,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       try{
         const[dpData,apptData,pharmData]=await Promise.all([
           supabase.from("doctor_patients").select("patient_id, profiles!doctor_patients_patient_id_fkey(id,first_name,last_name,email,dob,blood_type,allergies,medical_conditions)").eq("doctor_id",user.id),
-          supabase.from("appointments").select("id,patient_id,date,time,type,status,notes").eq("doctor_id",user.id).neq("status","cancelled").order("date",{ascending:true}),
+          supabase.from("appointments").select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status").eq("doctor_id",user.id).neq("status","cancelled").order("date",{ascending:true}),
           supabase.from("profiles").select("id,first_name,last_name,email,pharmacy_name").eq("role","pharmacist"),
         ]);
         const pRows=(dpData.data||[]).map(r=>r.profiles).filter(Boolean);
@@ -294,6 +480,43 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     })();
   },[user?.id]);
   useEffect(()=>{
+    if(!user?.id){ setDoctorVideoVisitRequests([]); return; }
+    const reloadRequests=async()=>{
+      const { data } = await supabase.from("video_visit_requests").select("*").eq("doctor_id",user.id).order("created_at",{ascending:false});
+      setDoctorVideoVisitRequests(data||[]);
+    };
+    void reloadRequests();
+    const vvrCh = supabase
+      .channel(`doc-video-visit-requests-${user.id}`)
+      .on("postgres_changes",{event:"*",schema:"public",table:"video_visit_requests",filter:`doctor_id=eq.${user.id}`},(payload)=>{
+        if(payload.eventType==="INSERT"&&payload.new?.id){
+          const row=payload.new;
+          setDoctorVideoVisitRequests((prev)=>{
+            if(prev.some(r=>r.id===row.id)) return prev;
+            return [row,...prev].sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||"")));
+          });
+          return;
+        }
+        if(payload.eventType==="UPDATE"&&payload.new?.id){
+          const row=payload.new;
+          setDoctorVideoVisitRequests((prev)=>{
+            const ix=prev.findIndex(r=>r.id===row.id);
+            const merged=ix>=0 ? prev.map(r=>r.id===row.id?{...r,...row}:r) : [row,...prev];
+            return merged.sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||"")));
+          });
+          return;
+        }
+        if(payload.eventType==="DELETE"&&payload.old?.id){
+          const delId=payload.old.id;
+          setDoctorVideoVisitRequests((prev)=>prev.filter(r=>r.id!==delId));
+          return;
+        }
+        void reloadRequests();
+      })
+      .subscribe();
+    return ()=>{ supabase.removeChannel(vvrCh); };
+  },[user?.id]);
+  useEffect(()=>{
     if(!user?.id) return;
     const channels=[];
     channels.push(
@@ -322,8 +545,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               if(payload.new.status==="cancelled") return prev.filter(a=>a.id!==payload.new.id);
               return hasRow?prev.map(updater):[...prev,payload.new];
             });
-            if(payload.new.status==="rescheduled"&&payload.new.reschedule_request){
-              setRescheduleReqs(prev=>prev.some(r=>r.id===payload.new.id)?prev:[...prev,payload.new]);
+            if(payload.new.reschedule_request&&hasActiveRescheduleRequest(payload.new)){
+              setRescheduleReqs(prev=>prev.some(r=>r.id===payload.new.id)?prev.map(r=>r.id===payload.new.id?{...r,...payload.new}:r):[...prev,payload.new]);
             } else {
               setRescheduleReqs(prev=>prev.filter(r=>r.id!==payload.new.id));
             }
@@ -389,11 +612,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       if(msgMode==="pharmacy"){
         if(!chatContacts.length) return null;
         if(prev&&chatContacts.some(c=>c.id===prev.id)) return chatContacts.find(c=>c.id===prev.id);
-        return chatContacts[0];
+        return null;
       }
       if(!patientChatContacts.length) return null;
       if(prev&&patientChatContacts.some(c=>c.id===prev.id)) return patientChatContacts.find(c=>c.id===prev.id);
-      return patientChatContacts[0];
+      return null;
     });
   },[msgMode,page,chatContacts,patientChatContacts]);
   useEffect(()=>{
@@ -501,6 +724,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             const msg=payload.new;
             if(msg.sender_id===user.id) return;
             if(soundEnabledRef.current) playNotifSound(soundTypeRef.current,soundVolumeRef.current);
+            if(typeof window!=="undefined"){
+              const key=String(msg.id||"");
+              if(key&&!announcedInboundMsgAlertIdsRef.current.has(key)){
+                announcedInboundMsgAlertIdsRef.current.add(key);
+                const senderName=chatContactsRef.current.find(c=>String(c.id)===String(msg.pharmacist_id))?.name||"Pharmacist";
+                try{ window.alert(`${senderName}: ${formatChatNotificationPreview(msg.body||"")||"sent you a message"}`); }catch{}
+              }
+            }
             const currentChat=selChatRef.current;
             setChatContacts(prev=>[...prev].map(c=>c.id===msg.pharmacist_id?{...c,lastMessageAt:msg.created_at}:c).sort((a,b)=>(b.lastMessageAt||"").localeCompare(a.lastMessageAt||"")));
             if(currentChat&&msg.pharmacist_id===currentChat.id){
@@ -554,6 +785,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         return sortContacts([...prev].map(c=>c.id===other?{...c,lastMessageAt:msg.created_at}:c));
       });
       if(msg.sender_id!==user.id&&soundEnabledRef.current) playNotifSound(soundTypeRef.current,soundVolumeRef.current);
+      if(msg.sender_id!==user.id&&typeof window!=="undefined"){
+        const key=String(msg.id||"");
+        const b=String(msg.body||"");
+        if(key&&!announcedInboundMsgAlertIdsRef.current.has(key)&&!/^VIDEO_[A-Z_]+\|/.test(b)){
+          announcedInboundMsgAlertIdsRef.current.add(key);
+          const senderName=patientChatContactsRef.current.find(c=>String(c.id)===String(other))?.name||"Patient";
+          try{ window.alert(`${senderName}: ${formatChatNotificationPreview(b)||"sent you a message"}`); }catch{}
+        }
+      }
       if(mode==="patients"&&currentChat&&currentChat.id===other){
         const pair=new Set([msg.sender_id,msg.recipient_id]);
         if(pair.has(user.id)&&pair.has(other)){
@@ -588,42 +828,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       .subscribe();
     return ()=>{ supabase.removeChannel(ptCh); };
   },[user?.id]);
-  useEffect(()=>{
-    if(!user?.id) return;
-    supabase.from("user_presence")
-      .upsert({user_id:user.id,is_online:true,last_seen:new Date().toISOString()},{onConflict:"user_id"})
-      .then(()=>{});
-    supabase.from("user_presence").select("user_id,is_online")
-      .then(({data})=>{
-        if(!data) return;
-        const online={};
-        data.forEach(r=>{ if(r.is_online) online[r.user_id]=true; });
-        setOnlineUsers(online);
-      });
-    const ch=supabase.channel("presence-all")
-      .on("postgres_changes",{event:"INSERT",schema:"public",table:"user_presence"},(payload)=>{
-        if(!payload.new?.user_id) return;
-        if(payload.new.is_online) setOnlineUsers(prev=>({...prev,[payload.new.user_id]:true}));
-        else setOnlineUsers(prev=>{const n={...prev};delete n[payload.new.user_id];return n;});
-      })
-      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"user_presence"},(payload)=>{
-        if(!payload.new?.user_id) return;
-        if(payload.new.is_online) setOnlineUsers(prev=>({...prev,[payload.new.user_id]:true}));
-        else setOnlineUsers(prev=>{const n={...prev};delete n[payload.new.user_id];return n;});
-      })
-      .subscribe();
-    const markOffline=()=>{
-      supabase.from("user_presence")
-        .upsert({user_id:user.id,is_online:false,last_seen:new Date().toISOString()},{onConflict:"user_id"})
-        .then(()=>{});
-    };
-    window.addEventListener("beforeunload",markOffline);
-    return ()=>{
-      window.removeEventListener("beforeunload",markOffline);
-      supabase.removeChannel(ch);
-    };
-  },[user?.id]);
-
   const peerIsPatient=useMemo(()=>!!selChat&&(
     patientChatContacts.some(c=>c.id===selChat.id)||
     (!chatContacts.some(c=>c.id===selChat.id)&&msgMode==="patients")
@@ -714,7 +918,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     } else if(chatContacts.some(c=>c.id===sid)&&!patientChatContacts.some(c=>c.id===sid)){
       sendPatientMsgs=false;
     }
-    const patContext=!sendPatientMsgs&&chatPatient?`📋 Re: ${chatPatient.fullName}${chatPatient.dob?` (DOB: ${chatPatient.dob})`:""}${chatPatient.bloodType?` · Blood: ${chatPatient.bloodType}`:""}${chatPatient.allergies?.length>0?` · Allergies: ${chatPatient.allergies.join(", ")}`:""}${chatPatient.conditions?.length>0?` · Conditions: ${chatPatient.conditions.join(", ")}`:""}
+    const patContext=!sendPatientMsgs&&chatPatient?`Re: ${chatPatient.fullName}${chatPatient.dob?` (DOB: ${chatPatient.dob})`:""}${chatPatient.bloodType?` · Blood: ${chatPatient.bloodType}`:""}${chatPatient.allergies?.length>0?` · Allergies: ${chatPatient.allergies.join(", ")}`:""}${chatPatient.conditions?.length>0?` · Conditions: ${chatPatient.conditions.join(", ")}`:""}
 `:"";
     const body=patContext+userText;
     setMsgInput("");
@@ -925,62 +1129,178 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }
   }
 
-  const openVideoVisit=useCallback(async ()=>{
-    if(!user?.id||!selChat?.id||!peerIsPatient||videoApprovalBusy) return;
-    const nowMs=Date.now();
-    const candidate=(allAppointments||[])
-      .filter(a=>a?.status==="scheduled"&&a?.patient_id===selChat.id&&a?.date&&a?.time&&/virtual/i.test(String(a?.type||"")))
-      .map(a=>{
-        const rawTime=String(a.time||"");
-        const timePart=rawTime.length>=8?rawTime.slice(0,8):(rawTime.length===5?`${rawTime}:00`:rawTime);
-        const startMs=Date.parse(`${a.date}T${timePart}`);
-        if(Number.isNaN(startMs)) return null;
-        const windowStartMs=startMs-(10*60*1000);
-        const windowEndMs=startMs+(50*60*1000);
-        return {windowStartMs,windowEndMs};
-      })
-      .filter(Boolean)
-      .find(w=>nowMs>=w.windowStartMs&&nowMs<=w.windowEndMs);
-    if(!candidate){
-      if(typeof window!=="undefined"){
-        window.alert("Video can only be approved during this patient's scheduled virtual appointment time.");
+  const startVideoVisitForPatient=useCallback(async ({patientId,windowStartMs,windowEndMs})=>{
+    if(!user?.id||!patientId||videoApprovalBusy) return false;
+    let overlapping = findVirtualAppointmentForDoctorVideoStart(allAppointments, user.id, patientId, windowStartMs, windowEndMs);
+    let canon = overlapping ? getAppointmentVideoWindowLoose(overlapping) : null;
+    if((!overlapping?.id || !canon) && user?.id){
+      try{
+        const { data: dbRows, error: dbErr } = await supabase
+          .from("appointments")
+          .select("id,doctor_id,patient_id,date,time,type,status,virtual_visit_status")
+          .eq("doctor_id", user.id)
+          .eq("patient_id", patientId)
+          .neq("status", "cancelled")
+          .neq("status", "completed")
+          .order("date", { ascending: true })
+          .order("time", { ascending: true })
+          .limit(40);
+        if(!dbErr){
+          const best = pickBestDoctorVideoStartCandidate(dbRows || [], windowStartMs, windowEndMs);
+          if(best?.a?.id && best?.w){
+            overlapping = best.a;
+            canon = best.w;
+          }
+        }
+      }catch(e){
+        console.warn("startVideoVisitForPatient db fallback failed:", e?.message || e);
       }
-      return;
     }
-    const roomId=buildVideoRoomId(user.id,selChat.id);
-    const body=createVideoApprovalMessageBody({
+    if(!overlapping?.id || !canon){
+      if(typeof window!=="undefined"){
+        window.alert("No scheduled virtual visit matches this time window. Open the patient’s upcoming appointments and try again.");
+      }
+      return false;
+    }
+    const windowMsgStartMs = canon.windowStartMs;
+    const windowMsgEndMs = canon.windowEndMs;
+    const roomId=buildVideoRoomId(user.id,patientId);
+    const url=buildVideoCallUrlFromRoom(roomId);
+    const nowMs=Date.now();
+    const body=createVideoSessionMessageBody({
       roomId,
-      windowStartIso:new Date(candidate.windowStartMs).toISOString(),
-      windowEndIso:new Date(candidate.windowEndMs).toISOString(),
+      windowStartIso:new Date(windowMsgStartMs).toISOString(),
+      windowEndIso:new Date(windowMsgEndMs).toISOString(),
+      startedAtIso:new Date(nowMs).toISOString(),
     });
     const tempId=`temp-video-${Date.now()}`;
     const nowIso=new Date().toISOString();
-    const tempMsg={id:tempId,sender_id:user.id,recipient_id:selChat.id,body,created_at:nowIso,read_at:null};
+    const tempMsg={id:tempId,sender_id:user.id,recipient_id:patientId,body,created_at:nowIso,read_at:null};
+    const mirrorInOpenThread=msgMode==="patients"&&selChat?.id===patientId;
     setVideoApprovalBusy(true);
-    setMessages(prev=>sortMsgs([...prev,tempMsg]));
+    setVideoStartTargetId(patientId);
     try{
-      const{data:msg,error}=await supabase.from("patient_messages")
-        .insert({sender_id:user.id,recipient_id:selChat.id,body})
-        .select("*").single();
-      if(error) throw error;
-      setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
-      notifyRecipientNewChatMessage({
-        recipientId:selChat.id,
-        senderName:`Dr. ${name}`,
-        messageText:"Video visit approved for your current appointment window.",
-        relatedMessageId:msg?.id,
-      });
-      const url=buildVideoCallUrlFromRoom(roomId);
-      if(typeof window!=="undefined"&&url) window.open(url,"_blank","noopener,noreferrer");
-    }catch{
-      setMessages(prev=>prev.filter(m=>m.id!==tempId));
-      if(typeof window!=="undefined"){
-        window.alert("Could not approve video visit right now. Please try again.");
+      const { error: stErr } = await supabase.from("appointments").update({
+        virtual_visit_status: VS.VIDEO_STARTED,
+        updated_at: new Date().toISOString(),
+      }).eq("id", overlapping.id);
+      if(stErr) throw stErr;
+      const mergeVs=(a)=> (a.id===overlapping.id ? { ...a, virtual_visit_status: VS.VIDEO_STARTED } : a);
+      setAllAppointments((prev)=>prev.map(mergeVs));
+      setAppointments((prev)=>prev.map(mergeVs));
+      if(mirrorInOpenThread){
+        setMessages(prev=>sortMsgs([...prev,tempMsg]));
       }
+      const{data:msg,error}=await supabase.from("patient_messages")
+        .insert({sender_id:user.id,recipient_id:patientId,body})
+        .select("*").single();
+      if(error){
+        console.error("patient_messages insert (video visit):", error.message, error.details, error.hint);
+        throw error;
+      }
+      if(mirrorInOpenThread){
+        setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+      }
+      notifyRecipientNewChatMessage({
+        recipientId:patientId,
+        senderName:`Dr. ${name}`,
+        messageText:"Your doctor has joined. Join video chat.",
+        relatedMessageId:msg?.id,
+        title:"Your doctor joined the video visit",
+      });
+      if(typeof window!=="undefined"){
+        const opened=window.open(url,"_blank","noopener,noreferrer");
+        if(!opened){
+          window.alert("Invite sent — your patient will see Join in Messages. Allow pop-ups if you want the video room to open here too.");
+        }
+      }
+      return true;
+    }catch(e){
+      const msg=e?.message||String(e);
+      console.error("startVideoVisitForPatient patient_messages insert:", msg, e);
+      if(mirrorInOpenThread){
+        setMessages(prev=>prev.filter(m=>m.id!==tempId));
+      }
+      if(typeof window!=="undefined"){
+        window.alert(`Could not start the video visit. ${msg}`);
+      }
+      return false;
     }finally{
       setVideoApprovalBusy(false);
+      setVideoStartTargetId(null);
     }
-  },[allAppointments,name,peerIsPatient,selChat?.id,user?.id,videoApprovalBusy]);
+  },[allAppointments,msgMode,name,selChat?.id,user?.id,videoApprovalBusy]);
+  const endVideoVisitForPatientContext=useCallback(async ({patientId,windowStartMs,windowEndMs,mirrorInOpenThread=true})=>{
+    if(!user?.id||!patientId||videoEndBusy) return false;
+    const overlapping=findVirtualAppointmentForDoctorVideoEnd(allAppointments,user.id,patientId,windowStartMs,windowEndMs);
+    const roomId=buildVideoRoomId(user.id,patientId);
+    const canon=overlapping?getAppointmentVideoWindow(overlapping):null;
+    const ws=canon?canon.windowStartMs:windowStartMs;
+    const we=canon?canon.windowEndMs:windowEndMs;
+    const body=createVideoSessionEndedMessageBody({
+      roomId,
+      windowStartIso:new Date(ws).toISOString(),
+      windowEndIso:new Date(we).toISOString(),
+    });
+    if(!body) return;
+    setVideoEndBusy(true);
+    const tempId=`temp-video-end-${Date.now()}`;
+    const nowIso=new Date().toISOString();
+    const tempMsg={id:tempId,sender_id:user.id,recipient_id:patientId,body,created_at:nowIso,read_at:null};
+    const shouldMirror=mirrorInOpenThread&&msgMode==="patients"&&selChat?.id===patientId;
+    try{
+      if(overlapping?.id){
+        const { error: upErr } = await supabase.from("appointments").update({
+          status: "completed",
+          virtual_visit_status: VS.COMPLETED,
+          updated_at: new Date().toISOString(),
+        }).eq("id", overlapping.id);
+        if(!upErr){
+          const mergeW=(a)=> (a.id===overlapping.id ? { ...a, status: "completed", virtual_visit_status: VS.COMPLETED } : a);
+          setAllAppointments((prev)=>prev.map(mergeW));
+          setAppointments((prev)=>prev.map(mergeW));
+        }
+      }
+      if(shouldMirror){ setMessages((prev)=>sortMsgs([...prev,tempMsg])); }
+      const{data:msg,error}=await supabase.from("patient_messages")
+        .insert({sender_id:user.id,recipient_id:patientId,body})
+        .select("*").single();
+      if(error) throw error;
+      if(shouldMirror){ setMessages((prev)=>sortMsgs(prev.map((m)=>m.id===tempId?msg:m))); }
+      notifyRecipientNewChatMessage({
+        recipientId:patientId,
+        senderName:`Dr. ${name}`,
+        messageText:formatChatNotificationPreview(body),
+        relatedMessageId:msg?.id,
+        title:"Video visit ended",
+      });
+      return true;
+    }catch(e){
+      const errMsg=e?.message||String(e);
+      console.error("endVideoVisitForPatient:",errMsg,e);
+      if(shouldMirror){ setMessages((prev)=>prev.filter((m)=>m.id!==tempId)); }
+      if(typeof window!=="undefined") window.alert(`Could not save end-of-visit notice. ${errMsg}`);
+      return false;
+    }finally{
+      setVideoEndBusy(false);
+    }
+  },[allAppointments,msgMode,name,selChat?.id,user?.id,videoEndBusy]);
+  const endVideoVisitForPatient=useCallback(async ()=>{
+    if(!user?.id||!selChat?.id||!peerIsPatient||videoEndBusy) return;
+    const patientId=selChat.id;
+    const { windowStartMs, windowEndMs } = resolveDoctorPatientInviteWindowMs(allAppointments, patientId, Date.now());
+    await endVideoVisitForPatientContext({ patientId, windowStartMs, windowEndMs, mirrorInOpenThread: true });
+  },[allAppointments,endVideoVisitForPatientContext,peerIsPatient,selChat?.id,user?.id,videoEndBusy]);
+  const openVideoVisit=useCallback(async ()=>{
+    if(!selChat?.id||!peerIsPatient) return;
+    const nowMs=Date.now();
+    const { windowStartMs, windowEndMs } = resolveDoctorPatientInviteWindowMs(allAppointments, selChat.id, nowMs);
+    await startVideoVisitForPatient({
+      patientId: selChat.id,
+      windowStartMs,
+      windowEndMs,
+    });
+  },[allAppointments,peerIsPatient,selChat?.id,startVideoVisitForPatient]);
 
   useEffect(()=>{
     if(!selRxChat) return;
@@ -1021,16 +1341,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     if(!email||addPatientBusy)return;
     setAddPatientBusy(true);setAddPatientMsg(null);
     try{
-      console.log("🔍 Searching for email:", email);
+      console.log("Searching for email:", email);
       const{data:rows,error}=await supabase
         .from("profiles")
         .select("id,first_name,last_name,email,dob,blood_type,allergies,medical_conditions,role")
         .eq("email",email)
         .limit(1);
-      console.log("📦 Supabase result:", {rows, error, rowCount: rows?.length});
-      if(error){console.error("❌ Search error:",error);setAddPatientMsg({type:"err",text:"Search failed: "+error.message});return;}
+      console.log("Supabase result:", {rows, error, rowCount: rows?.length});
+      if(error){console.error("Search error:",error);setAddPatientMsg({type:"err",text:"Search failed: "+error.message});return;}
       const prof=rows&&rows.length>0?rows[0]:null;
-      console.log("👤 Profile found:", prof);
+      console.log("Profile found:", prof);
       if(!prof){setAddPatientMsg({type:"err",text:`No account found with email: ${email}`});return;}
       if(prof.role==="doctor"){setAddPatientMsg({type:"err",text:"That account belongs to a doctor."});return;}
       if(prof.role==="pharmacist"){setAddPatientMsg({type:"err",text:"That account belongs to a pharmacist."});return;}
@@ -1064,10 +1384,65 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       setNotes((notesRes.data||[]).map(d=>({id:d.id,note:d.note,createdAt:d.created_at})));
       setPatRx(rxRes.data||[]);
       const appts=apptRes.data||[];setAppointments(appts);
-      setRescheduleReqs(appts.filter(a=>a.status==="rescheduled"&&a.reschedule_request));
+      setRescheduleReqs(appts.filter(hasActiveRescheduleRequest));
       const key=`doc_${user.id}_pat_${pat.id}`;
       try{const s=JSON.parse(localStorage.getItem(key)||"{}");if(s.flag)setPatFlag(s.flag);if(s.vitals)setVitals(s.vitals);}catch{}
     }catch(e){}finally{setLoading(false);}
+  }
+
+  async function confirmClearPatientVirtualCheckIn(){
+    if(!checkInClearAwaitingConfirmPatientId||clearCheckInBusy) return;
+    const pid=checkInClearAwaitingConfirmPatientId;
+    setClearCheckInBusy(true);
+    try{
+      const{error}=await doctorClearPatientVirtualVisitCheckIn(pid);
+      if(error) throw error;
+      await supabase.from("notifications").insert({
+        user_id:pid,
+        type:"general",
+        title:"Check-in form reset",
+        body:`Dr. ${name} cleared your saved virtual visit check-in. You'll need to complete it again before your visit.`,
+      }).catch(()=>{});
+      setPatProfile(p=>(p?.id===pid?{...p,pre_visit_intake:null,allergies:[],medical_conditions:[]}:p));
+      setVirtualCheckInPatientProfile(vp=>(vp?.id===pid?{...vp,pre_visit_intake:null,allergies:[],medical_conditions:[]}:vp));
+      setCheckInClearAwaitingConfirmPatientId(null);
+    }catch(e){
+      const msg=e?.message||String(e);
+      console.error("confirmClearPatientVirtualCheckIn:",msg,e);
+      if(typeof window!=="undefined") window.alert(`Could not delete check-in form: ${msg}`);
+    }finally{
+      setClearCheckInBusy(false);
+    }
+  }
+
+  async function requestCheckInRefillForPatient(patientId){
+    if(!user?.id||!patientId||refillRequestBusyPatientId)return;
+    setRefillRequestBusyPatientId(patientId);
+    try{
+      const { error } = await doctorRequestCheckInRefill(patientId, user.id);
+      if(error) throw error;
+      const { data: prof } = await supabase.from("profiles").select("*").eq("id", patientId).maybeSingle();
+      if(prof){
+        if(selPat?.id===patientId) setPatProfile(prof);
+        setVirtualCheckInPatientProfile((vp)=> (vp?.id===patientId ? prof : vp));
+      }
+      const { data: allA } = await supabase
+        .from("appointments")
+        .select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status")
+        .eq("doctor_id", user.id)
+        .neq("status", "cancelled")
+        .order("date", { ascending: true });
+      if(Array.isArray(allA)) setAllAppointments(allA);
+      if(selPat?.id===patientId){
+        const { data: pAppts } = await supabase.from("appointments").select("*").eq("patient_id", patientId).eq("doctor_id", user.id).order("date", { ascending: true });
+        if(pAppts) setAppointments(pAppts);
+      }
+    }catch(e){
+      const msg=e?.message||String(e);
+      if(typeof window!=="undefined")window.alert(`Could not request new form: ${msg}`);
+    }finally{
+      setRefillRequestBusyPatientId(null);
+    }
   }
 
   async function openNotificationTarget(n){
@@ -1125,7 +1500,17 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   async function addAppointment(){
     if(!apptForm.date||!apptForm.time||!selPat)return;setApptBusy(true);
     try{
-      const{data:appt,error}=await supabase.from("appointments").insert({patient_id:selPat.id,doctor_id:user.id,date:apptForm.date,time:apptForm.time,type:apptForm.type,notes:apptForm.notes||null,status:"scheduled"}).select("*").single();
+      const row={
+        patient_id:selPat.id,
+        doctor_id:user.id,
+        date:apptForm.date,
+        time:apptForm.time,
+        type:apptForm.type,
+        notes:apptForm.notes||null,
+        status:"scheduled",
+      };
+      if(isVideoStyleVisitType(row)) row.virtual_visit_status=VS.PENDING;
+      const{data:appt,error}=await supabase.from("appointments").insert(row).select("*").single();
       if(error)throw error;
       setAppointments(prev=>[...prev,appt]);setAllAppointments(prev=>[...prev,appt]);
       setApptForm({date:"",time:"",type:"Follow-up",notes:""});
@@ -1133,8 +1518,25 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }catch(e){}finally{setApptBusy(false);}
   }
   async function deleteAppointment(id){
-    await supabase.from("appointments").update({status:"cancelled",updated_at:new Date().toISOString()}).eq("id",id);
+    const appt = (allAppointments || []).find((a) => a.id === id) || (appointments || []).find((a) => a.id === id) || null;
+    await supabase.from("appointments").update({
+      status:"cancelled",
+      virtual_visit_status: VS.CANCELLED,
+      updated_at:new Date().toISOString(),
+    }).eq("id",id);
     setAppointments(p=>p.filter(a=>a.id!==id));setAllAppointments(p=>p.filter(a=>a.id!==id));
+    if(appt?.patient_id){
+      const label = appt?.date && appt?.time
+        ? new Date(`${appt.date}T${normTimeValue(appt.time) || "12:00:00"}`).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})
+        : "the scheduled time";
+      await supabase.from("notifications").insert({
+        user_id: appt.patient_id,
+        type:"general",
+        title:"Appointment cancelled",
+        body:`Your appointment for ${label} was cancelled by your doctor.`,
+        related_id: appt.id,
+      });
+    }
   }
   function addAvailabilitySlot(){
     if(!availDate||!availTime){
@@ -1207,7 +1609,23 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     setAppointments(p=>p.map(updater));
     setAllAppointments(p=>p.map(updater));
     setRescheduleReqs(p=>p.filter(r=>r.id!==appt.id));
-    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Appointment Approved",body:`Your reschedule was approved. New time: ${new Date(newDate+"T"+newTime).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}.`}).catch(()=>{});
+    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Appointment updated",body:`Your appointment was moved to ${new Date(newDate+"T"+newTime).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}.`});
+  }
+  async function approveRescheduleAsRequested(appt){
+    const n=normalizeRescheduleRequest(appt.reschedule_request);
+    if(!n?.patient?.date||!n?.patient?.time) return;
+    await confirmReschedule(appt,n.patient.date,n.patient.time);
+  }
+  async function suggestRescheduleTime(appt,newDate,newTime){
+    const n=normalizeRescheduleRequest(appt.reschedule_request);
+    if(!n?.patient?.date||!n?.patient?.time) return;
+    const payload=buildDoctorCounterPayload(n.patient,{date:newDate,time:newTime});
+    await supabase.from("appointments").update({reschedule_request:payload,status:"scheduled",updated_at:new Date().toISOString()}).eq("id",appt.id);
+    const updater=a=>a.id===appt.id?{...a,status:"scheduled",reschedule_request:payload}:a;
+    setAppointments(p=>p.map(updater));
+    setAllAppointments(p=>p.map(updater));
+    setRescheduleReqs(p=>p.map(r=>r.id===appt.id?{...r,reschedule_request:payload}:r));
+    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"New time suggested",body:`Dr. ${name} suggested ${new Date(newDate+"T"+newTime).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}. Open Appointments to accept or decline.`});
   }
   async function rejectReschedule(appt,message){
     await supabase.from("appointments").update({status:"scheduled",reschedule_request:null,updated_at:new Date().toISOString()}).eq("id",appt.id);
@@ -1215,7 +1633,187 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     setAppointments(p=>p.map(updater));
     setAllAppointments(p=>p.map(updater));
     setRescheduleReqs(p=>p.filter(r=>r.id!==appt.id));
-    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Reschedule Request Denied",body:message}).catch(()=>{});
+    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Reschedule not approved",body:message});
+  }
+  async function denyOrWithdrawReschedule(appt,message){
+    const n=normalizeRescheduleRequest(appt.reschedule_request);
+    if(n?.phase==="doctor_counter"){
+      const back=buildPatientRescheduleRequestPayload({date:n.patient.date,time:n.patient.time});
+      await supabase.from("appointments").update({reschedule_request:back,status:"scheduled",updated_at:new Date().toISOString()}).eq("id",appt.id);
+      const updater=a=>a.id===appt.id?{...a,status:"scheduled",reschedule_request:back}:a;
+      setAppointments(p=>p.map(updater));
+      setAllAppointments(p=>p.map(updater));
+      setRescheduleReqs(p=>p.map(r=>r.id===appt.id?{...r,reschedule_request:back}:r));
+      await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Counter-offer withdrawn",body:message||"Your original reschedule request is still pending review."});
+      return;
+    }
+    await rejectReschedule(appt,message);
+  }
+  async function dismissOrRemoveWaiting({patientId,windowStartMs,windowEndMs,roomId}){
+    if(!user?.id||!patientId||!roomId) return;
+    const body=createVideoWaitingDismissedMessageBody({
+      roomId,
+      windowStartIso:new Date(windowStartMs).toISOString(),
+      windowEndIso:new Date(windowEndMs).toISOString(),
+    });
+    if(!body) return;
+    const{error}=await supabase.from("patient_messages").insert({sender_id:user.id,recipient_id:patientId,body});
+    if(error&&typeof window!=="undefined") window.alert("Could not update waiting room. Try again.");
+  }
+  async function completeVideoVisitForAppointment(appt){
+    if(!appt?.id||!user?.id) return;
+    const t=String(appt.time||"");
+    const tNorm=t.length===5?`${t}:00`:t;
+    try{
+      const window=getAppointmentVideoWindow(appt);
+      if(window&&appt.patient_id&&appt.doctor_id===user.id){
+        const roomId=buildVideoRoomId(user.id,appt.patient_id);
+        const body=createVideoSessionEndedMessageBody({
+          roomId,
+          windowStartIso:new Date(window.windowStartMs).toISOString(),
+          windowEndIso:new Date(window.windowEndMs).toISOString(),
+        });
+        if(body){
+          const{data:vidMsg,error:veErr}=await supabase.from("patient_messages").insert({sender_id:user.id,recipient_id:appt.patient_id,body}).select("*").single();
+          if(veErr){
+            console.error("VIDEO_VISIT_ENDED insert:",veErr.message);
+          }else if(vidMsg){
+            notifyRecipientNewChatMessage({
+              recipientId:appt.patient_id,
+              senderName:`Dr. ${name}`,
+              messageText:formatChatNotificationPreview(body),
+              relatedMessageId:vidMsg?.id,
+              title:"Video visit ended",
+            });
+            if(msgMode==="patients"&&selChat?.id===appt.patient_id){ setMessages((prev)=>sortMsgs([...prev,vidMsg])); }
+          }
+        }
+      }
+    }catch(e){
+      console.error("completeVideoVisitForAppointment VIDEO_VISIT_ENDED:",e?.message||e);
+    }
+    await supabase.from("appointments").update({
+      status:"completed",
+      virtual_visit_status: VS.COMPLETED,
+      updated_at:new Date().toISOString(),
+    }).eq("id",appt.id);
+    const updater=a=>a.id===appt.id?{...a,status:"completed",virtual_visit_status:VS.COMPLETED}:a;
+    setAllAppointments(p=>p.map(updater));
+    setAppointments(p=>p.map(updater));
+    const label=appt.date?new Date(`${appt.date}T${tNorm||"12:00:00"}`).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"";
+    await supabase.from("notifications").insert({user_id:appt.patient_id,type:"general",title:"Visit completed",body:`Your virtual visit for ${label} is marked complete.`});
+  }
+  async function approveUrgentVideoVisit(req){
+    if(!user?.id||!req?.id)return;
+    setUrgentVisitBusyId(req.id);
+    try{
+      const tRaw=String(req.requested_time||"12:00:00");
+      const timeSql=tRaw.length===5?`${tRaw}:00`:tRaw.length>=8?tRaw.slice(0,8):`${tRaw}:00`;
+      const {data:appt,error}=await supabase.from("appointments").insert({
+        patient_id:req.patient_id,
+        doctor_id:user.id,
+        date:req.requested_date,
+        time:timeSql,
+        type:"Virtual Visit",
+        notes:req.reason?"Urgent visit: "+String(req.reason).slice(0,500):null,
+        status:"scheduled",
+        virtual_visit_status: VS.PENDING,
+      }).select("*").single();
+      if(error)throw error;
+      const {error:updErr}=await supabase.from("video_visit_requests").update({
+        status:"approved",
+        appointment_id:appt.id,
+        updated_at:new Date().toISOString(),
+      }).eq("id",req.id).eq("doctor_id",user.id);
+      if(updErr)throw updErr;
+      setDoctorVideoVisitRequests(prev=>prev.map(r=>r.id===req.id?{...r,status:"approved",appointment_id:appt.id}:r));
+      setAllAppointments(prev=>prev.some(a=>a.id===appt.id)?prev:[...prev,appt]);
+      const patientFirst=name.split(" ")[0]||"Your doctor";
+      const label=new Date(`${req.requested_date}T${timeSql}`).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+      await supabase.from("notifications").insert({
+        user_id:req.patient_id,
+        type:"general",
+        title:"Visit request approved",
+        body:`Dr. ${patientFirst} approved your visit for ${label}. Open Appointments to join during your virtual window.`,
+      });
+    }catch(e){
+      if(typeof window!=="undefined")window.alert(String(e?.message||"Could not approve request."));
+    }finally{
+      setUrgentVisitBusyId(null);
+    }
+  }
+  async function denyUrgentVideoVisit(req){
+    if(!user?.id||!req?.id)return;
+    setUrgentVisitBusyId(req.id);
+    try{
+      const {error}=await supabase.from("video_visit_requests").update({
+        status:"denied",
+        denial_note:null,
+        updated_at:new Date().toISOString(),
+      }).eq("id",req.id).eq("doctor_id",user.id);
+      if(error)throw error;
+      setDoctorVideoVisitRequests(prev=>prev.map(r=>r.id===req.id?{...r,status:"denied",denial_note:null}:r));
+      await supabase.from("notifications").insert({
+        user_id:req.patient_id,
+        type:"general",
+        title:"Visit request denied",
+        body:"Your visit request could not be approved at this time. Book a regular appointment or message your doctor if you still need care.",
+      });
+    }catch(e){
+      if(typeof window!=="undefined")window.alert(String(e?.message||"Could not deny request."));
+    }finally{
+      setUrgentVisitBusyId(null);
+    }
+  }
+  async function proposeAlternateUrgentVisit(req){
+    if(!user?.id||!req?.id)return;
+    if(typeof window==="undefined")return;
+    const dateDefault=(req.doctor_suggested_date||req.requested_date||"").slice(0,10);
+    const dateStr=window.prompt("Suggested visit date (YYYY-MM-DD):",dateDefault||"");
+    if(dateStr===null)return;
+    const dateTrim=dateStr.trim();
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(dateTrim)){
+      window.alert("Use YYYY-MM-DD for the date.");
+      return;
+    }
+    const timeDefault=
+      req.doctor_suggested_time&&req.doctor_suggested_date===dateTrim
+        ?String(req.doctor_suggested_time).slice(0,5)
+        :req.requested_time&&req.requested_date===dateTrim
+          ?String(req.requested_time).slice(0,5)
+          : "";
+    const timeStr=window.prompt("Suggested time (HH:MM, 24-hour):",timeDefault);
+    if(timeStr===null)return;
+    const m=String(timeStr).trim().match(/^(\d{1,2}):(\d{2})$/);
+    if(!m){
+      window.alert('Use HH:MM for time (e.g. 14:30).');
+      return;
+    }
+    const hh=Math.min(23,Math.max(0,parseInt(m[1],10)));
+    const mm=Math.min(59,Math.max(0,parseInt(m[2],10)));
+    const timeSql=`${String(hh).padStart(2,"0")}:${String(mm).padStart(2,"0")}:00`;
+    setUrgentVisitBusyId(req.id);
+    try{
+      const {error}=await supabase.from("video_visit_requests").update({
+        doctor_suggested_date:dateTrim,
+        doctor_suggested_time:timeSql,
+        updated_at:new Date().toISOString(),
+      }).eq("id",req.id).eq("doctor_id",user.id).eq("status","pending");
+      if(error)throw error;
+      setDoctorVideoVisitRequests(prev=>prev.map(r=>r.id===req.id?{...r,doctor_suggested_date:dateTrim,doctor_suggested_time:timeSql}:r));
+      const docFirst=name.split(" ")[0]||"Your doctor";
+      const label=new Date(`${dateTrim}T${timeSql}`).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+      await supabase.from("notifications").insert({
+        user_id:req.patient_id,
+        type:"general",
+        title:"Different time suggested",
+        body:`Dr. ${docFirst} suggested ${label} instead. Open Appointments and the Requests tab to review.`,
+      });
+    }catch(e){
+      if(typeof window!=="undefined")window.alert(String(e?.message||"Could not save suggestion."));
+    }finally{
+      setUrgentVisitBusyId(null);
+    }
   }
   async function addNote(){
     if(!note.trim()||!selPat)return;setNoteBusy(true);
@@ -1238,6 +1836,141 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }catch(e){}finally{setDeleteBusy(false);}
   }
   const filtered=patients.filter(p=>!search||(p.fullName||"").toLowerCase().includes(search.toLowerCase())||(p.email||"").toLowerCase().includes(search.toLowerCase()));
+  const patientNameById=useMemo(()=>{
+    const map={};
+    (patients||[]).forEach((p)=>{ if(p?.id) map[p.id]=p.fullName||p.email||"Patient"; });
+    return map;
+  },[patients]);
+  const videoSessionByWindowKey=useMemo(()=>{
+    const m={};
+    const upd=(key,field,ts)=>{
+      if(!m[key]) m[key]={ lastCheckin:null, lastStarted:null, lastDismissed:null, lastEnded:null };
+      const o=m[key];
+      if(!o[field]||String(ts).localeCompare(String(o[field]))>0) o[field]=ts;
+    };
+    (videoEventRows||[]).forEach((row)=>{
+      const b=row.body||"";
+      if(b.startsWith(`${VIDEO_WAITING_CHECKIN_PREFIX}|`)){
+        const p=parseVideoWaitingCheckinMessageBody(b);
+        if(!p) return;
+        const patientId=row.sender_id;
+        const key=`${patientId}|${p.windowStartMs}|${p.windowEndMs}`;
+        upd(key,"lastCheckin",row.created_at);
+        return;
+      }
+      if(b.startsWith(`${VIDEO_CALL_STARTED_PREFIX}|`)){
+        const p=parseVideoApprovalMessageBody(b);
+        if(!p||p.eventType!=="started") return;
+        const patientId=row.recipient_id;
+        const key=`${patientId}|${p.windowStartMs}|${p.windowEndMs}`;
+        upd(key,"lastStarted",row.created_at);
+        return;
+      }
+      if(b.startsWith(`${VIDEO_VISIT_ENDED_PREFIX}|`)){
+        const p=parseVideoApprovalMessageBody(b);
+        if(!p||p.eventType!=="ended") return;
+        const patientId=row.recipient_id;
+        const key=`${patientId}|${p.windowStartMs}|${p.windowEndMs}`;
+        upd(key,"lastEnded",row.created_at);
+        return;
+      }
+      if(b.startsWith(`${VIDEO_WAITING_DISMISSED_PREFIX}|`)){
+        const p=parseVideoWaitingDismissedMessageBody(b);
+        if(!p) return;
+        const patientId=row.recipient_id;
+        const key=`${patientId}|${p.windowStartMs}|${p.windowEndMs}`;
+        upd(key,"lastDismissed",row.created_at);
+      }
+    });
+    return m;
+  },[videoEventRows]);
+  const virtualAppointments=useMemo(()=>{
+    return (allAppointments||[])
+      .filter(a=>
+        ["scheduled","rescheduled"].includes(String(a?.status||"")) &&
+        a?.status!=="completed" &&
+        isVideoStyleVisitType(a) &&
+        a?.patient_id &&
+        a?.date &&
+        a?.time
+      )
+      .map(a=>{
+        const window=getAppointmentVideoWindow(a);
+        if(!window) return null;
+        return {appt:a,window};
+      })
+      .filter(Boolean)
+      .filter((row)=>{
+        const pe=row.window.portalEndMs ?? row.window.windowEndMs;
+        return videoNowMs<=pe;
+      })
+      .sort((x,y)=>x.window.startMs-y.window.startMs);
+  },[allAppointments,videoNowMs]);
+  const waitingRoomList=useMemo(()=>{
+    const list=[];
+    Object.keys(videoSessionByWindowKey).forEach((k)=>{
+      const st=videoSessionByWindowKey[k];
+      if(!st.lastCheckin) return;
+      if(st.lastStarted&&String(st.lastStarted).localeCompare(String(st.lastCheckin))>0){
+        const stillInVisit=!st.lastEnded||String(st.lastStarted).localeCompare(String(st.lastEnded))>0;
+        if(stillInVisit) return;
+      }
+      if(st.lastEnded&&String(st.lastEnded).localeCompare(String(st.lastCheckin))>0) return;
+      if(st.lastDismissed&&String(st.lastDismissed).localeCompare(String(st.lastCheckin))>0) return;
+      const parts=k.split("|");
+      const patientId=parts[0];
+      const windowStartMs=Number(parts[1]);
+      const windowEndMs=Number(parts[2]);
+      if(Number.isNaN(windowStartMs)||Number.isNaN(windowEndMs)) return;
+      const portalEndMs = windowEndMs + VIDEO_VISIT_PORTAL_TAIL_MS;
+      if (videoNowMs > portalEndMs) return;
+      list.push({ patientId, windowStartMs, windowEndMs, checkedInAt: st.lastCheckin });
+    });
+    const haveKey=new Set(list.map(w=>`${w.patientId}|${w.windowStartMs}|${w.windowEndMs}`));
+    (virtualAppointments||[]).forEach(({appt,window})=>{
+      if(getEffectiveVirtualVisitStatus(appt)!==VS.WAITING_FOR_DOCTOR) return;
+      const k=`${appt.patient_id}|${window.windowStartMs}|${window.windowEndMs}`;
+      if(haveKey.has(k)) return;
+      const portalEndMs=window.windowEndMs + VIDEO_VISIT_PORTAL_TAIL_MS;
+      if(videoNowMs > portalEndMs) return;
+      haveKey.add(k);
+      list.push({
+        patientId:appt.patient_id,
+        windowStartMs:window.windowStartMs,
+        windowEndMs:window.windowEndMs,
+        checkedInAt:appt.updated_at || new Date().toISOString(),
+      });
+    });
+    const byPatient={};
+    list.forEach((row)=>{
+      const prev=byPatient[row.patientId];
+      if(!prev||String(row.checkedInAt).localeCompare(String(prev.checkedInAt))>0){
+        byPatient[row.patientId]=row;
+      }
+    });
+    return Object.values(byPatient).sort((a,b)=>a.windowStartMs-b.windowStartMs);
+  },[videoSessionByWindowKey,videoNowMs,virtualAppointments]);
+  const inVisitByWindowKey=useMemo(()=>{
+    const map={};
+    Object.keys(videoSessionByWindowKey).forEach((k)=>{
+      const st=videoSessionByWindowKey[k];
+      const startedAfterCheckin=!st.lastCheckin||String(st.lastStarted).localeCompare(String(st.lastCheckin))>0;
+      const stillInVisit=!!st.lastStarted&&startedAfterCheckin&&(!st.lastEnded||String(st.lastStarted).localeCompare(String(st.lastEnded))>0);
+      map[k]=stillInVisit;
+    });
+    return map;
+  },[videoSessionByWindowKey]);
+  const waitingLookup=useMemo(()=>{
+    const map={};
+    waitingRoomList.forEach((w)=>{
+      map[`${w.patientId}|${w.windowStartMs}|${w.windowEndMs}`]=w;
+    });
+    return map;
+  },[waitingRoomList]);
+  const activeVirtualCount=useMemo(()=>virtualAppointments.filter((row)=>{
+    const pe=row.window.portalEndMs ?? row.window.windowEndMs;
+    return videoNowMs>=row.window.windowStartMs && videoNowMs<=pe;
+  }).length,[videoNowMs,virtualAppointments]);
   const greetHour=new Date().getHours();
   const docGreet=greetHour<12?"Good morning":greetHour<17?"Good afternoon":"Good evening";
   const patientChatFilter=chatSearchEmail.trim().toLowerCase();
@@ -1277,10 +2010,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             <p style={{color:DocAC,fontSize:26,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>{patients.length}</p>
           </div>
           <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:2}}>
-            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Virtual Visits",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
               <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
                 <I size={15}/>{l}
                 {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
+                {id==="virtual"&&activeVirtualCount>0&&<span style={{marginLeft:"auto",background:"var(--gr)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{activeVirtualCount}</span>}
                 {id==="patients"&&patients.length>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{patients.length}</span>}
                 {id==="messages"&&totalChatUnread>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{totalChatUnread}</span>}
               </div>
@@ -1340,8 +2074,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     ].map(([id,label,badge])=>(
                       <button key={id} type="button" onClick={()=>{
                         setMsgMode(id);
-                        if(id==="pharmacy") setSelChat(chatContacts[0]||null);
-                        else setSelChat(patientChatContacts[0]||null);
+                        setSelChat(null);
                       }}
                         style={{
                           flex:1,padding:"8px 10px",borderRadius:10,border:msgMode===id?`2px solid ${DocAC}`:`1px solid ${b1}`,
@@ -1452,9 +2185,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 {!selChat?(
                   <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}>
                     <MessageSquare size={32} color={t3} style={{opacity:.2}}/>
-                    <p style={{color:t2,fontSize:14,fontWeight:600}}>
-                      {msgMode==="pharmacy"?"Search for a pharmacist to start chatting":"Select a patient from the list to start messaging"}
-                    </p>
+                    <p style={{color:t2,fontSize:14,fontWeight:600}}>Select a conversation to view messages.</p>
                   </div>
                 ):(
                   <>
@@ -1476,11 +2207,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                         {peerIsPatient&&(
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
                         <button
                           type="button"
                           onClick={openVideoVisit}
-                          disabled={videoApprovalBusy}
-                          title="Approve and start video visit"
+                          disabled={videoApprovalBusy||videoEndBusy}
+                          title="Start video visit"
                           style={{
                             width:isMob?44:40,
                             height:isMob?44:40,
@@ -1490,14 +2222,37 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             color:DocAC,
                             display:"grid",
                             placeItems:"center",
-                            cursor:videoApprovalBusy?"not-allowed":"pointer",
-                            opacity:videoApprovalBusy?0.55:1,
+                            cursor:(videoApprovalBusy||videoEndBusy)?"not-allowed":"pointer",
+                            opacity:(videoApprovalBusy||videoEndBusy)?0.55:1,
                             fontFamily:"inherit",
                           }}
-                          aria-label="Approve and start video call"
+                          aria-label="Start video call"
                         >
                           {videoApprovalBusy?<Loader2 size={18} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={18}/>}
                         </button>
+                        <button
+                          type="button"
+                          onClick={endVideoVisitForPatient}
+                          disabled={videoApprovalBusy||videoEndBusy}
+                          title="End video visit — patient can no longer join until you start again"
+                          style={{
+                            width:isMob?44:40,
+                            height:isMob?44:40,
+                            borderRadius:10,
+                            border:`1px solid rgba(185,28,28,.3)`,
+                            background:"var(--s1)",
+                            color:"var(--ro)",
+                            display:"grid",
+                            placeItems:"center",
+                            cursor:(videoApprovalBusy||videoEndBusy)?"not-allowed":"pointer",
+                            opacity:(videoApprovalBusy||videoEndBusy)?0.55:1,
+                            fontFamily:"inherit",
+                          }}
+                          aria-label="End video visit"
+                        >
+                          {videoEndBusy?<Loader2 size={18} style={{animation:"spin360 .7s linear infinite"}}/>:<PhoneOff size={17}/>}
+                        </button>
+                        </div>
                         )}
                         <button
                           type="button"
@@ -1541,7 +2296,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             </div>
                             <div style={{display:"flex",alignItems:"center",gap:10}}>
                               <Volume1 size={13} color={t3} style={{flexShrink:0}}/>
-                              <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e=>changeSoundVolume(parseFloat(e.target.value))} style={{flex:1,accentColor:DocAC,cursor:"pointer"}}/>
+                              <input type="range" min="0" max="1" step="0.05" value={soundVolume} onChange={e=>changeSoundVolume(parseFloat(e.target.value))} style={{flex:1,accentColor:DocAC,cursor:"pointer"}}/>
                               <Volume2 size={13} color={t3} style={{flexShrink:0}}/>
                               <span style={{color:t3,fontSize:10,flexShrink:0,minWidth:32}}>{Math.round(soundVolume*100)}%</span>
                             </div>
@@ -1575,7 +2330,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           :`18px ${groupTop?"18px":"6px"} ${groupBottom?"18px":"6px"} 18px`;
                         const rawBody=msg.body==null?"":String(msg.body);
                         const bodyLines=rawBody.split("\n");
-                        const isPatRef=bodyLines[0]?.startsWith("📋 Re:");
+                        const isPatRef=(bodyLines[0]?.startsWith("📋 Re:") || bodyLines[0]?.startsWith("Re:"));
                         const isNewPatRef=rawBody.startsWith("PATREF:");
                         let patCard=null;
                         if(isNewPatRef){
@@ -1585,7 +2340,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           }catch{}
                         }
                         if(isPatRef&&!patCard){
-                          const refLine=bodyLines[0].replace("📋 Re:","").trim();
+                          const refLine=bodyLines[0].replace("📋 Re:","").replace("Re:","").trim();
                           const nameMatch=refLine.match(/^([^(·]+)/);
                           const dobMatch=refLine.match(/DOB:\s*([^·)]+)/);
                           const bloodMatch=refLine.match(/Blood:\s*([^·]+)/);
@@ -1593,11 +2348,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           const condMatch=refLine.match(/Conditions:\s*([^·]+)/);
                           patCard={name:nameMatch?.[1]?.replace(/\(.*$/,"").trim(),dob:dobMatch?.[1]?.trim(),blood:bloodMatch?.[1]?.trim(),allergies:allergyMatch?.[1]?.trim(),conditions:condMatch?.[1]?.trim()};
                         }
-                        const parsedVideoApproval=parseVideoApprovalMessageBody(rawBody);
-                        const parsedVideoLink=parsedVideoApproval?.roomId?buildVideoCallUrlFromRoom(parsedVideoApproval.roomId):"";
-                        const displayBody=parsedVideoApproval
-                          ?`Video visit approved for ${formatVideoWindow(parsedVideoApproval.windowStartMs,parsedVideoApproval.windowEndMs)}.`
-                          :(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():rawBody;
+                        const proto = getProtocolChatDisplay(rawBody, { role: "doctor", isMine: isMe });
+                        if (proto.kind === "hidden") return null;
+                        const displayBody=(isPatRef||isNewPatRef)&&patCard?"":isPatRef?bodyLines.slice(1).join("\n").trim():proto.line;
                         return (
                           <div key={msg.id} style={{display:"block",width:"100%",marginTop:groupTop?14:3}}>
                             {showDate&&(<div style={{textAlign:"center",margin:"16px 0 14px"}}><span style={{padding:"4px 16px",borderRadius:99,fontSize:10,background:"var(--s2)",border:"1px solid var(--b0)",color:t3,fontWeight:700,letterSpacing:".03em"}}>{new Date(msg.created_at).toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"})}</span></div>)}
@@ -1655,23 +2408,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                     </a>
                                   )}
                                   {displayBody&&<p style={{color:isMe?"#fff":t1,fontSize:13.5,lineHeight:1.6,margin:0,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{displayBody}</p>}
-                                  {parsedVideoLink&&(
-                                    <a
-                                      href={parsedVideoLink}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      style={{
-                                        display:"block",
-                                        marginTop:6,
-                                        color:isMe?"rgba(255,255,255,.95)":DocAC,
-                                        fontSize:11.5,
-                                        textDecoration:"underline",
-                                        wordBreak:"break-all",
-                                      }}
-                                    >
-                                      {parsedVideoLink}
-                                    </a>
-                                  )}
                                 </div>
                                 )}
                                 {groupBottom&&(
@@ -1803,6 +2539,26 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                   </motion.div>
                 ))}
               </div>
+              {doctorVideoVisitRequests.filter(r=>String(r.status)==="pending").length>0?(
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="w-full min-w-0 overflow-hidden mb-5"
+                  role="button"
+                  tabIndex={0}
+                  onClick={()=>setPage("virtual")}
+                  onKeyDown={(e)=>{ if(e.key==="Enter"||e.key===" ") setPage("virtual"); }}
+                  style={{ background: "rgba(217,119,6,.09)", border: "1px solid rgba(217,119,6,.35)", borderRadius: 16, padding: isMob ? "12px 14px" : "14px 18px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
+                >
+                  <div>
+                    <p style={{ margin: 0, color: t1, fontSize: isMob ? 13 : 14, fontWeight: 700 }}>Patient visit requests</p>
+                    <p style={{ margin: "4px 0 0", color: t3, fontSize: 12 }}>
+                      {doctorVideoVisitRequests.filter(r=>String(r.status)==="pending").length} pending — approve times or deny
+                    </p>
+                  </div>
+                  <ArrowRight size={18} color={DocAC}/>
+                </motion.div>
+              ):null}
               <motion.div className="au d2 w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:20,padding:isMob?"14px 12px":"22px 24px",marginBottom:16,boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
                 <div className="flex flex-col gap-3 mb-4 w-full min-w-0">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1927,6 +2683,202 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                 ))}
               </motion.div>
             </div>
+            </div>
+          )}
+          {page==="virtual"&&(
+            <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(66px + env(safe-area-inset-bottom,0px))":0}}>
+              <div className="w-full min-w-0 max-w-[960px] mx-auto" style={{padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
+                <motion.div className="au" style={{marginBottom:isMob?18:22}}>
+                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Virtual Visits</h2>
+                </motion.div>
+                {doctorVideoVisitRequests.filter((r)=>r.status==="pending").length>0&&(
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)",marginBottom:12}}>
+                    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                      {doctorVideoVisitRequests.filter((r)=>r.status==="pending").map((req)=>(
+                        <div key={req.id} style={{padding:"10px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",display:"flex",flexWrap:"wrap",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                          <div style={{minWidth:200}}>
+                            <p style={{margin:0,color:t1,fontSize:12.5,fontWeight:700}}>{patientNameById?.[req.patient_id]||"Patient"}</p>
+                            <p style={{margin:"3px 0 0",color:t3,fontSize:11.5}}>
+                              Requested{" "}
+                              {new Date(`${req.requested_date}T12:00:00`).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}{" "}
+                              at {to12h(req.requested_time)}
+                            </p>
+                            {req.reason?<p style={{margin:"6px 0 0",color:t2,fontSize:11}}>{req.reason}</p>:null}
+                            {req.doctor_suggested_date&&req.doctor_suggested_time?(
+                              <p style={{margin:"6px 0 0",color:DocAC,fontSize:11}}>
+                                You suggested: {" "}
+                                {new Date(`${req.doctor_suggested_date}T12:00:00`).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}{" "}
+                                at {to12h(req.doctor_suggested_time)}
+                              </p>
+                            ):null}
+                          </div>
+                          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                            <button type="button" disabled={urgentVisitBusyId===req.id} onClick={()=>void approveUrgentVideoVisit(req)} style={{padding:"8px 12px",borderRadius:10,border:"none",background:DocAC,color:"#fff",fontWeight:700,cursor:"pointer",fontFamily:"inherit",fontSize:11}}>
+                              {urgentVisitBusyId===req.id?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:"Approve"}
+                            </button>
+                            <button type="button" disabled={urgentVisitBusyId===req.id} onClick={()=>void proposeAlternateUrgentVisit(req)} style={{padding:"8px 12px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",color:t1,fontWeight:600,cursor:"pointer",fontFamily:"inherit",fontSize:11}}>
+                              Suggest other time
+                            </button>
+                            <button type="button" disabled={urgentVisitBusyId===req.id} onClick={()=>void denyUrgentVideoVisit(req)} style={{padding:"8px 12px",borderRadius:10,border:`1px solid ${b1}`,background:"transparent",color:t3,fontWeight:600,cursor:"pointer",fontFamily:"inherit",fontSize:11}}>
+                              Deny
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                </motion.div>
+                )}
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
+                  <div style={{marginBottom:12,padding:"10px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}>
+                    <p style={{margin:0,color:t1,fontSize:12.5,fontWeight:700}}>Waiting room list ({waitingRoomList.length})</p>
+                    {waitingRoomList.length===0?(
+                      <p style={{margin:"4px 0 0",color:t3,fontSize:11.5}}>No patients are checked in right now.</p>
+                    ):(
+                      <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:8}}>
+                        {waitingRoomList.slice(0,8).map((w)=>(
+                          <div key={`${w.patientId}-${w.windowStartMs}`} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",padding:"7px 8px",borderRadius:9,background:"var(--s1)",border:`1px solid ${b1}`}}>
+                            <div>
+                              <p style={{margin:0,color:t1,fontSize:11.5,fontWeight:700}}>{patientNameById?.[w.patientId]||"Patient"}</p>
+                              <p style={{margin:"2px 0 0",color:DocAC,fontSize:10.5,fontWeight:700}}>Patient checked in · waiting.</p>
+                            </div>
+                            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                              <p style={{margin:0,color:t3,fontSize:11}}>
+                                Checked in {new Date(w.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={()=>void startVideoVisitForPatient({patientId:w.patientId,windowStartMs:w.windowStartMs,windowEndMs:w.windowEndMs})}
+                                disabled={videoApprovalBusy&&(videoStartTargetId===w.patientId)}
+                                style={{
+                                  padding:"7px 10px",
+                                  borderRadius:9,
+                                  border:"none",
+                                  background:DocAC,
+                                  color:"#fff",
+                                  cursor:(videoApprovalBusy&&(videoStartTargetId===w.patientId))?"wait":"pointer",
+                                  fontFamily:"inherit",
+                                  fontSize:11,
+                                  fontWeight:700,
+                                  display:"inline-flex",
+                                  alignItems:"center",
+                                  gap:5,
+                                  opacity:(videoApprovalBusy&&(videoStartTargetId===w.patientId))?0.75:1,
+                                }}
+                              >
+                                {videoApprovalBusy&&(videoStartTargetId===w.patientId)?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={13}/>}
+                                {(videoApprovalBusy&&(videoStartTargetId===w.patientId))?"Starting...":"Start video"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={()=>void endVideoVisitForPatientContext({patientId:w.patientId,windowStartMs:w.windowStartMs,windowEndMs:w.windowEndMs,mirrorInOpenThread:false})}
+                                disabled={videoEndBusy}
+                                style={{
+                                  padding:"7px 10px",
+                                  borderRadius:9,
+                                  border:`1px solid ${b1}`,
+                                  background:"var(--s1)",
+                                  color:t1,
+                                  cursor:videoEndBusy?"not-allowed":"pointer",
+                                  fontFamily:"inherit",
+                                  fontSize:11,
+                                  fontWeight:700,
+                                  display:"inline-flex",
+                                  alignItems:"center",
+                                  gap:5,
+                                  opacity:videoEndBusy?0.75:1,
+                                }}
+                              >
+                                {videoEndBusy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<PhoneOff size={13}/>}
+                                {videoEndBusy?"Ending...":"End video"}
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {virtualAppointments.length===0?(
+                    <div style={{padding:isMob?"16px 8px":"24px 6px",textAlign:"center"}}>
+                      <Video size={26} color={t3} style={{opacity:.25,margin:"0 auto 10px",display:"block"}}/>
+                      <p style={{color:t3,fontSize:13,margin:0}}>No active virtual appointments in the reconnect window.</p>
+                    </div>
+                  ):(
+                    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                      {virtualAppointments.map((row)=>{
+                        const {appt,window}=row;
+                        const winKey=`${appt.patient_id}|${window.windowStartMs}|${window.windowEndMs}`;
+                        const roomId=buildVideoRoomId(user.id,appt.patient_id);
+                        const checkedInRow=waitingLookup[winKey];
+                        const inVisit=!!inVisitByWindowKey[winKey];
+                        const patientName=patientNameById?.[appt.patient_id]||"Patient";
+                        const visitLabel=`${new Date(`${appt.date}T12:00:00`).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})} at ${to12h(appt.time)}`;
+                        const opensIn=Math.max(0,Math.ceil((window.windowStartMs-videoNowMs)/60000));
+                        const portalEnd=window.portalEndMs??window.windowEndMs;
+                        const beforeNominalStart=videoNowMs<window.windowStartMs;
+                        const inDoctorVideoWindow=videoNowMs>=window.windowStartMs-VIDEO_WAITING_ROOM_EARLY_JOIN_MS&&videoNowMs<=portalEnd;
+                        const inPortal=videoNowMs>=window.windowStartMs&&videoNowMs<=portalEnd;
+                        const inNominalWindow=videoNowMs>=window.windowStartMs&&videoNowMs<=window.windowEndMs;
+                        const lateReconnect=inPortal&&!beforeNominalStart&&!inNominalWindow;
+                        const evs=getEffectiveVirtualVisitStatus(appt);
+                        const checkedInReady=!!checkedInRow||evs===VS.WAITING_FOR_DOCTOR;
+                        const statusText=beforeNominalStart
+                          ?(inDoctorVideoWindow&&checkedInReady
+                              ?"Early start — you can start video up to 30 min before the visit time."
+                              :`Opens in ${opensIn} min`)
+                          :lateReconnect
+                            ?"Reconnect window · you can still start video"
+                          :inVisit
+                            ?"In visit"
+                            :checkedInReady
+                              ?"Patient waiting."
+                              :"Ready to start";
+                        const canStart=inDoctorVideoWindow&&inVisit===false&&!videoApprovalBusy&&checkedInReady;
+                        return (
+                          <div key={appt.id} style={{padding:isMob?"10px 10px":"12px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",display:"flex",alignItems:isMob?"flex-start":"center",justifyContent:"space-between",gap:10,flexDirection:isMob?"column":"row"}}>
+                            <div style={{minWidth:0,flex:1}}>
+                              <p className="truncate" style={{margin:0,color:t1,fontSize:13,fontWeight:700}}>{patientName}</p>
+                              <p className="truncate" style={{margin:"4px 0 0",color:t3,fontSize:12}}>{visitLabel}</p>
+                              <p style={{margin:"5px 0 0",color:(beforeNominalStart&&inDoctorVideoWindow||(inNominalWindow&&!beforeNominalStart)||lateReconnect)?"var(--gr)":t3,fontSize:11.5,fontWeight:600}}>{statusText}</p>
+                              {checkedInRow&&inVisit===false&&(
+                                <p style={{margin:"3px 0 0",color:DocAC,fontSize:11,fontWeight:700}}>Checked in at {new Date(checkedInRow.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</p>
+                              )}
+                            </div>
+                            <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:isMob?"stretch":"flex-end",alignItems:"center",width:isMob?"100%":"auto"}}>
+                            <button
+                              type="button"
+                              onClick={()=>void startVideoVisitForPatient({patientId:appt.patient_id,windowStartMs:window.windowStartMs,windowEndMs:window.windowEndMs})}
+                              disabled={!canStart}
+                              style={{padding:"9px 12px",borderRadius:10,border:"none",background:canStart?DocAC:"var(--b1)",color:"#fff",cursor:canStart?"pointer":"not-allowed",fontFamily:"inherit",fontSize:12,fontWeight:700,minWidth:isMob?"100%":0,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,opacity:videoApprovalBusy&&videoStartTargetId===appt.patient_id?0.75:1}}
+                            >
+                              {videoApprovalBusy&&videoStartTargetId===appt.patient_id?<Loader2 size={14} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={14}/>}
+                              {videoApprovalBusy&&videoStartTargetId===appt.patient_id?"Starting...":"Start video"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async()=>{
+                                const { data }=await supabase.from("profiles").select("id,first_name,last_name,pre_visit_intake,allergies,medical_conditions").eq("id",appt.patient_id).maybeSingle();
+                                setVirtualCheckInPatientProfile(data||null);
+                              }}
+                              style={{padding:"9px 12px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",color:t2,cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}
+                            >
+                              <FileText size={13}/> Check-in form
+                            </button>
+                            {inDoctorVideoWindow&&checkedInRow&&inVisit===false?(
+                              <button type="button" onClick={()=>void dismissOrRemoveWaiting({patientId:appt.patient_id,windowStartMs:window.windowStartMs,windowEndMs:window.windowEndMs,roomId})}
+                                style={{padding:"9px 10px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",color:t1,cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600}}>Dismiss from waiting</button>
+                            ):null}
+                            {inDoctorVideoWindow&&inVisit?(
+                              <button type="button" onClick={()=>void completeVideoVisitForAppointment(appt)}
+                                style={{padding:"9px 10px",borderRadius:10,border:"1px solid rgba(5,150,105,.35)",background:"rgba(5,150,105,.08)",color:"var(--gr)",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600}}>End video</button>
+                            ):null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </motion.div>
+              </div>
             </div>
           )}
           {page==="availability"&&(
@@ -2089,6 +3041,23 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             <h4 style={{color:t1,fontSize:13.5,fontWeight:700,marginBottom:12,display:"flex",alignItems:"center",gap:8}}><HeartPulse size={14} color="var(--am)" className="shrink-0"/> Medical Conditions</h4>
                             {(patProfile?.medical_conditions?.length||0)>0?(<div style={{display:"flex",flexWrap:"wrap",gap:7}}>{patProfile.medical_conditions.map(c=><span key={c} className="max-w-full break-words" style={{padding:"4px 10px",borderRadius:99,fontSize:12,fontWeight:600,background:"rgba(217,119,6,.08)",border:"1px solid rgba(217,119,6,.2)",color:"var(--am)"}}>{c}</span>)}</div>):<p style={{color:t3,fontSize:13,margin:0}}>None recorded</p>}
                           </motion.div>
+                          {patProfile?.pre_visit_intake?.completed_at?(
+                            <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{delay:.11}} style={{ gridColumn:"1 / -1" }}>
+                              <DoctorVirtualCheckInReadout
+                                profile={patProfile}
+                                t1={t1}
+                                t3={t3}
+                                b1={b1}
+                                accent={DocAC}
+                                compact={isMob}
+                                onDownloadPdf={()=>downloadVirtualVisitCheckInPdf(patProfile)}
+                                onRequestClear={()=>setCheckInClearAwaitingConfirmPatientId(selPat.id)}
+                                onRequestRefill={selPat?.id ? () => void requestCheckInRefillForPatient(selPat.id) : undefined}
+                                refillBusy={refillRequestBusyPatientId===selPat?.id}
+                                clearBusy={clearCheckInBusy&&checkInClearAwaitingConfirmPatientId===selPat?.id}
+                              />
+                            </motion.div>
+                          ):null}
                         </div>
                       )}
                       {activeTab==="vitals"&&(
@@ -2137,7 +3106,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                       )}
                       {activeTab==="appointments"&&(
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="min-w-0" style={{display:"flex",flexDirection:"column",gap:14}}>
-                          {rescheduleReqs.length>0&&(<div className="min-w-0 overflow-hidden" style={{background:"rgba(217,119,6,.07)",border:"1px solid rgba(217,119,6,.25)",borderRadius:16,padding:isMob?"14px 14px":"16px 18px"}}><p style={{color:"var(--am)",fontSize:13,fontWeight:700,marginBottom:12}}>{rescheduleReqs.length} reschedule request{rescheduleReqs.length>1?"s":""}</p>{rescheduleReqs.map(appt=>(<RescheduleRequestRow key={appt.id} appt={appt} onConfirm={(nd,nt)=>confirmReschedule(appt,nd,nt)} onCancel={()=>deleteAppointment(appt.id)} onReject={(msg)=>rejectReschedule(appt,msg)} t1={t1} t3={t3}/>))}</div>)}
+                          {rescheduleReqs.length>0&&(<div className="min-w-0 overflow-hidden" style={{background:"rgba(217,119,6,.07)",border:"1px solid rgba(217,119,6,.25)",borderRadius:16,padding:isMob?"14px 14px":"16px 18px"}}><p style={{color:"var(--am)",fontSize:13,fontWeight:700,marginBottom:12}}>{rescheduleReqs.length} reschedule request{rescheduleReqs.length>1?"s":""}</p>{rescheduleReqs.map(ap=>(<RescheduleRequestRow key={ap.id} appt={ap} onApproveRequested={()=>void approveRescheduleAsRequested(ap)} onDeny={(msg)=>void denyOrWithdrawReschedule(ap,msg)} onSuggest={(nd,nt)=>void suggestRescheduleTime(ap,nd,nt)} t1={t1} t3={t3}/>))}</div>)}
                           <div className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"20px 22px"}}>
                             <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:16}}>Schedule Appointment</h4>
                             <div style={{display:"grid",gridTemplateColumns:isMob?"1fr":"1fr 1fr",gap:10,marginBottom:10}}>
@@ -2249,6 +3218,49 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         </div>
       </div>
       <AnimatePresence>
+        {virtualCheckInPatientProfile&&(
+          <div role="dialog" aria-modal="true" style={{position:"fixed",inset:0,zIndex:500,background:"rgba(15,23,42,.5)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setVirtualCheckInPatientProfile(null)}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"var(--s1)",borderRadius:16,maxWidth:520,width:"100%",maxHeight:"86vh",overflowY:"auto",padding:22,border:`1px solid ${b1}`,boxShadow:"0 16px 44px rgba(0,0,0,.22)"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:12,marginBottom:8}}>
+                <button type="button" aria-label="Close" onClick={()=>setVirtualCheckInPatientProfile(null)} style={{border:"none",background:"transparent",color:t3,cursor:"pointer",fontSize:22,lineHeight:1,padding:0}}>×</button>
+              </div>
+              {virtualCheckInPatientProfile.pre_visit_intake?.completed_at?(
+                <DoctorVirtualCheckInReadout
+                  profile={virtualCheckInPatientProfile}
+                  t1={t1}
+                  t3={t3}
+                  b1={b1}
+                  accent={DocAC}
+                  compact
+                  onDownloadPdf={()=>downloadVirtualVisitCheckInPdf(virtualCheckInPatientProfile)}
+                  onRequestClear={virtualCheckInPatientProfile.id?()=>setCheckInClearAwaitingConfirmPatientId(virtualCheckInPatientProfile.id):undefined}
+                  onRequestRefill={virtualCheckInPatientProfile?.id ? () => void requestCheckInRefillForPatient(virtualCheckInPatientProfile.id) : undefined}
+                  refillBusy={refillRequestBusyPatientId===virtualCheckInPatientProfile?.id}
+                  clearBusy={clearCheckInBusy&&checkInClearAwaitingConfirmPatientId===virtualCheckInPatientProfile.id}
+                />
+              ):(
+                <p style={{color:t3,fontSize:13,margin:0}}>This patient has not submitted a virtual check-in yet.</p>
+              )}
+            </div>
+          </div>
+        )}
+        {checkInClearAwaitingConfirmPatientId&&(
+          <motion.div className="ov" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} style={{zIndex:520}} onClick={()=>{if(!clearCheckInBusy)setCheckInClearAwaitingConfirmPatientId(null);}}>
+            <motion.div className="mo" onClick={e=>e.stopPropagation()} initial={{y:20,opacity:0,scale:.96}} animate={{y:0,opacity:1,scale:1}} exit={{y:16,opacity:0}} transition={{type:"spring",damping:26,stiffness:300}} style={{maxWidth:440}}>
+              <div style={{textAlign:"center",padding:"8px 0 20px"}}>
+                <div style={{width:56,height:56,borderRadius:18,background:"rgba(14,116,144,.12)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 18px"}}><FileText size={24} color={DocAC}/></div>
+                <h3 style={{color:t1,fontSize:18,fontWeight:700,marginBottom:8}}>Delete check-in form?</h3>
+                <p style={{color:t3,fontSize:13.5,lineHeight:1.7,marginBottom:22,textAlign:"left"}}>This removes saved check-in responses from their chart (including allergy/condition lists from that form). The patient will fill out the form again for their appointment—nothing from the deleted form will be shown or auto-filled.</p>
+                <div className={`flex gap-3 ${isMob?"flex-col":"flex-row"}`}>
+                  <button type="button" className="bto" style={{flex:1,minHeight:44}} onClick={()=>{if(!clearCheckInBusy)setCheckInClearAwaitingConfirmPatientId(null);}}>Cancel</button>
+                  <motion.button type="button" whileHover={{scale:1.02}} whileTap={{scale:.97}} disabled={clearCheckInBusy} onClick={()=>void confirmClearPatientVirtualCheckIn()} style={{flex:1,minHeight:44,padding:"11px",borderRadius:12,border:"none",background:"var(--ro)",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:13.5,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                    {clearCheckInBusy?<Loader2 size={14} style={{animation:"spin360 .7s linear infinite"}}/>:<><Trash2 size={14}/> Delete Form</>}
+                  </motion.button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
         {showPrescribe&&selPat&&(<PrescribeModal patient={selPat} patientProfile={patProfile} doctor={user} onClose={()=>setShowPrescribe(false)} onSuccess={()=>setShowPrescribe(false)}/>)}
       </AnimatePresence>
       <AnimatePresence>{showNickname&&<NicknameModal currentName={name} onSave={saveName} onClose={()=>setShowNickname(false)} userId={user?.id}/>}</AnimatePresence>
@@ -2396,13 +3408,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       {/* ── Mobile bottom nav — hidden inside open chat so it never overlaps input ── */}
       {isMob&&!(page==="messages"&&selChat)&&(
         <nav className="btabs">
-          {[["dashboard",HeartPulse,"Dashboard"],["availability",Calendar,"Slots"],["patients",User,"Patients"],["messages",MessageSquare,"Msgs"]].map(([id,I,l])=>(
+          {[["dashboard",HeartPulse,"Dashboard"],["availability",Calendar,"Slots"],["virtual",Video,"Video"],["patients",User,"Patients"],["messages",MessageSquare,"Msgs"]].map(([id,I,l])=>(
             <button key={id} className={`bt ${page===id?"on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
               <I size={19}/>
               {id==="messages"&&totalChatUnread>0
                 ?<span style={{position:"relative"}}>{l}<span style={{position:"absolute",top:-6,right:-10,background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:8,fontWeight:800,padding:"1px 4px"}}>{totalChatUnread}</span></span>
                 :id==="availability"&&availabilitySlotCount>0
                   ?<span style={{position:"relative"}}>{l}<span style={{position:"absolute",top:-6,right:-10,background:DocAC,color:"#fff",borderRadius:99,fontSize:8,fontWeight:800,padding:"1px 4px"}}>{availabilitySlotCount}</span></span>
+                  :id==="virtual"&&activeVirtualCount>0
+                    ?<span style={{position:"relative"}}>{l}<span style={{position:"absolute",top:-6,right:-10,background:"var(--gr)",color:"#fff",borderRadius:99,fontSize:8,fontWeight:800,padding:"1px 4px"}}>{activeVirtualCount}</span></span>
                   :l}
             </button>
           ))}
@@ -2427,10 +3441,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
               <div style={{height:1,background:"var(--b0)",margin:"0 12px 8px"}}/>
               <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:1}}>
-                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Virtual Visits",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
                   <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);setMobMenu(false);}}>
                     <I size={15}/>{l}
                     {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
+                    {id==="virtual"&&activeVirtualCount>0&&<span style={{marginLeft:"auto",background:"var(--gr)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{activeVirtualCount}</span>}
                     {id==="patients"&&patients.length>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{patients.length}</span>}
                     {id==="messages"&&totalChatUnread>0&&<span style={{marginLeft:"auto",background:"var(--ro)",color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{totalChatUnread}</span>}
                   </div>

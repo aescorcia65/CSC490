@@ -3,15 +3,19 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Pill, LogOut, Moon, Sun, X, Plus, Send,
   Loader2, User, ArrowRight, Pencil, HeartPulse, Stethoscope,
-  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Trash2, ClipboardList, MoreHorizontal
+  ShieldCheck, MessageSquare, Search, Bell, BellOff, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Trash2, ClipboardList, MoreHorizontal, Paperclip
 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { signOutClearPresence } from "../../lib/signOutClearPresence";
 import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib/portalWebAudio";
 import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
 import { notificationSuggestsPrescription, notificationSuggestsChat } from "../../lib/notificationNavigation";
 import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
 import { PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { usePresenceOnlineMap } from "../../hooks/usePresenceOnlineMap";
+import { formatProfileFullName } from "../../lib/profileName";
+import { getProtocolChatDisplay } from "../../lib/chatMessageDisplay";
 import NicknameModal from "../../components/modals/NicknameModal";
 import RefillRequestsPage from "./RefillRequestsPage";
 const PHARM_PAGE_STORAGE_KEY = "mt_pharmacist_last_page";
@@ -42,19 +46,19 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const [patientChatSearchEmail, setPatientChatSearchEmail] = useState("");
   const [patientChatSearchBusy, setPatientChatSearchBusy] = useState(false);
   const [patientChatSearchMsg, setPatientChatSearchMsg] = useState(null);
-  const [onlineUsers, setOnlineUsers] = useState({});
+  const onlineUsers = usePresenceOnlineMap(user?.id);
   const [chatSearchEmail, setChatSearchEmail] = useState("");
   const [chatSearchBusy, setChatSearchBusy] = useState(false);
   const [chatSearchMsg, setChatSearchMsg] = useState(null);
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("mt_sound_on") !== "false");
   const [soundType, setSoundType] = useState(() => {
     const saved = localStorage.getItem("mt_sound_type");
-    const valid = ["standard", "urgent", "subtle", "chime", "pulse"];
+    const valid = ["standard", "urgent", "subtle", "chime", "pulse", "ding", "low", "tri"];
     return valid.includes(saved) ? saved : "standard";
   });
   const [soundVolume, setSoundVolume] = useState(() => {
     const v = parseFloat(localStorage.getItem("mt_sound_vol"));
-    return isNaN(v) ? 0.7 : Math.min(1, Math.max(0.1, v));
+    return isNaN(v) ? 0.7 : Math.min(1, Math.max(0, v));
   });
   const [showSoundSettings, setShowSoundSettings] = useState(false);
   const soundEnabledRef = useRef(soundEnabled);
@@ -69,6 +73,29 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const typingBroadcastRef = useRef(null);
   const [peerTyping, setPeerTyping] = useState(false);
   const pageRestoreDoneRef = useRef(false);
+  const pharmPatientIdsForRealtimeRef = useRef(new Set());
+  useEffect(() => {
+    const s = new Set();
+    prescriptions.forEach((r) => { if (r.patient_id) s.add(r.patient_id); });
+    patientChatContacts.forEach((c) => s.add(c.id));
+    Object.keys(patientNames).forEach((k) => s.add(k));
+    pharmPatientIdsForRealtimeRef.current = s;
+  }, [prescriptions, patientChatContacts, patientNames]);
+  useEffect(() => {
+    if (!user?.id) return;
+    const ch = supabase
+      .channel(`pharm-patient-profiles-${user.id}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, (payload) => {
+        const id = payload.new?.id;
+        if (!id || !pharmPatientIdsForRealtimeRef.current.has(id)) return;
+        const full = formatProfileFullName(payload.new);
+        if (!full) return;
+        setPatientNames((prev) => ({ ...prev, [id]: full }));
+        setPatientChatContacts((prev) => prev.map((c) => (c.id === id ? { ...c, name: full } : c)));
+      })
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [user?.id]);
 
   useEffect(() => {
     const unlock = () => { void ensurePortalAudioContext(); };
@@ -133,9 +160,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   };
 
   async function handleSignOut() {
-    setOnlineUsers(prev => { const n = { ...prev }; delete n[user.id]; return n; });
-    await supabase.from("user_presence").upsert({ user_id: user.id, is_online: false, last_seen: new Date().toISOString() }, { onConflict: "user_id" });
-    await supabase.auth.signOut();
+    await signOutClearPresence(user?.id);
   }
 
   function playNotifSound(type, vol) {
@@ -224,7 +249,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
           }
         }
         setChatContacts(contacts);
-        if (contacts.length > 0) setSelChat(contacts[0]);
+        setSelChat((prev) => (prev && contacts.some((c) => c.id === prev.id) ? contacts.find((c) => c.id === prev.id) : null));
         if (contacts.length > 0) {
           const docIds = contacts.map(d => d.id);
           const { data: unread } = await supabase.from("chat_messages")
@@ -330,11 +355,11 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       if (msgMode === "doctors") {
         if (!chatContacts.length) return null;
         if (prev && chatContacts.some(c => c.id === prev.id)) return chatContacts.find(c => c.id === prev.id);
-        return chatContacts[0];
+        return null;
       }
       if (!patientChatContacts.length) return null;
       if (prev && patientChatContacts.some(c => c.id === prev.id)) return patientChatContacts.find(c => c.id === prev.id);
-      return patientChatContacts[0];
+      return null;
     });
   }, [msgMode, page, chatContacts, patientChatContacts]);
 
@@ -545,41 +570,6 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     };
   }, [user?.id]);
 
-  useEffect(() => {
-    if (!user?.id) return;
-    supabase.from("user_presence")
-      .upsert({ user_id: user.id, is_online: true, last_seen: new Date().toISOString() }, { onConflict: "user_id" })
-      .then(() => {});
-    supabase.from("user_presence").select("user_id,is_online")
-      .then(({ data }) => {
-        if (!data) return;
-        const online = {};
-        data.forEach(r => { if (r.is_online) online[r.user_id] = true; });
-        setOnlineUsers(online);
-      });
-    const ch = supabase.channel("presence-all")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "user_presence" }, (payload) => {
-        if (!payload.new?.user_id) return;
-        if (payload.new.is_online) setOnlineUsers(prev => ({ ...prev, [payload.new.user_id]: true }));
-        else setOnlineUsers(prev => { const n = { ...prev }; delete n[payload.new.user_id]; return n; });
-      })
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "user_presence" }, (payload) => {
-        if (!payload.new?.user_id) return;
-        if (payload.new.is_online) setOnlineUsers(prev => ({ ...prev, [payload.new.user_id]: true }));
-        else setOnlineUsers(prev => { const n = { ...prev }; delete n[payload.new.user_id]; return n; });
-      })
-      .subscribe();
-    const markOffline = () => {
-      supabase.from("user_presence")
-        .upsert({ user_id: user.id, is_online: false, last_seen: new Date().toISOString() }, { onConflict: "user_id" })
-        .then(() => {});
-    };
-    window.addEventListener("beforeunload", markOffline);
-    return () => {
-      window.removeEventListener("beforeunload", markOffline);
-      supabase.removeChannel(ch);
-    };
-  }, [user?.id]);
   useEffect(() => {
     if (!user?.id) return;
     const channels = [];
@@ -1084,8 +1074,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                         type="button"
                         onClick={() => {
                           setMsgMode(id);
-                          if (id === "doctors") setSelChat(chatContacts[0] || null);
-                          else setSelChat(patientChatContacts[0] || null);
+                          setSelChat(null);
                         }}
                         style={{
                           flex: 1,
@@ -1236,7 +1225,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                 {!selChat ? (
                   <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12 }}>
                     <MessageSquare size={32} color={t3} style={{ opacity: .2 }} />
-                    <p style={{ color: t2, fontSize: 14, fontWeight: 600 }}>{msgMode === "doctors" ? "Select a doctor to start chatting." : "Select a patient to start messaging."}</p>
+                    <p style={{ color: t2, fontSize: 14, fontWeight: 600 }}>Select a conversation to view messages.</p>
                   </div>
                 ) : (
                   <>
@@ -1302,7 +1291,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                             </div>
                             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                               <Volume1 size={13} color={t3} style={{ flexShrink: 0 }} />
-                              <input type="range" min="0.1" max="1" step="0.05" value={soundVolume} onChange={e => changeSoundVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: PhAC, cursor: "pointer" }} />
+                              <input type="range" min="0" max="1" step="0.05" value={soundVolume} onChange={e => changeSoundVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: PhAC, cursor: "pointer" }} />
                               <Volume2 size={13} color={t3} style={{ flexShrink: 0 }} />
                               <span style={{ color: t3, fontSize: 10, flexShrink: 0, minWidth: 32 }}>{Math.round(soundVolume * 100)}%</span>
                             </div>
@@ -1346,12 +1335,15 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                           try { newPatData = JSON.parse(msg.body.slice(7)); } catch(e) {}
                         }
 
-                        const bodyLines = msg.body.split("\n");
-                        const isLegacyRef = bodyLines[0]?.startsWith("📋 Re:");
+                        const bodyLines = (msg.body || "").split("\n");
+                        const isLegacyRef = (bodyLines[0]?.startsWith("📋 Re:") || bodyLines[0]?.startsWith("Re:"));
                         const displayBody = isLegacyRef ? bodyLines.slice(1).join("\n").trim() : msg.body;
+                        const rawB = String(msg.body || "");
+                        const proto = getProtocolChatDisplay(rawB, { role: "pharmacist", isMine: isMe });
+                        if (proto.kind === "hidden") return null;
                         let legacyCard = null;
                         if (isLegacyRef) {
-                          const refLine = bodyLines[0].replace("📋 Re:", "").trim();
+                          const refLine = bodyLines[0].replace("📋 Re:", "").replace("Re:", "").trim();
                           const nameMatch = refLine.match(/^([^(]+)/);
                           const dobMatch = refLine.match(/DOB:\s*([^·)]+)/);
                           const bloodMatch = refLine.match(/Blood:\s*([^·]+)/);
@@ -1407,12 +1399,14 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                           ? `${groupTop ? "18px" : "6px"} 18px 18px ${groupBottom ? "18px" : "6px"}`
                           : `18px ${groupTop ? "18px" : "6px"} ${groupBottom ? "18px" : "6px"} 18px`;
 
-                        const isRefAction = msg.body.startsWith("REFACTION:");
+                        const isRefAction = (msg.body || "").startsWith("REFACTION:");
                         let refActionDisplay = msg.body;
                         if (isRefAction) {
                           const parts = msg.body.split(":");
                           refActionDisplay = `Status update for ${parts[1]}: ${parts[2]}`;
                         }
+                        const bubbleText = isRefAction ? refActionDisplay : (displayBody || msg.body);
+                        const showMsgBubble = !!(msg.attachment_url || (bubbleText && String(bubbleText).trim()));
 
                         return (
                           <div key={msg.id} style={{ display: "block", width: "100%", marginTop: groupTop ? 14 : 3 }}>
@@ -1447,9 +1441,39 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                                     </div>
                                   </div>
                                 )}
+                                {showMsgBubble ? (
                                 <div style={{ padding: "9px 14px", borderRadius: bubbleRadius, background: isMe ? PhAC : "var(--s1)", border: isMe ? "none" : `1px solid ${b1}`, boxShadow: isMe ? "0 2px 8px rgba(124,58,237,.18)" : "0 1px 3px rgba(0,0,0,.06)", maxWidth: "100%", transition: "box-shadow .2s" }}>
-                                  <p style={{ color: isMe ? "#fff" : t1, fontSize: isMob ? 13 : 13.5, lineHeight: 1.6, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{isRefAction ? refActionDisplay : (displayBody || msg.body)}</p>
+                                  {msg.attachment_url && (msg.attachment_mime || "").startsWith("image/") && (
+                                    <a href={msg.attachment_url} target="_blank" rel="noopener noreferrer" style={{ display: "block", marginBottom: bubbleText && String(bubbleText).trim() ? 8 : 0, lineHeight: 0, borderRadius: 10, overflow: "hidden" }}>
+                                      <img src={msg.attachment_url} alt={msg.attachment_name || ""} style={{ maxWidth: "100%", maxHeight: 220, width: "auto", height: "auto", display: "block", objectFit: "cover" }} />
+                                    </a>
+                                  )}
+                                  {msg.attachment_url && !(msg.attachment_mime || "").startsWith("image/") && (
+                                    <a
+                                      href={msg.attachment_url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: 6,
+                                        marginBottom: bubbleText && String(bubbleText).trim() ? 8 : 0,
+                                        color: isMe ? "rgba(255,255,255,.95)" : "var(--doc-p)",
+                                        fontWeight: 600,
+                                        fontSize: 12,
+                                        textDecoration: "none",
+                                        wordBreak: "break-all",
+                                      }}
+                                    >
+                                      <Paperclip size={14} strokeWidth={2} />
+                                      {msg.attachment_name || "View attachment"}
+                                    </a>
+                                  )}
+                                  {bubbleText && String(bubbleText).trim() ? (
+                                    <p style={{ color: isMe ? "#fff" : t1, fontSize: 13.5, lineHeight: 1.6, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{bubbleText}</p>
+                                  ) : null}
                                 </div>
+                                ) : null}
                                 {groupBottom && (
                                   <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, flexDirection: isMe ? "row-reverse" : "row" }}>
                                     <p style={{ color: t3, fontSize: 9, textAlign: isMe ? "right" : "left", paddingLeft: isMe ? 0 : 2, paddingRight: isMe ? 2 : 0, margin: 0 }}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>

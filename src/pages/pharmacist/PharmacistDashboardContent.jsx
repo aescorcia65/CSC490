@@ -1,7 +1,16 @@
-import { useEffect } from "react";
+import { Suspense, lazy, useEffect } from "react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../hooks/useTheme";
-import PharmacistPortal from "./PharmacistPortal";
+
+const PharmacistPortal = lazy(() => import("./PharmacistPortal"));
+
+function PharmShellFallback() {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)", color: "var(--t3)", fontSize: 13 }}>
+      Loading portal…
+    </div>
+  );
+}
 
 export default function PharmacistDashboardContent() {
   const { user, displayName, setDisplayName } = useAuth();
@@ -23,5 +32,9 @@ export default function PharmacistDashboardContent() {
     if (!user?.id) return;
     localStorage.setItem(`mt_theme_user_${user.id}`, light ? "light" : "dark");
   }, [user?.id, light]);
-  return <PharmacistPortal user={user} light={light} setLight={setLight} userName={userName} setDisplayName={setDisplayName} />;
+  return (
+    <Suspense fallback={<PharmShellFallback />}>
+      <PharmacistPortal user={user} light={light} setLight={setLight} userName={userName} setDisplayName={setDisplayName} />
+    </Suspense>
+  );
 }

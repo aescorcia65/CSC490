@@ -1,16 +1,39 @@
 import { useId } from "react";
 
-export default function LoginEcgBackdrop({ light, variant = "desktop" }) {
+/**
+ * @param {{ light: boolean, variant?: "desktop" | "mobile" | "hero-gutter", gutterGapPx?: number, gutterColFr?: [number, number] }} props
+ */
+export default function LoginEcgBackdrop({
+  light,
+  variant = "desktop",
+  gutterGapPx = 24,
+  gutterColFr = [1.05, 1.2],
+}) {
   const id = useId().replace(/:/g, "");
   const gradId = `login-ecg-grad-${id}`;
   const blurId = `login-ecg-blur-${id}`;
 
-  const isDesktop = variant === "desktop";
+  const isHeroGutter = variant === "hero-gutter";
+  const isDesktop = variant === "desktop" || isHeroGutter;
 
   const segmentD =
     "M0,50 L52,50 C58,50 62,48 66,45 C70,42 74,44 78,50 L86,50 L88,46 L90,24 L93,76 L96,40 L100,50 L118,50 C128,50 134,46 140,50 C146,54 152,50 162,50 L320,50";
 
-  const wrapStyle = isDesktop
+  const [fr1, fr2] = gutterColFr;
+  const frSum = fr1 + fr2;
+
+  const wrapStyle = isHeroGutter
+    ? {
+        position: "absolute",
+        left: `calc((100% - ${gutterGapPx}px) * ${fr1} / ${frSum})`,
+        width: `calc(${gutterGapPx}px + clamp(28px, 6vw, 72px))`,
+        top: "clamp(56px, 15%, 132px)",
+        height: "clamp(52px, 9vh, 96px)",
+        zIndex: 1,
+        pointerEvents: "none",
+        opacity: light ? 0.88 : 0.72,
+      }
+    : variant === "desktop"
     ? {
         position: "absolute",
         left: "4%",

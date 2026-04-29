@@ -23,8 +23,12 @@ html {
 }
 
 html, body {
-  overscroll-behavior-y: none;
+  overscroll-behavior-y: auto;
   -webkit-text-size-adjust: 100%;
+}
+
+#root {
+  min-height: 100%;
 }
 
 :root {

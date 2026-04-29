@@ -6,16 +6,17 @@ function clip(s, max = 140) {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
-export function notifyRecipientNewChatMessage({ recipientId, senderName, messageText, relatedMessageId }) {
+export function notifyRecipientNewChatMessage({ recipientId, senderName, messageText, relatedMessageId, title: titleOverride }) {
   if (!recipientId) return;
   const preview = clip(messageText) || "Open Messages to read.";
   const from = String(senderName || "Someone").trim() || "Someone";
+  const title = String(titleOverride || "").trim() || `New message from ${from}`;
   void supabase
     .from("notifications")
     .insert({
       user_id: recipientId,
       type: "general",
-      title: `New message from ${from}`,
+      title,
       body: preview,
       related_id: relatedMessageId || null,
     })

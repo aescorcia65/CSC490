@@ -107,7 +107,7 @@ export function loadPatientMessagingSoundSettings() {
     const p = JSON.parse(raw);
     const preset = PATIENT_MESSAGING_SOUND_PRESETS[p.preset] ? p.preset : DEFAULT_PATIENT_MESSAGING_SOUND.preset;
     const vol = typeof p.volume === "number" ? p.volume : DEFAULT_PATIENT_MESSAGING_SOUND.volume;
-    const volume = Math.min(1, Math.max(0.05, vol));
+    const volume = Math.min(1, Math.max(0, vol));
     const enabled = p.enabled !== false;
     return { enabled, preset, volume };
   } catch {
@@ -128,7 +128,8 @@ export function savePatientMessagingSoundSettings(partial) {
 export async function playPatientMessagingSound(presetId, volume, options = {}) {
   const { fromUserGesture = false } = options;
   const profile = PATIENT_MESSAGING_SOUND_PRESETS[presetId] || PATIENT_MESSAGING_SOUND_PRESETS.breeze;
-  const gain = Math.min(1, Math.max(0.05, Number(volume) || 0.75));
+  const gain = Math.min(1, Math.max(0, Number(volume) ?? 0.75));
+  if (gain <= 0) return;
 
   if (fromUserGesture) {
     await ensurePatientMessagingAudioUnlocked();
@@ -149,7 +150,7 @@ export async function playPatientMessagingSound(presetId, volume, options = {}) 
   primePatientAudioOutput(ctx);
   if (ctx.state !== "running") return;
 
-  const peak = 0.38 * gain;
+  const peak = 0.52 * gain;
   const t0 = ctx.currentTime + 0.01;
   try {
     profile.tones.forEach(([freq, wave, delay, dur]) => {

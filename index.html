@@ -31,11 +31,6 @@
         var dark = false;
         if (ex === 'dark') dark = true;
         else if (ex === 'light') dark = false;
-        else {
-          try {
-            dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-          } catch (e) {}
-        }
         document.documentElement.classList.toggle('theme-dark', dark);
         document.documentElement.classList.toggle('theme-light', !dark);
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light';

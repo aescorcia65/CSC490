@@ -107,7 +107,7 @@ export default function AIDrawer({ onClose, userName, meds, userId }) {
     const medLine = meds?.length
       ? `I can see ${meds.length} medication${meds.length > 1 ? "s" : ""} on your schedule and your saved health profile.`
       : "Add medications and complete your health profile in Settings for more personalized guidance.";
-    return `Hello${name}! I'm your MedTrack Health Advisor.\n\n${medLine}\n\nAsk about your meds, allergies, conditions, or general wellness — I'll personalize answers using what you've saved here.\n\n${hasKey ? "" : "⚠️ Add VITE_OPENAI_API_KEY to your .env file to enable AI replies."}`;
+    return `Hello${name}! I'm your MedTrack Health Advisor.\n\n${medLine}\n\nAsk about your meds, allergies, conditions, or general wellness — I'll personalize answers using what you've saved here.\n\n${hasKey ? "" : "Add VITE_OPENAI_API_KEY to your .env file to enable AI replies."}`;
   }, [userName, meds, hasKey]);
 
   const [msgs, setMsgs] = useState([{ from: "bot", text: welcomeText }]);

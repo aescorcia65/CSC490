@@ -1,12 +1,13 @@
 import { useId, useEffect, useState } from "react";
 import { ECG_REFERENCE_HERO_PATH } from "./medicalHeartAssets";
 
-const CYCLE_SEC = 1.15;
+const DEFAULT_CYCLE_SEC = 1.75;
 const KEY_DRAW_END = 0.72;
 const KEY_HOLD_END = 0.78;
 const KEY_RESET_END = 0.785;
 
-export default function AuthHeroGlassHeart({ light = true }) {
+/** `clinicalBlue`: vivid blue trace for light backgrounds (sign-in hero); default white trace is for dark/contrast areas. `cycleSec`: full draw/hold/reset loop duration in seconds. */
+export default function AuthHeroGlassHeart({ light = true, clinicalBlue = false, cycleSec = DEFAULT_CYCLE_SEC }) {
   const uid = useId().replace(/:/g, "");
   const pathId = `auth-ecg-hero-${uid}`;
   const [reduceMotion, setReduceMotion] = useState(false);
@@ -22,8 +23,14 @@ export default function AuthHeroGlassHeart({ light = true }) {
   const vbW = 320;
   const vbH = 90;
   const d = ECG_REFERENCE_HERO_PATH;
-  const ghostStroke = light ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.14)";
-  const traceStroke = light ? "rgba(255,255,255,0.94)" : "rgba(255,255,255,0.9)";
+  const clinical = clinicalBlue && light;
+  const ghostStroke = clinical
+    ? "rgba(37,99,235,0.22)"
+    : light
+      ? "rgba(255,255,255,0.2)"
+      : "rgba(255,255,255,0.14)";
+  const traceStroke = clinical ? "#2563eb" : light ? "rgba(255,255,255,0.94)" : "rgba(255,255,255,0.9)";
+  const traceWidth = clinical ? 2.25 : light ? 2.15 : 2.05;
 
   return (
     <svg
@@ -72,6 +79,9 @@ export default function AuthHeroGlassHeart({ light = true }) {
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
+        <filter id={`auth-ecg-orb-${uid}`} x="-220%" y="-220%" width="540%" height="540%">
+          <feGaussianBlur stdDeviation="1.8" />
+        </filter>
       </defs>
 
       {/* Faint full waveform — sits behind the draw, lets gradient show through */}
@@ -90,7 +100,7 @@ export default function AuthHeroGlassHeart({ light = true }) {
           d={d}
           pathLength={100}
           stroke={traceStroke}
-          strokeWidth={light ? 2.15 : 2.05}
+          strokeWidth={traceWidth}
           strokeLinecap="round"
           strokeLinejoin="round"
           fill="none"
@@ -102,7 +112,7 @@ export default function AuthHeroGlassHeart({ light = true }) {
               attributeName="stroke-dashoffset"
               values="100;0;0;100;100"
               keyTimes={`0;${KEY_DRAW_END};${KEY_HOLD_END};${KEY_RESET_END};1`}
-              dur={`${CYCLE_SEC}s`}
+              dur={`${cycleSec}s`}
               repeatCount="indefinite"
               calcMode="linear"
             />
@@ -111,17 +121,17 @@ export default function AuthHeroGlassHeart({ light = true }) {
       </g>
 
       {!reduceMotion && (
-        <circle r={5.2} fill="#ffffff" filter={`url(#auth-ecg-spark-${uid})`}>
+        <circle r={5.2} fill={clinical ? "#eff6ff" : "#ffffff"} filter={`url(#auth-ecg-spark-${uid})`}>
           <animate
             attributeName="opacity"
             values="1;1;0;0"
             keyTimes={`0;${KEY_HOLD_END};${KEY_RESET_END};1`}
-            dur={`${CYCLE_SEC}s`}
+            dur={`${cycleSec}s`}
             repeatCount="indefinite"
             calcMode="linear"
           />
           <animateMotion
-            dur={`${CYCLE_SEC}s`}
+            dur={`${cycleSec}s`}
             repeatCount="indefinite"
             calcMode="linear"
             keyTimes={`0;${KEY_DRAW_END};${KEY_HOLD_END};${KEY_RESET_END};1`}

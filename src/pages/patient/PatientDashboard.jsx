@@ -1,28 +1,39 @@
-import { useState, useCallback, useEffect, Component, useTransition, useRef } from "react";
+import { useState, useCallback, useEffect, Component, useTransition, useRef, Suspense, lazy } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { HeartPulse, Calendar, BarChart3, SlidersHorizontal, Moon, Sun, LogOut, X, Stethoscope, MessageSquare, LayoutGrid, Pill, Bell, FileHeart, MoreHorizontal, ChevronRight, Loader2 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { signOutClearPresence } from "../../lib/signOutClearPresence";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../hooks/useTheme";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { usePresenceOnlineMap } from "../../hooks/usePresenceOnlineMap";
 import { usePatientInboundSounds } from "../../hooks/usePatientInboundSounds";
 import { ensurePatientMessagingAudioUnlocked } from "../../lib/patientMessagingSounds";
 import { ensureMessageNotifAudioUnlocked } from "../../lib/messageNotificationSettings";
 import { deleteMedication } from "../../lib/medications";
 import Dashboard from "./Dashboard";
-import MedicationsPage from "./MedicationsPage";
-import AppointmentsPage from "./AppointmentsPage";
-import PatientMessagesPage from "./PatientMessagesPage";
-import AnalyticsPage from "./AnalyticsPage";
-import HealthRecordsPage from "./HealthRecordsPage";
-import NotificationsPage from "./NotificationsPage";
-import SettingsPage from "./SettingsPage";
-import CareHubPage from "./CareHubPage";
-import MedModal from "../../components/modals/MedModal";
-import FeedbackModal from "../../components/modals/FeedbackModal";
-import NicknameModal from "../../components/modals/NicknameModal";
-import AIDrawer from "../../components/ai/AIDrawer";
 
+const MedicationsPage = lazy(() => import("./MedicationsPage"));
+const AppointmentsPage = lazy(() => import("./AppointmentsPage"));
+const PatientMessagesPage = lazy(() => import("./PatientMessagesPage"));
+const AnalyticsPage = lazy(() => import("./AnalyticsPage"));
+const HealthRecordsPage = lazy(() => import("./HealthRecordsPage"));
+const NotificationsPage = lazy(() => import("./NotificationsPage"));
+const SettingsPage = lazy(() => import("./SettingsPage"));
+const CareHubPage = lazy(() => import("./CareHubPage"));
+
+const MedModal = lazy(() => import("../../components/modals/MedModal"));
+const FeedbackModal = lazy(() => import("../../components/modals/FeedbackModal"));
+const NicknameModal = lazy(() => import("../../components/modals/NicknameModal"));
+const AIDrawer = lazy(() => import("../../components/ai/AIDrawer"));
+
+function PatientTabSuspenseFallback() {
+  return (
+    <div style={{ flex: 1, minHeight: "40vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Loader2 aria-hidden style={{ animation: "spin360 .65s linear infinite", color: "var(--p)", width: 28, height: 28 }} />
+    </div>
+  );
+}
 const PATIENT_MAIN_NAV = [
   { id: "dashboard", label: "Dashboard", Icon: HeartPulse, page: "dashboard" },
   { id: "medications", label: "Medications", Icon: Pill, page: "medications" },
@@ -128,6 +139,7 @@ export default function PatientDashboard() {
   const deleteMed = useCallback(async (id) => { const med = meds.find((m) => m.id === id); setMeds((ms) => ms.filter((m) => m.id !== id)); if (med?.firestoreId) await deleteMedication(med.firestoreId); }, [meds, setMeds]);
   const userName = displayName || user?.displayName || user?.email?.split("@")[0] || "";
   const t1 = "var(--t1)", t2 = "var(--t2)", t3 = "var(--t3)", b0 = "var(--b0)", b1 = "var(--b1)";
+  const onlinePeers = usePresenceOnlineMap(user?.id);
 
   usePatientInboundSounds(user?.id);
 
@@ -309,7 +321,7 @@ export default function PatientDashboard() {
               <span style={{ display: "flex", alignItems: "center", gap: 8, color: t3, fontSize: 12, fontWeight: 500 }}>{light ? <Sun size={14} color="var(--am)" /> : <Moon size={14} />}{light ? "Light" : "Dark"}</span>
               <div className={`sw ${!light ? "on" : ""}`} onClick={() => setLight(!light)} role="switch" aria-checked={!light} />
             </div>
-            <button type="button" onClick={() => supabase.auth.signOut()} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, border: "1px solid rgba(239,68,68,.16)", background: "rgba(239,68,68,.05)", cursor: "pointer", color: "var(--ro)", fontFamily: "inherit", fontSize: 12, fontWeight: 600, width: "100%", transition: "background .15s" }}
+            <button type="button" onClick={() => void signOutClearPresence(user?.id)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, border: "1px solid rgba(239,68,68,.16)", background: "rgba(239,68,68,.05)", cursor: "pointer", color: "var(--ro)", fontFamily: "inherit", fontSize: 12, fontWeight: 600, width: "100%", transition: "background .15s" }}
               onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,.09)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(239,68,68,.05)"; }}>
               <LogOut size={14} /> Sign Out
@@ -389,49 +401,53 @@ export default function PatientDashboard() {
             {page === "dashboard" && (
               <Dashboard user={user} meds={meds} setMeds={setMeds} onAdd={() => setAddOpen(true)} displayName={userName} onEditName={() => setShowNickname(true)} onNavigateTab={handleDashboardNavigate} />
             )}
-            {page === "medications" && (
-              <MedicationsPage meds={meds} setMeds={setMeds} onEdit={(m) => setEditMed(m)} onDelete={deleteMed} userId={user?.id} focusMedicationId={focusMedicationId} onConsumedFocus={() => setFocusMedicationId(null)} />
-            )}
-            {page === "appointments" && <AppointmentsPage userId={user?.id} onNavigateTab={handleDashboardNavigate} />}
-            {page === "messages" && (
-              <PatientMessagesPage
-                userId={user?.id}
-                senderDisplayName={userName}
-                initialPeer={messagesPeer}
-                onOpenCareTeamSettings={() => goToPage("settings", "settings", { settingsExpand: "primarycare" })}
-              />
-            )}
-            {page === "analytics" && <AnalyticsPage meds={meds} userId={user?.id} onNavigateTab={handleDashboardNavigate} />}
-            {page === "health-records" && <HealthRecordsPage userId={user?.id} />}
-            {page === "notifications" && <NotificationsPage userId={user?.id} meds={meds} onNavigate={handleNotificationNavigate} />}
-            {page === "settings" && <SettingsPage light={light} setLight={setLight} user={user} displayName={userName} onEditName={() => setShowNickname(true)} meds={meds} onFeedback={() => setShowFeedback(true)} expandSectionKey={settingsExpand} />}
-            {page === "care-hub" && (
-              <CareHubPage
-                userId={user?.id}
-                onCareAdvisor={() => setShowAI(true)}
-                onFeedback={() => setShowFeedback(true)}
-                onHelpSupport={() => goToPage("settings", "settings")}
-                onManageCareTeam={() => goToPage("settings", "settings", { settingsExpand: "primarycare" })}
-              />
-            )}
-            {![
-              "dashboard",
-              "medications",
-              "appointments",
-              "messages",
-              "analytics",
-              "health-records",
-              "notifications",
-              "settings",
-              "care-hub",
-            ].includes(page) && (
-              <div style={{ flex: 1, padding: 28, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, textAlign: "center" }}>
-                <p style={{ margin: 0, color: "var(--t1)", fontWeight: 700 }}>Page not available</p>
-                <p style={{ margin: 0, color: "var(--t3)", fontSize: 13 }}>The menu selection didn&apos;t match a screen. Return home and try again.</p>
-                <button type="button" className="btn" onClick={() => goToPage("dashboard", "dashboard")}>
-                  Go to Dashboard
-                </button>
-              </div>
+            {page !== "dashboard" && (
+              <Suspense fallback={<PatientTabSuspenseFallback />}>
+                {page === "medications" && (
+                  <MedicationsPage meds={meds} setMeds={setMeds} onEdit={(m) => setEditMed(m)} onDelete={deleteMed} userId={user?.id} focusMedicationId={focusMedicationId} onConsumedFocus={() => setFocusMedicationId(null)} />
+                )}
+                {page === "appointments" && <AppointmentsPage userId={user?.id} onNavigateTab={handleDashboardNavigate} />}
+                {page === "messages" && (
+                  <PatientMessagesPage
+                    userId={user?.id}
+                    senderDisplayName={userName}
+                    initialPeer={messagesPeer}
+                    onOpenCareTeamSettings={() => goToPage("settings", "settings", { settingsExpand: "primarycare" })}
+                    onlineUsers={onlinePeers}
+                  />
+                )}
+                {page === "analytics" && <AnalyticsPage meds={meds} userId={user?.id} onNavigateTab={handleDashboardNavigate} />}
+                {page === "health-records" && <HealthRecordsPage userId={user?.id} />}
+                {page === "notifications" && <NotificationsPage userId={user?.id} meds={meds} onNavigate={handleNotificationNavigate} />}
+                {page === "settings" && <SettingsPage light={light} setLight={setLight} user={user} displayName={userName} onEditName={() => setShowNickname(true)} meds={meds} onFeedback={() => setShowFeedback(true)} expandSectionKey={settingsExpand} />}
+                {page === "care-hub" && (
+                  <CareHubPage
+                    userId={user?.id}
+                    onCareAdvisor={() => setShowAI(true)}
+                    onFeedback={() => setShowFeedback(true)}
+                    onHelpSupport={() => goToPage("settings", "settings")}
+                    onManageCareTeam={() => goToPage("settings", "settings", { settingsExpand: "primarycare" })}
+                  />
+                )}
+                {![
+                  "medications",
+                  "appointments",
+                  "messages",
+                  "analytics",
+                  "health-records",
+                  "notifications",
+                  "settings",
+                  "care-hub",
+                ].includes(page) && (
+                  <div style={{ flex: 1, padding: 28, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, textAlign: "center" }}>
+                    <p style={{ margin: 0, color: "var(--t1)", fontWeight: 700 }}>Page not available</p>
+                    <p style={{ margin: 0, color: "var(--t3)", fontSize: 13 }}>The menu selection didn&apos;t match a screen. Return home and try again.</p>
+                    <button type="button" className="btn" onClick={() => goToPage("dashboard", "dashboard")}>
+                      Go to Dashboard
+                    </button>
+                  </div>
+                )}
+              </Suspense>
             )}
           </PatientMainErrorBoundary>
         </div>
@@ -510,7 +526,7 @@ export default function PatientDashboard() {
                   <span style={{ color: t3, fontSize: 12, fontWeight: 500 }}>Dark mode</span>
                   <div className={`sw ${!light ? "on" : ""}`} onClick={() => setLight(!light)} role="switch" aria-checked={!light} />
                 </div>
-                <button type="button" onClick={() => supabase.auth.signOut()} style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, border: "1px solid rgba(239,68,68,.2)", background: "rgba(239,68,68,.07)", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "var(--ro)", width: "100%" }}>
+                <button type="button" onClick={() => void signOutClearPresence(user?.id)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, border: "1px solid rgba(239,68,68,.2)", background: "rgba(239,68,68,.07)", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "var(--ro)", width: "100%" }}>
                   <LogOut size={14} /> Sign Out
                 </button>
               </div>
@@ -519,10 +535,34 @@ export default function PatientDashboard() {
         )}
       </AnimatePresence>
 
-      <AnimatePresence>{addOpen && <MedModal onClose={() => setAddOpen(false)} onSave={saveMed} userId={user?.id} />}</AnimatePresence>
-      <AnimatePresence>{editMed && <MedModal existing={editMed} onClose={() => setEditMed(null)} onSave={saveMed} userId={user?.id} />}</AnimatePresence>
-      <AnimatePresence>{showNickname && <NicknameModal currentName={userName} onSave={saveName} onClose={() => setShowNickname(false)} userId={user?.id} />}</AnimatePresence>
-      <AnimatePresence>{showFeedback && <FeedbackModal onClose={() => setShowFeedback(false)} userEmail={user?.email} />}</AnimatePresence>
+      <AnimatePresence>
+        {addOpen && (
+          <Suspense fallback={null}>
+            <MedModal onClose={() => setAddOpen(false)} onSave={saveMed} userId={user?.id} />
+          </Suspense>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {editMed && (
+          <Suspense fallback={null}>
+            <MedModal existing={editMed} onClose={() => setEditMed(null)} onSave={saveMed} userId={user?.id} />
+          </Suspense>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showNickname && (
+          <Suspense fallback={null}>
+            <NicknameModal currentName={userName} onSave={saveName} onClose={() => setShowNickname(false)} userId={user?.id} />
+          </Suspense>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showFeedback && (
+          <Suspense fallback={null}>
+            <FeedbackModal onClose={() => setShowFeedback(false)} userEmail={user?.email} />
+          </Suspense>
+        )}
+      </AnimatePresence>
       {!isMob && (
         <motion.button type="button" aria-label="Care advisor" whileHover={{ scale: 1.06, y: -2 }} whileTap={{ scale: 0.93 }} onClick={() => setShowAI(true)} style={{ position: "fixed", bottom: "calc(26px + env(safe-area-inset-bottom, 0px))", right: "calc(26px + env(safe-area-inset-right, 0px))", width: 56, height: 56, borderRadius: "50%", border: "none", background: "linear-gradient(135deg,#3b82f6,#2563eb)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, boxShadow: "0 8px 28px rgba(59,130,246,.45)" }}>
           <Stethoscope size={24} color="#fff" strokeWidth={2.2} />
@@ -532,7 +572,9 @@ export default function PatientDashboard() {
         {showAI && (
           <>
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowAI(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", zIndex: 90, backdropFilter: "blur(5px)" }} />
-            <AIDrawer onClose={() => setShowAI(false)} userName={userName} meds={meds} userId={user?.id} />
+            <Suspense fallback={null}>
+              <AIDrawer onClose={() => setShowAI(false)} userName={userName} meds={meds} userId={user?.id} />
+            </Suspense>
           </>
         )}
       </AnimatePresence>

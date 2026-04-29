@@ -1,7 +1,8 @@
-import { createContext, useContext, useEffect, useState, useRef } from "react";
+import { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
 import { supabase } from "../supabase";
 import { loadMedications } from "../lib/medications";
-import { loadTodaysTakenSlots } from "../lib/adherence";
+import { loadTodaysTakenSlots, loadMedicationDoseLogRows, medicationIdMatchKey } from "../lib/adherence";
+import { formatProfileFullName } from "../lib/profileName";
 
 const AuthContext = createContext({});
 export const useAuth = () => useContext(AuthContext);
@@ -42,17 +43,15 @@ export function AuthProvider({ children }) {
   const profileFetchedFor                   = useRef(null);
 
   useEffect(() => {
-    if (user?.id) {
-      const stored = cacheRead(user.id, "display_name") || "";
-      setDisplayNameState(stored);
-    } else if (user === null) {
-      setDisplayNameState("");
-    }
-  }, [user?.id]);
+    if (user === null) setDisplayNameState("");
+  }, [user]);
 
   const setDisplayName = (name) => {
     setDisplayNameState(name);
-    if (user?.id) cacheWrite(user.id, "display_name", name);
+    if (user?.id) {
+      if (name) cacheWrite(user.id, "display_name", name);
+      else try { localStorage.removeItem(`mt_display_name_${user.id}`); } catch {}
+    }
   };
 
   async function fetchProfile(uid, attempt = 0) {
@@ -84,10 +83,13 @@ export function AuthProvider({ children }) {
       cacheWrite(uid, "role", role);
       cacheWrite(uid, "onboarding", done);
 
-      const fullName = [data.first_name, data.last_name].filter(Boolean).join(" ");
-      if (fullName && !cacheRead(uid, "display_name")) {
+      const fullName = formatProfileFullName(data).trim() || (cacheRead(uid, "display_name") || "").trim() || "";
+      if (fullName) {
         cacheWrite(uid, "display_name", fullName);
         setDisplayNameState(fullName);
+      } else if (data.first_name === null && data.last_name === null) {
+        const cached = cacheRead(uid, "display_name");
+        if (cached) setDisplayNameState(cached);
       }
     } catch (e) {
       if (attempt < 6) {
@@ -101,26 +103,35 @@ export function AuthProvider({ children }) {
     }
   }
 
-  async function loadUserMeds(uid) {
+  const loadUserMeds = useCallback(async (uid) => {
+    if (!uid) return;
     try {
+      // Only meds + today's slots block first paint — dose history (~2000 rows) loads after idle
       const [medsList, takenDetail] = await Promise.all([
         loadMedications(uid),
         loadTodaysTakenSlots(uid),
       ]);
       const merged = (medsList || []).map((m) => {
-        const d = takenDetail.get(m.id);
+        const d = takenDetail.get(medicationIdMatchKey(m.id));
         const loggedAllDay = d?.all ?? false;
-        const loggedSlotTimes = d && !d.all ? [...d.slots] : [];
+        const loggedSlotTimes = d && !d.all ? [...(d.slots ?? new Set())] : [];
         const taken = loggedAllDay || loggedSlotTimes.length > 0;
         return { ...m, loggedAllDay, loggedSlotTimes, taken };
       });
       setMeds(merged);
-    } catch {
-      setMeds([]);
+      const rqIdle = typeof requestIdleCallback === "function" ? requestIdleCallback : (fn) => setTimeout(fn, 1);
+      rqIdle(() => {
+        void loadMedicationDoseLogRows(uid, { lookbackDays: 120 })
+          .then((rows) => setDoseLogs(rows || []))
+          .catch(() => {});
+      }, { timeout: 2500 });
+    } catch (e) {
+      console.error("loadUserMeds:", e);
+      // Do not clear meds — otherwise a transient fetch error resets doses UI to 0.
     } finally {
       setMedsLoaded(true);
     }
-  }
+  }, []);
 
   async function applyPendingOAuthSignup(uid) {
     const pending = readPendingOAuthSignup();
@@ -191,11 +202,36 @@ export function AuthProvider({ children }) {
     supabase.auth.getSession().then(({ data: { session } }) => {
       applyUser(session?.user ?? null);
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => applyUser(session?.user ?? null)
-    );
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => applyUser(session?.user ?? null));
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const ch = supabase
+      .channel(`auth-profile-${user.id}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles", filter: `id=eq.${user.id}` }, (payload) => {
+        const next = payload.new;
+        if (!next) return;
+        const name = formatProfileFullName(next).trim();
+        if (name) {
+          cacheWrite(user.id, "display_name", name);
+          setDisplayNameState(name);
+        }
+        if (next.role === "patient") void loadUserMeds(user.id);
+      })
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [user?.id, loadUserMeds]);
+
+  useEffect(() => {
+    if (!user?.id || (userRole != null && userRole !== "patient")) return;
+    const onVis = () => {
+      if (document.visibilityState === "visible") void loadUserMeds(user.id);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [user?.id, userRole, loadUserMeds]);
 
   return (
     <AuthContext.Provider value={{
@@ -215,6 +251,7 @@ export function AuthProvider({ children }) {
       medsLoaded,
       doseLogs,
       setDoseLogs,
+      loadUserMeds: user?.id ? () => loadUserMeds(user.id) : async () => {},
     }}>
       {children}
     </AuthContext.Provider>

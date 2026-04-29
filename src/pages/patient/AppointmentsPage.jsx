@@ -12,10 +12,22 @@ import {
   MessageSquare,
   Plus,
   Stethoscope,
+  Video,
 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { useAuth } from "../../contexts/AuthContext";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { formatProfileFullName } from "../../lib/profileName";
+import { isVirtualCheckInWindowOpen } from "../../lib/virtualCheckIn";
 import { careTeamDoctorEntries } from "../../lib/careTeam";
+import { buildVideoCallUrlFromRoom, buildVideoRoomId, getAppointmentVideoWindow, isVideoStyleVisitType } from "../../lib/videoCall";
+import { buildPatientRescheduleRequestPayload, hasActiveRescheduleRequest, normalizeRescheduleRequest } from "../../lib/rescheduleRequest";
+import VirtualPreVisitModal from "../../components/appointments/VirtualPreVisitModal";
+import { isVirtualVisitCheckInComplete, patientEnterVirtualWaitingRoom } from "../../lib/virtualVisitCheckIn";
+import { getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
+
+/** Stable placeholder so `patientProfile ?? {}` doesn’t allocate a new object every render (would retrigger modal hydration). */
+const FALLBACK_VISIT_PROFILE = Object.freeze({});
 
 const PRIMARY = "var(--pl)";
 const SURFACE = "var(--s1)";
@@ -27,18 +39,12 @@ const SHADOW_LG = "var(--shadow-card-hover)";
 
 const TAB = { UPCOMING: "upcoming", PAST: "past", CANCELLED: "cancelled", REQUESTS: "requests" };
 
+/** @deprecated use normalizeRescheduleRequest — kept for a few call sites expecting { date, time } */
 function parseRescheduleRequest(raw) {
-  if (!raw) return null;
-  if (typeof raw === "object" && raw.date && raw.time) return { date: raw.date, time: raw.time };
-  if (typeof raw === "string") {
-    try {
-      const j = JSON.parse(raw);
-      if (j?.date && j?.time) return { date: j.date, time: j.time };
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  const n = normalizeRescheduleRequest(raw);
+  if (!n) return null;
+  if (n.phase === "doctor_counter" && n.doctor) return { date: n.doctor.date, time: n.doctor.time, _counter: true, _patient: n.patient };
+  return { date: n.patient.date, time: n.patient.time };
 }
 
 function parseBookingAvailability(raw) {
@@ -62,6 +68,16 @@ function slotAllowed(slotsMap, dateStr, timeVal) {
   if (!Array.isArray(arr)) return false;
   const want = normTime(timeVal);
   return arr.some((t) => normTime(t) === want);
+}
+
+function slotTaken(doctorTakenSlots, doctorId, dateStr, timeVal) {
+  if (!doctorId || !dateStr) return false;
+  const byDoctor = doctorTakenSlots?.[doctorId];
+  if (!byDoctor) return false;
+  const byDate = byDoctor[dateStr];
+  if (!byDate) return false;
+  const want = normTime(timeVal);
+  return !!byDate[want];
 }
 
 function format12hFromTime(timeVal) {
@@ -89,8 +105,16 @@ function apptSortKey(a) {
   return `${a.date}T${normTime(a.time)}`;
 }
 
+function localDateKey(d = new Date()) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export default function AppointmentsPage({ userId, onNavigateTab }) {
   const isMob = useIsMobile();
+  const { setDisplayName } = useAuth();
   const shellBg = "var(--bg)";
 
   const [allAppts, setAllAppts] = useState([]);
@@ -100,6 +124,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const [primaryDoctorId, setPrimaryDoctorId] = useState(null);
   const [careTeamDoctorIds, setCareTeamDoctorIds] = useState([]);
   const [linkedDoctorIds, setLinkedDoctorIds] = useState([]);
+  const [doctorTakenSlots, setDoctorTakenSlots] = useState({});
+  const [doctorProfilesRefreshTick, setDoctorProfilesRefreshTick] = useState(0);
   const [bookingDoctorId, setBookingDoctorId] = useState(null);
   const [tab, setTab] = useState(TAB.UPCOMING);
 
@@ -113,17 +139,34 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const [bookBusy, setBookBusy] = useState(false);
   const [bookErr, setBookErr] = useState("");
   const [bookNotice, setBookNotice] = useState("");
+  const [videoActionBusyId, setVideoActionBusyId] = useState(null);
+  /** Bumps every 1s so visit-window UI (check-in, join) stays in sync with real time. */
+  const [, setVideoUiTick] = useState(0);
 
   const [calendarMonth, setCalendarMonth] = useState(() => new Date());
-  const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => localDateKey());
   const [expandedRequestId, setExpandedRequestId] = useState(null);
   const autoExpandRescheduleRef = useRef(false);
+  /** Debounced full refetch so realtime + doctor-created rows always match Supabase (partial payloads). */
+  const appointmentsRefreshTimerRef = useRef(null);
+
+  const [patientProfile, setPatientProfile] = useState(null);
+  const [preVisitModalOpen, setPreVisitModalOpen] = useState(false);
+  const [preVisitModalReadOnly, setPreVisitModalReadOnly] = useState(false);
+  const [preVisitModalAppt, setPreVisitModalAppt] = useState(null);
+  const [videoVisitRequests, setVideoVisitRequests] = useState([]);
+  const [visitReqDoctorId, setVisitReqDoctorId] = useState(null);
+  const [visitReqDate, setVisitReqDate] = useState(() => localDateKey());
+  const [visitReqTime, setVisitReqTime] = useState("09:00");
+  const [visitReqReason, setVisitReqReason] = useState("");
+  const [visitReqBusy, setVisitReqBusy] = useState(false);
+  const [visitReqErr, setVisitReqErr] = useState("");
 
   const refresh = useCallback(async () => {
     if (!userId) return;
     const { data } = await supabase
       .from("appointments")
-      .select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request")
+      .select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status")
       .eq("patient_id", userId)
       .order("date", { ascending: true });
     setAllAppts(data || []);
@@ -134,11 +177,63 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   }, [userId]);
 
   useEffect(() => {
+    const t = setInterval(() => setVideoUiTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const performVirtualCheckIn = useCallback(
+    async (appt, videoWindow, videoRoomId, _waitingKey) => {
+      if (!userId) throw new Error("You must be signed in to check in.");
+      if (!appt?.doctor_id) throw new Error("This appointment is missing a doctor. Refresh and try again.");
+      if (!videoWindow) throw new Error("This is not a video visit or the time is invalid.");
+      if (!videoRoomId) throw new Error("Could not start check-in. Refresh the page and try again.");
+      const st = String(appt.status || "");
+      if (st === "cancelled" || st === "completed") {
+        throw new Error("This appointment cannot be checked in.");
+      }
+      if (String(appt.date || "").slice(0, 10) < localDateKey()) {
+        throw new Error("Past appointments cannot be checked in.");
+      }
+      if (!isVideoStyleVisitType(appt)) {
+        throw new Error("Only video / virtual visits use online check-in.");
+      }
+      if (!isVirtualCheckInWindowOpen(appt, Date.now())) {
+        throw new Error("Check-in is only available during your visit window.");
+      }
+      setVideoActionBusyId(appt.id);
+      try {
+        const { error } = await patientEnterVirtualWaitingRoom({ userId, appt, videoWindow });
+        if (error) {
+          const msg = error.message || (typeof error === "string" ? error : "Could not complete check-in.");
+          throw new Error(msg);
+        }
+        setAllAppts((prev) =>
+          prev.map((a) => (a.id === appt.id ? { ...a, virtual_visit_status: VS.WAITING_FOR_DOCTOR } : a)),
+        );
+      } finally {
+        setVideoActionBusyId(null);
+      }
+    },
+    [userId],
+  );
+
+  useEffect(() => {
     if (!userId) return;
     setLoading(true);
+    const reloadLinkedDoctors = () => {
+      supabase
+        .from("doctor_patients")
+        .select("doctor_id")
+        .eq("patient_id", userId)
+        .then(({ data }) => {
+          const ids = [...new Set((data || []).map((r) => r.doctor_id).filter(Boolean))];
+          setLinkedDoctorIds(ids);
+          setBookingDoctorId((prev) => prev || ids[0] || null);
+        });
+    };
     supabase
       .from("profiles")
-      .select("primary_doctor_id,care_team")
+      .select("primary_doctor_id,care_team,first_name,last_name,pre_visit_intake,allergies,medical_conditions")
       .eq("id", userId)
       .single()
       .then(({ data: prof }) => {
@@ -147,33 +242,177 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         const teamIds = careTeamDoctorEntries(prof).map((e) => e.doctorId).filter(Boolean);
         setCareTeamDoctorIds([...new Set(teamIds)]);
         setBookingDoctorId(nextPrimary);
+        setPatientProfile(prof || null);
       });
-    supabase
-      .from("doctor_patients")
-      .select("doctor_id")
-      .eq("patient_id", userId)
-      .then(({ data }) => {
-        const ids = [...new Set((data || []).map((r) => r.doctor_id).filter(Boolean))];
-        setLinkedDoctorIds(ids);
-        setBookingDoctorId((prev) => prev || ids[0] || null);
-      });
+    reloadLinkedDoctors();
     refresh().finally(() => setLoading(false));
+
+    const scheduleAppointmentsFetch = () => {
+      if (appointmentsRefreshTimerRef.current != null) {
+        window.clearTimeout(appointmentsRefreshTimerRef.current);
+      }
+      appointmentsRefreshTimerRef.current = window.setTimeout(() => {
+        appointmentsRefreshTimerRef.current = null;
+        void refresh();
+      }, 160);
+    };
 
     const ch = supabase
       .channel(`appts-full-${userId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${userId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${userId}` }, (payload) => {
+        if (payload.eventType === "INSERT" && payload.new) {
+          const row = payload.new;
+          setAllAppts((prev) => {
+            if (prev.some((a) => a.id === row.id)) return prev;
+            return [...prev, row].sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
+          });
+          scheduleAppointmentsFetch();
+          return;
+        }
+        if (payload.eventType === "UPDATE" && payload.new?.id) {
+          const row = payload.new;
+          setAllAppts((prev) => {
+            const exists = prev.some((a) => a.id === row.id);
+            const next = exists ? prev.map((a) => (a.id === row.id ? { ...a, ...row } : a)) : [...prev, row];
+            return next.sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
+          });
+          scheduleAppointmentsFetch();
+          return;
+        }
+        if (payload.eventType === "DELETE" && payload.old?.id) {
+          setAllAppts((prev) => prev.filter((a) => a.id !== payload.old.id));
+          scheduleAppointmentsFetch();
+          return;
+        }
+        scheduleAppointmentsFetch();
+      })
+      .subscribe();
+    const vch = supabase
+      .channel(`appts-vvisit-req-${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "video_visit_requests", filter: `patient_id=eq.${userId}` },
+        (payload) => {
+          if (payload.eventType === "INSERT" && payload.new) {
+            const row = payload.new;
+            setVideoVisitRequests((prev) => {
+              if (prev.some((r) => r.id === row.id)) return prev;
+              return [row, ...prev].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+            });
+            return;
+          }
+          if (payload.eventType === "UPDATE" && payload.new) {
+            const row = payload.new;
+            setVideoVisitRequests((prev) => {
+              const ix = prev.findIndex((r) => r.id === row.id);
+              const merged = ix >= 0 ? prev.map((r) => (r.id === row.id ? { ...r, ...row } : r)) : [row, ...prev];
+              return merged.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+            });
+            return;
+          }
+          if (payload.eventType === "DELETE" && payload.old?.id) {
+            setVideoVisitRequests((prev) => prev.filter((r) => r.id !== payload.old.id));
+            return;
+          }
+          supabase
+            .from("video_visit_requests")
+            .select("*")
+            .eq("patient_id", userId)
+            .order("created_at", { ascending: false })
+            .then(({ data }) => setVideoVisitRequests(data || []));
+        },
+      )
+      .subscribe();
+    const dpCh = supabase
+      .channel(`appts-doc-links-${userId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "doctor_patients", filter: `patient_id=eq.${userId}` }, () => {
+        reloadLinkedDoctors();
+        setDoctorProfilesRefreshTick((n) => n + 1);
+      })
       .subscribe();
     return () => {
+      if (appointmentsRefreshTimerRef.current != null) window.clearTimeout(appointmentsRefreshTimerRef.current);
+      appointmentsRefreshTimerRef.current = null;
       supabase.removeChannel(ch);
+      supabase.removeChannel(vch);
+      supabase.removeChannel(dpCh);
     };
   }, [userId, refresh]);
 
   useEffect(() => {
-    const ids = [...new Set(allAppts.map((a) => a.doctor_id).filter(Boolean))];
-    if (primaryDoctorId) ids.push(primaryDoctorId);
-    if (careTeamDoctorIds.length) ids.push(...careTeamDoctorIds);
-    if (linkedDoctorIds.length) ids.push(...linkedDoctorIds);
-    const uniq = [...new Set(ids)];
+    if (!userId) {
+      setVideoVisitRequests([]);
+      return;
+    }
+    let cancelled = false;
+    supabase
+      .from("video_visit_requests")
+      .select("*")
+      .eq("patient_id", userId)
+      .order("created_at", { ascending: false })
+      .then(({ data }) => {
+        if (!cancelled) setVideoVisitRequests(data || []);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  /** Keep intake/allergies/conditions fresh after doctor deletes form or any profile update — works across realtime, refresh, re-login */
+  useEffect(() => {
+    if (!userId) return undefined;
+    const cols = "primary_doctor_id,care_team,first_name,last_name,pre_visit_intake,allergies,medical_conditions";
+    const ch = supabase
+      .channel(`mt-patient-profile-intake-${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "profiles", filter: `id=eq.${userId}` },
+        async () => {
+          const { data } = await supabase.from("profiles").select(cols).eq("id", userId).single();
+          if (data) {
+            setPatientProfile(data);
+            setPrimaryDoctorId(data?.primary_doctor_id || null);
+            const teamIds = careTeamDoctorEntries(data).map((e) => e.doctorId).filter(Boolean);
+            setCareTeamDoctorIds([...new Set(teamIds)]);
+            setDoctorProfilesRefreshTick((n) => n + 1);
+          }
+        },
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(ch);
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    if (primaryDoctorId) setVisitReqDoctorId((prev) => prev || primaryDoctorId);
+  }, [primaryDoctorId]);
+
+  useEffect(() => {
+    setVisitReqDoctorId((prev) => {
+      if (prev) return prev;
+      return [...new Set([primaryDoctorId, ...linkedDoctorIds, bookingDoctorId].filter(Boolean))][0] || null;
+    });
+  }, [primaryDoctorId, linkedDoctorIds, bookingDoctorId]);
+
+  const trackedDoctorIds = useMemo(
+    () =>
+      [
+        ...new Set(
+          [
+            ...(allAppts || []).map((a) => a.doctor_id),
+            primaryDoctorId,
+            ...linkedDoctorIds,
+            ...careTeamDoctorIds,
+            bookingDoctorId,
+          ].filter(Boolean),
+        ),
+      ],
+    [allAppts, primaryDoctorId, linkedDoctorIds, careTeamDoctorIds, bookingDoctorId],
+  );
+
+  useEffect(() => {
+    const uniq = trackedDoctorIds;
     (async () => {
       let rpcDoctors = [];
       const rpcRes = await supabase.rpc("get_patient_booking_doctors", { p_patient_id: userId });
@@ -203,17 +442,6 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         return withAvail.data || [];
       };
 
-      const loadGlobalDoctorsWithSlots = async () => {
-        const rows = await supabase
-          .from("profiles")
-          .select("id,first_name,last_name,specialty,clinic_name,booking_availability");
-        if (rows.error) return [];
-        return (rows.data || []).filter((d) => {
-          const b = parseBookingAvailability(d.booking_availability);
-          return Object.values(b.slots || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
-        });
-      };
-
       let data = await loadProfiles(uniq);
       if (rpcDoctors.length) {
         const byId = {};
@@ -221,21 +449,6 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           byId[d.id] = d;
         });
         data = Object.values(byId);
-      }
-      const linkedHasSlots = data.some((d) => {
-        const b = parseBookingAvailability(d.booking_availability);
-        return Object.values(b.slots || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
-      });
-
-      if (!uniq.length || (!linkedHasSlots && !bookingSchemaMissing)) {
-        const global = await loadGlobalDoctorsWithSlots();
-        if (global.length) {
-          const byId = {};
-          [...data, ...global].forEach((d) => {
-            byId[d.id] = d;
-          });
-          data = Object.values(byId);
-        }
       }
 
       const m = {};
@@ -248,9 +461,73 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         setBookingDoctorId((prev) => (prev && m[prev] ? prev : (primaryDoctorId && m[primaryDoctorId] ? primaryDoctorId : idsLoaded[0])));
       }
     })();
-  }, [allAppts, primaryDoctorId, careTeamDoctorIds, linkedDoctorIds, userId]);
+  }, [trackedDoctorIds, primaryDoctorId, userId, doctorProfilesRefreshTick]);
 
-  const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  useEffect(() => {
+    if (!userId || !trackedDoctorIds.length) {
+      setDoctorTakenSlots({});
+      return;
+    }
+    let cancelled = false;
+    const today = localDateKey();
+    const refreshTaken = async () => {
+      const { data } = await supabase
+        .from("appointments")
+        .select("doctor_id,date,time,status")
+        .in("doctor_id", trackedDoctorIds)
+        .in("status", ["scheduled", "rescheduled"])
+        .gte("date", today);
+      if (cancelled) return;
+      const next = {};
+      (data || []).forEach((row) => {
+        if (!row?.doctor_id || !row?.date || !row?.time) return;
+        const dId = row.doctor_id;
+        const d = row.date;
+        const t = normTime(row.time);
+        if (!next[dId]) next[dId] = {};
+        if (!next[dId][d]) next[dId][d] = {};
+        next[dId][d][t] = true;
+      });
+      setDoctorTakenSlots(next);
+    };
+    void refreshTaken();
+    const chProfiles = supabase
+      .channel(`pt-booking-profiles-${userId}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, (payload) => {
+        const id = payload?.new?.id;
+        if (!id || !trackedDoctorIds.includes(id)) return;
+        setDoctorProfilesRefreshTick((n) => n + 1);
+      })
+      .subscribe();
+    const chAppts = supabase
+      .channel(`pt-booking-doctor-appts-${userId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "appointments" }, (payload) => {
+        const row = payload?.new ?? payload?.old;
+        if (!row?.doctor_id || !trackedDoctorIds.includes(row.doctor_id)) return;
+        void refreshTaken();
+      })
+      .subscribe();
+    return () => {
+      cancelled = true;
+      void supabase.removeChannel(chProfiles);
+      void supabase.removeChannel(chAppts);
+    };
+  }, [trackedDoctorIds, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const poll = setInterval(() => {
+      setDoctorProfilesRefreshTick((n) => n + 1);
+    }, 10000);
+    return () => clearInterval(poll);
+  }, [userId]);
+
+  const todayStr = useMemo(() => localDateKey(), []);
+  const isSlotBookable = useCallback(
+    (doctorId, slotsMap, dateStr, timeVal) =>
+      slotAllowed(slotsMap, dateStr, timeVal) && !slotTaken(doctorTakenSlots, doctorId, dateStr, timeVal),
+    [doctorTakenSlots],
+  );
 
   const { upcomingConfirmed, pastList, cancelledList, requestList, counts } = useMemo(() => {
     const upcomingConfirmed = [];
@@ -267,13 +544,19 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         pastList.push(a);
         continue;
       }
-      if (a.status === "rescheduled" && parseRescheduleRequest(a.reschedule_request)) {
-        requestList.push(a);
+      if (a.status === "scheduled" && a.date < todayStr) {
+        pastList.push(a);
         continue;
       }
-      if (a.status === "scheduled") {
-        if (a.date < todayStr) pastList.push(a);
-        else upcomingConfirmed.push(a);
+      if (a.status === "rescheduled" && a.date < todayStr) {
+        pastList.push(a);
+        continue;
+      }
+      if (hasActiveRescheduleRequest(a) && a.date >= todayStr) {
+        requestList.push(a);
+      }
+      if (a.status === "scheduled" || a.status === "rescheduled") {
+        if (a.date >= todayStr) upcomingConfirmed.push(a);
       }
     }
 
@@ -282,6 +565,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     cancelledList.sort((x, y) => apptSortKey(y).localeCompare(apptSortKey(x)));
     requestList.sort((x, y) => apptSortKey(x).localeCompare(apptSortKey(y)));
 
+    const pendingVisitReq = videoVisitRequests.filter((r) => String(r?.status || "") === "pending").length;
+
     return {
       upcomingConfirmed,
       pastList,
@@ -289,17 +574,17 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       requestList,
       counts: {
         upcoming: upcomingConfirmed.length,
-        pending: requestList.length,
+        pending: requestList.length + pendingVisitReq,
         cancelled: cancelledList.length,
       },
     };
-  }, [allAppts, todayStr]);
+  }, [allAppts, todayStr, videoVisitRequests]);
 
   const primaryAppt = upcomingConfirmed[0] || null;
   const primaryDoc = primaryAppt ? doctorProfiles[primaryAppt.doctor_id] : null;
   const primaryBooking = primaryDoc ? parseBookingAvailability(primaryDoc.booking_availability) : { timezone: "America/New_York", slots: {} };
 
-  const doctorsWithSlots = useMemo(() => {
+  const linkedDoctors = useMemo(() => {
     return Object.values(doctorProfiles)
       .map((doc) => {
         const booking = parseBookingAvailability(doc.booking_availability);
@@ -308,11 +593,11 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           return sum + (Array.isArray(arr) ? arr.length : 0);
         }, 0);
         return { ...doc, slotCount };
-      })
-      .filter((doc) => doc.slotCount > 0);
+      });
   }, [doctorProfiles, todayStr]);
+  const doctorsWithSlots = useMemo(() => linkedDoctors.filter((doc) => doc.slotCount > 0), [linkedDoctors]);
   const slotsPreviewByDoctor = useMemo(() => {
-    return doctorsWithSlots
+    return linkedDoctors
       .map((doc) => {
         const booking = parseBookingAvailability(doc.booking_availability);
         const preview = [];
@@ -323,10 +608,9 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             const times = Array.isArray(booking.slots[dateKey]) ? booking.slots[dateKey] : [];
             times.forEach((tm) => preview.push({ date: dateKey, time: normTime(tm) }));
           });
-        return { doctor: doc, slots: preview.slice(0, 8) };
-      })
-      .filter((row) => row.slots.length > 0);
-  }, [doctorsWithSlots, todayStr]);
+        return { doctor: doc, slots: preview.slice(0, 8), slotCount: doc.slotCount || 0 };
+      });
+  }, [linkedDoctors, todayStr]);
 
   useEffect(() => {
     if (!bookOpen) return;
@@ -383,7 +667,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const m = { confirmed: new Set(), pending: new Set() };
     for (const a of allAppts) {
       if (a.status === "cancelled") continue;
-      if (a.status === "rescheduled" && parseRescheduleRequest(a.reschedule_request)) {
+      if (hasActiveRescheduleRequest(a) && a.date) {
         m.pending.add(a.date);
         continue;
       }
@@ -420,14 +704,26 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
   async function submitRescheduleRequest() {
     if (!rescheduleAppt || !selectedSlot?.date || !selectedSlot?.time || rescheduleBusy) return;
-    if (!slotAllowed(activeBooking.slots, selectedSlot.date, selectedSlot.time)) return;
+    if (rescheduleAppt.date < todayStr) {
+      return;
+    }
+    if (rescheduleAppt.date === todayStr) {
+      const nowMs = Date.now();
+      const t = normTime(rescheduleAppt.time);
+      const apptStartMs = Date.parse(`${rescheduleAppt.date}T${t}`);
+      if (!Number.isNaN(apptStartMs) && apptStartMs < nowMs) {
+        return;
+      }
+    }
+    if (!isSlotBookable(rescheduleAppt.doctor_id, activeBooking.slots, selectedSlot.date, selectedSlot.time)) return;
     setRescheduleBusy(true);
     const reqTime = selectedSlot.time.length === 5 ? `${selectedSlot.time}:00` : selectedSlot.time;
+    const payload = buildPatientRescheduleRequestPayload({ date: selectedSlot.date, time: reqTime });
     await supabase
       .from("appointments")
       .update({
-        status: "rescheduled",
-        reschedule_request: { date: selectedSlot.date, time: reqTime },
+        status: "scheduled",
+        reschedule_request: payload,
         updated_at: new Date().toISOString(),
       })
       .eq("id", rescheduleAppt.id);
@@ -439,8 +735,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         title: "Reschedule request",
         body: `A patient requested to move an appointment to ${new Date(`${selectedSlot.date}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} at ${format12hFromTime(reqTime)}.`,
         related_id: rescheduleAppt.id,
-      })
-      .catch(() => {});
+      });
     setRescheduleBusy(false);
     setRescheduleForId(null);
     setSelectedSlot(null);
@@ -449,8 +744,70 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     await refresh();
   }
 
+  async function cancelPendingRescheduleRequest(appt) {
+    if (!appt?.id) return;
+    setRescheduleBusy(true);
+    await supabase
+      .from("appointments")
+      .update({ reschedule_request: null, status: "scheduled", updated_at: new Date().toISOString() })
+      .eq("id", appt.id);
+    setRescheduleBusy(false);
+    await refresh();
+  }
+
+  async function acceptDoctorCounterAppt(appt) {
+    const n = normalizeRescheduleRequest(appt.reschedule_request);
+    if (n?.phase !== "doctor_counter" || !n.doctor) return;
+    setRescheduleBusy(true);
+    await supabase
+      .from("appointments")
+      .update({
+        date: n.doctor.date,
+        time: n.doctor.time,
+        status: "scheduled",
+        reschedule_request: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", appt.id);
+    await supabase
+      .from("notifications")
+      .insert({
+        user_id: appt.doctor_id,
+        type: "general",
+        title: "Reschedule accepted",
+        body: "The patient accepted your suggested appointment time.",
+        related_id: appt.id,
+      });
+    setRescheduleBusy(false);
+    await refresh();
+  }
+
+  async function declineDoctorCounterAppt(appt) {
+    const n = normalizeRescheduleRequest(appt.reschedule_request);
+    if (n?.phase !== "doctor_counter" || !n.patient) return;
+    setRescheduleBusy(true);
+    const back = buildPatientRescheduleRequestPayload({ date: n.patient.date, time: n.patient.time });
+    await supabase
+      .from("appointments")
+      .update({ reschedule_request: back, status: "scheduled", updated_at: new Date().toISOString() })
+      .eq("id", appt.id);
+    await supabase
+      .from("notifications")
+      .insert({
+        user_id: appt.doctor_id,
+        type: "general",
+        title: "Suggested time declined",
+        body: "The patient declined the suggested time. Your previous proposal was removed; the patient's reschedule request is still pending.",
+        related_id: appt.id,
+      });
+    setRescheduleBusy(false);
+    await refresh();
+  }
+
   async function cancelAppointment(appt) {
-    await supabase.from("appointments").update({ status: "cancelled", updated_at: new Date().toISOString() }).eq("id", appt.id);
+    const patch = { status: "cancelled", updated_at: new Date().toISOString() };
+    if (isVideoStyleVisitType(appt)) patch.virtual_visit_status = VS.CANCELLED;
+    await supabase.from("appointments").update(patch).eq("id", appt.id);
     const cancelLabel = new Date(`${appt.date}T${normTime(appt.time) || "00:00:00"}`).toLocaleString("en-US", {
       weekday: "short",
       month: "short",
@@ -470,9 +827,9 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         sender_id: userId,
         recipient_id: appt.doctor_id,
         body: `Appointment cancelled: ${appt.type || "Visit"} on ${cancelLabel}.`,
-      }).catch(() => {});
+      });
     }
-    setAllAppts((prev) => prev.map((a) => (a.id === appt.id ? { ...a, status: "cancelled" } : a)));
+    setAllAppts((prev) => prev.map((a) => (a.id === appt.id ? { ...a, ...patch } : a)));
     await refresh();
     if (rescheduleForId === appt.id) {
       setRescheduleForId(null);
@@ -486,7 +843,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       setBookErr("Select an available time.");
       return;
     }
-    if (!slotAllowed(bookBooking.slots, bookSelected.date, bookSelected.time)) {
+    if (!isSlotBookable(bookingDoctorId, bookBooking.slots, bookSelected.date, bookSelected.time)) {
       setBookErr("That time is not offered by your doctor.");
       return;
     }
@@ -495,7 +852,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     setBookNotice("");
     const visitType = bookVisitMode === "virtual" ? "Virtual Visit" : "In-person Visit";
     const bookingTime = bookSelected.time.length === 5 ? `${bookSelected.time}:00` : bookSelected.time;
-    const { data: createdAppt, error } = await supabase.from("appointments").insert({
+    const insertRow = {
       patient_id: userId,
       doctor_id: bookingDoctorId,
       date: bookSelected.date,
@@ -503,7 +860,9 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       type: visitType,
       notes: null,
       status: "scheduled",
-    }).select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request").single();
+      ...(visitType === "Virtual Visit" ? { virtual_visit_status: VS.PENDING } : {}),
+    };
+    const { data: createdAppt, error } = await supabase.from("appointments").insert(insertRow).select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status").single();
     setBookBusy(false);
     if (error) {
       setBookErr(error.message || "Could not book. Check your care team in Settings.");
@@ -527,7 +886,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         sender_id: userId,
         recipient_id: bookingDoctorId,
         body: `Appointment booked: ${visitType} on ${apptLabel}.`,
-      }).catch(() => {});
+      });
     }
     setBookOpen(false);
     setTab(TAB.UPCOMING);
@@ -540,6 +899,72 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     }
     setBookNotice(`Successfully booked for ${apptLabel}.`);
   }
+
+  async function submitVideoVisitRequest() {
+    if (!userId || visitReqBusy) return;
+    const docId =
+      visitReqDoctorId ||
+      doctorIdsForVisitRequest[0] ||
+      primaryDoctorId ||
+      bookingDoctorId;
+    const reason = visitReqReason.trim();
+    setVisitReqErr("");
+    if (!docId) {
+      setVisitReqErr("Add a doctor in Settings under Care team first.");
+      return;
+    }
+    if (!visitReqDate || !String(visitReqTime || "").trim()) {
+      setVisitReqErr("Choose both a preferred date and time.");
+      return;
+    }
+    if (reason.length < 3) {
+      setVisitReqErr("Briefly explain why you need to see the doctor.");
+      return;
+    }
+    setVisitReqBusy(true);
+    const timeSql = visitReqTime.length === 5 ? `${visitReqTime}:00` : visitReqTime;
+    const { data, error } = await supabase
+      .from("video_visit_requests")
+      .insert({
+        patient_id: userId,
+        doctor_id: docId,
+        requested_date: visitReqDate,
+        requested_time: timeSql,
+        reason,
+        status: "pending",
+      })
+      .select("*")
+      .single();
+    setVisitReqBusy(false);
+    if (error) {
+      setVisitReqErr(error.message || "Could not send request. If this persists, run the urgent visit migration in Supabase.");
+      return;
+    }
+    if (data) setVideoVisitRequests((prev) => [data, ...prev.filter((r) => r.id !== data.id)]);
+    setVisitReqReason("");
+    setBookNotice("Your request was sent to your doctor.");
+    const ptName = formatProfileFullName(patientProfile) || "A patient";
+    const dateLabel = new Date(`${visitReqDate}T12:00:00`).toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    });
+    const timeLabel = format12hFromTime(timeSql);
+    await supabase
+      .from("notifications")
+      .insert({
+        user_id: docId,
+        type: "general",
+        title: "New patient visit request",
+        body: `${ptName} requested a virtual visit on ${dateLabel} at ${timeLabel}. Reason: ${reason.slice(0, 220)}${reason.length > 220 ? "…" : ""}`,
+      });
+  }
+
+  const doctorIdsForVisitRequest = useMemo(
+    () =>
+      [...new Set([...(allAppts || []).map((a) => a.doctor_id), primaryDoctorId, ...linkedDoctorIds, ...careTeamDoctorIds, bookingDoctorId].filter(Boolean))],
+    [allAppts, primaryDoctorId, linkedDoctorIds, careTeamDoctorIds, bookingDoctorId],
+  );
 
   const font = "'Inter', 'DM Sans', system-ui, -apple-system, sans-serif";
 
@@ -620,6 +1045,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const title = panelOpts.title || "Reschedule your appointment";
     const subtitle = panelOpts.subtitle || "Select one of your doctor's available times. You cannot pick a time outside this list.";
     const flatTop = panelOpts.flatTop === true;
+    const doctorId = panelOpts.doctorId || null;
     const keys = Object.keys(booking.slots || {}).filter((d) => Array.isArray(booking.slots[d]) && booking.slots[d].length > 0);
     keys.sort();
     const activeDate = sel?.date && keys.includes(sel.date) ? sel.date : keys[0];
@@ -670,22 +1096,27 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
               {times.map((t) => {
                 const nt = normTime(t);
                 const on = sel?.date === activeDate && normTime(sel?.time) === nt;
+                const unavailable = !isSlotBookable(doctorId, booking.slots, activeDate, nt);
                 return (
                   <button
                     key={`${activeDate}-${nt}`}
                     type="button"
-                    onClick={() => setSel({ date: activeDate, time: nt })}
+                    onClick={() => {
+                      if (unavailable) return;
+                      setSel({ date: activeDate, time: nt });
+                    }}
+                    disabled={unavailable}
                     style={{
                       position: "relative",
                       padding: "12px 10px",
                       borderRadius: 10,
-                      border: on ? `2px solid ${PRIMARY}` : `1px solid ${BORDER}`,
-                      background: SURFACE,
+                      border: on ? `2px solid ${PRIMARY}` : `1px solid ${unavailable ? "var(--b0)" : BORDER}`,
+                      background: unavailable ? "var(--s2)" : SURFACE,
                       fontFamily: font,
                       fontSize: 13,
                       fontWeight: 600,
-                      color: TEXT,
-                      cursor: "pointer",
+                      color: unavailable ? TEXT_MUTED : TEXT,
+                      cursor: unavailable ? "not-allowed" : "pointer",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
@@ -712,7 +1143,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
               <button
                 type="button"
                 onClick={onConfirm}
-                disabled={busy || !sel?.date || !sel?.time || !slotAllowed(booking.slots, sel.date, sel.time)}
+                disabled={busy || !sel?.date || !sel?.time || !isSlotBookable(doctorId, booking.slots, sel.date, sel.time)}
                 style={{
                   padding: "12px 22px",
                   borderRadius: 10,
@@ -723,7 +1154,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                   fontSize: 14,
                   fontWeight: 600,
                   cursor: busy || !sel?.date || !sel?.time ? "not-allowed" : "pointer",
-                  opacity: busy || !sel?.date || !sel?.time || !slotAllowed(booking.slots, sel?.date, sel?.time) ? 0.45 : 1,
+                  opacity: busy || !sel?.date || !sel?.time || !isSlotBookable(doctorId, booking.slots, sel?.date, sel?.time) ? 0.45 : 1,
                   boxShadow: "0 4px 14px rgba(37,99,235,.3)",
                 }}
               >
@@ -738,6 +1169,54 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
   function appointmentMainCard(appt) {
     if (!appt) return null;
+    const now = Date.now();
+    const videoWindow = getAppointmentVideoWindow(appt);
+    const portalCutoff = videoWindow ? videoWindow.portalEndMs ?? videoWindow.windowEndMs : 0;
+    const videoRoomId = videoWindow ? buildVideoRoomId(userId, appt.doctor_id) : "";
+    const videoUrl = videoRoomId ? buildVideoCallUrlFromRoom(videoRoomId) : "";
+    const waitingKey = videoWindow ? `${appt.id}:${videoWindow.windowStartMs}` : "";
+    const evs = getEffectiveVirtualVisitStatus(appt);
+    const isInWaitingRoom = evs === VS.WAITING_FOR_DOCTOR || evs === VS.VIDEO_STARTED;
+    const isDoctorVideoStartedDb = evs === VS.VIDEO_STARTED;
+    const isStarted = isDoctorVideoStartedDb;
+    const isCheckedIn = isInWaitingRoom;
+    const videoState = !videoWindow
+      ? "none"
+      : now < videoWindow.windowStartMs
+        ? "too_early"
+        : now > portalCutoff
+          ? "expired"
+          : isStarted
+            ? "doctor_started"
+            : "waiting";
+    const waitingForDoctorLocked = videoState === "waiting" && isCheckedIn && !isStarted;
+    const needsPreVisitComplete = !!(videoWindow && !isVirtualVisitCheckInComplete(patientProfile));
+    const showPrimaryVideoBtn =
+      !!videoWindow && videoState !== "doctor_started" && !waitingForDoctorLocked;
+    /** Pre-visit form only needs an appointment window + doctor — not Jitsi URL — so button stays clickable while profile loads. */
+    const virtualBtnDisabled =
+      !showPrimaryVideoBtn ||
+      (!needsPreVisitComplete && !videoUrl) ||
+      videoActionBusyId === appt.id ||
+      videoState === "expired" ||
+      (!needsPreVisitComplete && videoState === "too_early");
+
+    let virtualPrimaryLabel = "Video unavailable";
+    if (videoWindow) {
+      if (needsPreVisitComplete) {
+        virtualPrimaryLabel =
+          videoState === "too_early"
+            ? "Complete check-in (opens soon)"
+            : "Complete check-in";
+      } else if (videoState === "too_early") {
+        virtualPrimaryLabel = `Opens ${new Date(videoWindow.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+      } else if (videoState === "expired") {
+        virtualPrimaryLabel = "Visit ended";
+      } else {
+        virtualPrimaryLabel = "Check in for visit.";
+      }
+    }
+
     const doc = doctorProfiles[appt.doctor_id];
     const dname = doctorDisplayName(doc);
     const spec = doc?.specialty ? doc.specialty : "General Physician";
@@ -751,6 +1230,32 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       setTab(TAB.UPCOMING);
       setRescheduleForId(appt.id);
       setSelectedSlot(null);
+    };
+    const handleVirtualVisitClick = async () => {
+      if (!videoWindow || !appt?.doctor_id || !userId) {
+        if (typeof window !== "undefined") window.alert("Video visit is not available. Check that you have a video appointment with a care provider.");
+        return;
+      }
+      if (!isVirtualVisitCheckInComplete(patientProfile)) {
+        setPreVisitModalReadOnly(false);
+        setPreVisitModalAppt(appt);
+        setPreVisitModalOpen(true);
+        return;
+      }
+      if (!videoUrl) {
+        if (typeof window !== "undefined") window.alert("Video link could not be prepared. Refresh the page and try again.");
+        return;
+      }
+      if (videoState === "too_early" || videoState === "expired" || waitingForDoctorLocked || videoState === "doctor_started") return;
+
+      if (!isCheckedIn) {
+        try {
+          await performVirtualCheckIn(appt, videoWindow, videoRoomId, waitingKey);
+        } catch (e) {
+          const msg = e?.message || e?.error_description || "Check-in failed. Please try again.";
+          if (typeof window !== "undefined") window.alert(msg);
+        }
+      }
     };
 
     return (
@@ -833,13 +1338,119 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                 </p>
                 <p style={{ margin: 0, fontSize: 13, fontFamily: font, lineHeight: 1.45 }}>
                   <span style={{ color: TEXT_MUTED, fontWeight: 500 }}>Reason: </span>
-                  <span style={{ color: PRIMARY, fontWeight: 600 }}>{appt.notes || "Routine check-up"}</span>
+                  <span style={{ color: PRIMARY, fontWeight: 600 }}>{appt.notes || "Check up"}</span>
                 </p>
+                {videoWindow ? (
+                  <div style={{ marginTop: 6, borderRadius: 10, border: `1px solid ${BORDER}`, background: videoState === "doctor_started" ? "rgba(16,185,129,.08)" : "var(--s1)", padding: "8px 10px" }}>
+                    <p style={{ margin: 0, fontSize: 12, fontWeight: 700, fontFamily: font, color: TEXT }}>Virtual waiting room</p>
+                    <p style={{ margin: "4px 0 0", fontSize: 11.5, fontFamily: font, color: TEXT_MUTED }}>
+                      {videoState === "too_early"
+                        ? `Opens at ${new Date(videoWindow.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+                        : videoState === "expired"
+                          ? "The reconnect period for this video visit has ended."
+                          : videoState === "doctor_started"
+                            ? "Open Messages with your doctor to join video — appointments do not open the video room."
+                            : isCheckedIn
+                              ? "Checked in. Waiting for doctor to start the video."
+                              : "When your visit window opens, use Check in for visit to enter the waiting room (complete a short form the first time)."}
+                    </p>
+                  </div>
+                ) : null}
+                {videoWindow && isVirtualVisitCheckInComplete(patientProfile) ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPreVisitModalReadOnly(true);
+                      setPreVisitModalAppt(appt);
+                      setPreVisitModalOpen(true);
+                    }}
+                    style={{
+                      marginTop: 8,
+                      padding: "8px 12px",
+                      borderRadius: 8,
+                      border: `1px solid ${PRIMARY}`,
+                      background: "transparent",
+                      color: PRIMARY,
+                      fontFamily: font,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    View saved check-in
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
 
           <div style={{ display: "flex", flexDirection: isMob ? "row" : "column", gap: 10, flexShrink: 0, width: isMob ? "100%" : 132, justifyContent: "flex-start" }}>
+            {videoWindow && showPrimaryVideoBtn ? (
+              <button
+                type="button"
+                onClick={handleVirtualVisitClick}
+                disabled={virtualBtnDisabled}
+                style={{
+                  flex: 1,
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  border: `2px solid ${PRIMARY}`,
+                  background: !virtualBtnDisabled ? PRIMARY : SURFACE,
+                  color: !virtualBtnDisabled ? "#fff" : PRIMARY,
+                  fontFamily: font,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: !virtualBtnDisabled ? "pointer" : "not-allowed",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  opacity: videoActionBusyId === appt.id ? 0.7 : 1,
+                }}
+              >
+                <Video size={14} /> {videoActionBusyId === appt.id ? "Working..." : virtualPrimaryLabel}
+              </button>
+            ) : videoWindow ? (
+              <div
+                style={{
+                  flex: 1,
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: `1px solid ${BORDER}`,
+                  background: "var(--s1)",
+                  fontFamily: font,
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                  color: TEXT,
+                  textAlign: "center",
+                  lineHeight: 1.4,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                <span>{waitingForDoctorLocked ? "Checked in. Waiting for doctor to start the video." : "Your doctor has joined. Join video chat."}</span>
+                {!waitingForDoctorLocked && videoState === "doctor_started" ? (
+                  <button
+                    type="button"
+                    onClick={() => onNavigateTab?.("messages")}
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      border: `2px solid ${PRIMARY}`,
+                      background: SURFACE,
+                      color: PRIMARY,
+                      fontFamily: font,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Open Messages to join
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             <button
               type="button"
               onClick={openReschedule}
@@ -879,7 +1490,11 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           </div>
         </div>
 
-        {rescheduleForId === appt.id ? renderReschedulePanel(activeBooking, selectedSlot, setSelectedSlot, submitRescheduleRequest, rescheduleBusy, "Send request", {}) : null}
+        {rescheduleForId === appt.id
+          ? renderReschedulePanel(activeBooking, selectedSlot, setSelectedSlot, submitRescheduleRequest, rescheduleBusy, "Send request", {
+              doctorId: appt.doctor_id,
+            })
+          : null}
       </div>
     );
   }
@@ -897,7 +1512,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             const doc = doctorProfiles[appt.doctor_id];
             const dname = doctorDisplayName(doc);
             const rClinic = doc?.clinic_name || "Main Street Clinic";
-            const req = parseRescheduleRequest(appt.reschedule_request);
+            const n = normalizeRescheduleRequest(appt.reschedule_request);
+            const isCounter = n?.phase === "doctor_counter" && n?.doctor;
             const apptD = new Date(`${appt.date}T12:00:00`);
             const monthShort = apptD.toLocaleDateString("en-US", { month: "short" }).toUpperCase();
             const dow = apptD.toLocaleDateString("en-US", { weekday: "short" });
@@ -925,10 +1541,10 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                 <div style={{ flex: 1, minWidth: 200 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 15, fontWeight: 700, color: TEXT, fontFamily: font }}>{appt.type}</span>
-                    <span style={{ padding: "3px 8px", borderRadius: 99, fontSize: 10, fontWeight: 700, background: "rgba(245, 158, 11, 0.15)", color: "#b45309", border: "1px solid rgba(245, 158, 11, 0.35)", fontFamily: font }}>Pending</span>
+                    <span style={{ padding: "3px 8px", borderRadius: 99, fontSize: 10, fontWeight: 700, background: "rgba(245, 158, 11, 0.15)", color: "#b45309", border: "1px solid rgba(245, 158, 11, 0.35)", fontFamily: font }}>{isCounter ? "Response needed" : "Pending approval"}</span>
                   </div>
                   <p style={{ margin: "6px 0 0", fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>
-                    Dr. {dname} · {format12hFromTime(appt.time)}
+                    Dr. {dname} — current: {new Date(`${appt.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} at {format12hFromTime(appt.time)}
                   </p>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: TEXT_MUTED, fontFamily: font, display: "flex", alignItems: "center", gap: 4 }}>
                     <MapPin size={12} /> {rClinic}
@@ -938,12 +1554,51 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                       Reason: {appt.notes}
                     </p>
                   ) : null}
-                  {req ? (
+                  {n?.patient && !isCounter ? (
                     <p style={{ margin: "6px 0 0", fontSize: 12, color: TEXT_MUTED, fontFamily: font }}>
-                      Requested new time: {new Date(`${req.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} at {format12hFromTime(req.time)}
+                      You requested: {new Date(`${n.patient.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} at {format12hFromTime(n.patient.time)}
                     </p>
                   ) : null}
+                  {isCounter && n.patient && n.doctor ? (
+                    <>
+                      <p style={{ margin: "6px 0 0", fontSize: 12, color: TEXT_MUTED, fontFamily: font }}>
+                        Your request: {new Date(`${n.patient.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} at {format12hFromTime(n.patient.time)}
+                      </p>
+                      <p style={{ margin: "4px 0 0", fontSize: 12, color: TEXT, fontWeight: 600, fontFamily: font }}>
+                        Suggested: {new Date(`${n.doctor.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} at {format12hFromTime(n.doctor.time)}
+                      </p>
+                    </>
+                  ) : null}
                   {expanded ? <p style={{ margin: "10px 0 0", fontSize: 12, color: TEXT_MUTED, fontFamily: font, lineHeight: 1.5 }}>{appt.notes || "Your care team will confirm or suggest another time."}</p> : null}
+                  {isCounter ? (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                      <button
+                        type="button"
+                        disabled={rescheduleBusy}
+                        onClick={() => void acceptDoctorCounterAppt(appt)}
+                        style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: PRIMARY, color: "#fff", fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                      >
+                        Accept
+                      </button>
+                      <button
+                        type="button"
+                        disabled={rescheduleBusy}
+                        onClick={() => void declineDoctorCounterAppt(appt)}
+                        style={{ padding: "8px 14px", borderRadius: 10, border: `1px solid ${BORDER}`, background: SURFACE, color: TEXT, fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                      >
+                        Decline
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={rescheduleBusy}
+                      onClick={() => void cancelPendingRescheduleRequest(appt)}
+                      style={{ marginTop: 10, padding: "8px 14px", borderRadius: 10, border: `1px solid ${BORDER}`, background: SURFACE, color: TEXT_MUTED, fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                    >
+                      Cancel request
+                    </button>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -979,7 +1634,9 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       setExpandedRequestId(requestHit.id);
       return;
     }
-    const confirmedHit = allAppts.find((a) => a.date === dateStr && (a.status === "scheduled" || a.status === "completed"));
+    const confirmedHit = allAppts.find(
+      (a) => a.date === dateStr && (a.status === "scheduled" || a.status === "rescheduled" || a.status === "completed"),
+    );
     if (confirmedHit) {
       setTab(confirmedHit.date < todayStr ? TAB.PAST : TAB.UPCOMING);
       setExpandedRequestId(null);
@@ -1092,12 +1749,13 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
             {selectedDateAppointments.map((a) => {
               const doc = doctorProfiles[a.doctor_id];
-              const statusColor = a.status === "cancelled" ? "#ef4444" : a.status === "rescheduled" ? "#d97706" : "#10b981";
+              const statusColor = a.status === "cancelled" ? "#ef4444" : hasActiveRescheduleRequest(a) ? "#d97706" : "#10b981";
+              const statusLabel = a.status === "cancelled" ? "cancelled" : hasActiveRescheduleRequest(a) ? "pending approval" : a.status;
               return (
                 <div key={a.id} style={{ border: `1px solid ${BORDER}`, borderRadius: 10, background: "var(--s2)", padding: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: TEXT, fontFamily: font }}>{a.type || "Visit"}</p>
-                    <span style={{ fontSize: 10, fontWeight: 700, color: statusColor, textTransform: "capitalize", fontFamily: font }}>{a.status}</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: statusColor, textTransform: "capitalize", fontFamily: font }}>{statusLabel}</span>
                   </div>
                   <p style={{ margin: "5px 0 0", fontSize: 12, color: TEXT_MUTED, fontFamily: font }}>
                     {format12hFromTime(a.time)} · Dr. {doctorDisplayName(doc)}
@@ -1251,32 +1909,40 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         {bookingSchemaMissing ? (
           <p style={{ margin: 0, color: "#dc2626", fontSize: 13, fontFamily: font }}>Booking slots are not available yet because the database migration is not applied.</p>
         ) : slotsPreviewByDoctor.length === 0 ? (
-          <p style={{ margin: 0, color: TEXT_MUTED, fontSize: 13, fontFamily: font }}>No available slots published yet.</p>
+          <p style={{ margin: 0, color: TEXT_MUTED, fontSize: 13, fontFamily: font }}>No linked doctors found yet.</p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {slotsPreviewByDoctor.map((row) => (
               <div key={row.doctor.id} style={{ border: `1px solid ${BORDER}`, borderRadius: 12, background: "var(--s2)", padding: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                   <p style={{ margin: 0, color: TEXT, fontSize: 13, fontWeight: 700, fontFamily: font }}>Dr. {doctorDisplayName(row.doctor)}</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setBookingDoctorId(row.doctor.id);
-                      setBookOpen(true);
-                      setBookErr("");
-                    }}
-                    style={{ padding: "6px 10px", borderRadius: 9, border: "none", background: PRIMARY, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}
-                  >
-                    Book
-                  </button>
+                  {row.slotCount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBookingDoctorId(row.doctor.id);
+                        setBookOpen(true);
+                        setBookErr("");
+                      }}
+                      style={{ padding: "6px 10px", borderRadius: 9, border: "none", background: PRIMARY, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}
+                    >
+                      Book
+                    </button>
+                  ) : (
+                    <span style={{ color: TEXT_MUTED, fontSize: 11, fontWeight: 600, fontFamily: font }}>No slots yet</span>
+                  )}
                 </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {row.slots.map((s) => (
-                    <span key={`${row.doctor.id}-${s.date}-${s.time}`} style={{ padding: "4px 8px", borderRadius: 99, border: `1px solid ${BORDER}`, background: SURFACE, color: TEXT_MUTED, fontSize: 11, fontFamily: font }}>
-                      {new Date(`${s.date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {format12hFromTime(s.time)}
-                    </span>
-                  ))}
-                </div>
+                {row.slots.length > 0 ? (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {row.slots.map((s) => (
+                      <span key={`${row.doctor.id}-${s.date}-${s.time}`} style={{ padding: "4px 8px", borderRadius: 99, border: `1px solid ${BORDER}`, background: SURFACE, color: TEXT_MUTED, fontSize: 11, fontFamily: font }}>
+                        {new Date(`${s.date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {format12hFromTime(s.time)}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ margin: 0, color: TEXT_MUTED, fontSize: 12, fontFamily: font }}>No published availability yet for this doctor.</p>
+                )}
               </div>
             ))}
           </div>
@@ -1373,12 +2039,143 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                 {tab === TAB.PAST && listCard("Past appointments", pastList, "No past appointments yet.")}
                 {tab === TAB.CANCELLED && listCard("Cancelled appointments", cancelledList, "No cancelled appointments.")}
                 {tab === TAB.REQUESTS && (
-                  <div>
-                    {requestList.length === 0 ? (
-                      <div style={{ background: SURFACE, borderRadius: 16, border: `1px solid ${BORDER}`, padding: 32, fontFamily: font, color: TEXT_MUTED }}>You have no pending scheduling requests.</div>
-                    ) : (
-                      renderRequestedSection()
-                    )}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+                    <div style={{ background: SURFACE, borderRadius: 16, border: `1px solid ${BORDER}`, boxShadow: SHADOW, padding: isMob ? 16 : 20, fontFamily: font }}>
+                      <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700, color: TEXT }}>Need to see a doctor?</h3>
+                      <p style={{ margin: "0 0 16px", fontSize: 13, color: TEXT_MUTED, lineHeight: 1.55 }}>
+                        Submit the date and time you need. Your doctor will approve or deny; if approved, your schedule updates and you receive a confirmation.
+                      </p>
+                      {doctorIdsForVisitRequest.length ? (
+                        <div style={{ display: "grid", gap: 12 }}>
+                          {doctorIdsForVisitRequest.length >= 1 ? (
+                            <div>
+                              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: TEXT_MUTED, marginBottom: 6 }}>Doctor</label>
+                              <select
+                                value={visitReqDoctorId || doctorIdsForVisitRequest[0] || ""}
+                                onChange={(e) => setVisitReqDoctorId(e.target.value)}
+                                style={{ width: "100%", borderRadius: 10, border: `1px solid ${BORDER}`, padding: "10px 12px", fontFamily: font, fontSize: 13 }}
+                              >
+                                {doctorIdsForVisitRequest.map((id) => (
+                                  <option key={id} value={id}>
+                                    Dr. {doctorDisplayName(doctorProfiles[id])}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : null}
+                          <div style={{ display: "grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1fr", gap: 12 }}>
+                            <div>
+                              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: TEXT_MUTED, marginBottom: 6 }}>Preferred date</label>
+                              <input
+                                type="date"
+                                value={visitReqDate}
+                                min={localDateKey()}
+                                onChange={(e) => setVisitReqDate(e.target.value)}
+                                style={{ width: "100%", borderRadius: 10, border: `1px solid ${BORDER}`, padding: "10px 12px", fontFamily: font }}
+                              />
+                            </div>
+                            <div>
+                              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: TEXT_MUTED, marginBottom: 6 }}>Preferred time</label>
+                              <input
+                                type="time"
+                                value={visitReqTime}
+                                onChange={(e) => setVisitReqTime(e.target.value)}
+                                style={{ width: "100%", borderRadius: 10, border: `1px solid ${BORDER}`, padding: "10px 12px", fontFamily: font }}
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: TEXT_MUTED, marginBottom: 6 }}>Why do you need a visit?</label>
+                            <textarea
+                              value={visitReqReason}
+                              onChange={(e) => setVisitReqReason(e.target.value)}
+                              rows={3}
+                              placeholder="Brief description"
+                              style={{ width: "100%", borderRadius: 10, border: `1px solid ${BORDER}`, padding: "10px 12px", fontFamily: font, fontSize: 13, resize: "vertical" }}
+                            />
+                          </div>
+                          {visitReqErr ? <p style={{ margin: 0, fontSize: 13, color: "#dc2626" }}>{visitReqErr}</p> : null}
+                          <button
+                            type="button"
+                            disabled={visitReqBusy}
+                            onClick={() => void submitVideoVisitRequest()}
+                            style={{
+                              padding: "10px 16px",
+                              borderRadius: 10,
+                              border: "none",
+                              background: PRIMARY,
+                              color: "#fff",
+                              fontFamily: font,
+                              fontWeight: 700,
+                              cursor: visitReqBusy ? "wait" : "pointer",
+                            }}
+                          >
+                            {visitReqBusy ? "Sending…" : "Send request"}
+                          </button>
+                        </div>
+                      ) : (
+                        <p style={{ margin: 0, fontSize: 13, color: TEXT_MUTED }}>Link a doctor in Settings first.</p>
+                      )}
+                    </div>
+                    {videoVisitRequests.length ? (
+                      <div>
+                        <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: TEXT, fontFamily: font }}>Urgent visit requests</h3>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          {videoVisitRequests.map((r) => (
+                            <div
+                              key={r.id}
+                              style={{
+                                background: SURFACE,
+                                borderRadius: 12,
+                                border: `1px solid ${BORDER}`,
+                                padding: "12px 14px",
+                                fontFamily: font,
+                              }}
+                            >
+                              <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: TEXT }}>
+                                {new Date(`${r.requested_date}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} · {format12hFromTime(r.requested_time)}{" "}
+                                <span
+                                  style={{
+                                    marginLeft: 8,
+                                    fontSize: 11,
+                                    padding: "2px 8px",
+                                    borderRadius: 99,
+                                    fontWeight: 700,
+                                    background:
+                                      r.status === "approved" ? "rgba(16,185,129,.15)" : r.status === "denied" ? "rgba(220,38,38,.12)" : "rgba(245,158,11,.15)",
+                                    color:
+                                      r.status === "approved" ? "#047857" : r.status === "denied" ? "#dc2626" : "#b45309",
+                                  }}
+                                >
+                                  {r.status === "pending" ? "Pending" : r.status === "approved" ? "Approved" : "Denied"}
+                                </span>
+                              </p>
+                              <p style={{ margin: "6px 0 0", fontSize: 12, color: TEXT_MUTED }}>{r.reason}</p>
+                              {r.doctor_suggested_date && r.doctor_suggested_time ? (
+                                <p style={{ margin: "8px 0 0", fontSize: 12.5, color: PRIMARY, fontWeight: 600 }}>
+                                  Doctor suggested:{" "}
+                                  {new Date(`${r.doctor_suggested_date}T12:00:00`).toLocaleDateString(undefined, {
+                                    weekday: "short",
+                                    month: "short",
+                                    day: "numeric",
+                                  })}{" "}
+                                  at {format12hFromTime(r.doctor_suggested_time)}
+                                </p>
+                              ) : null}
+                              {r.status === "denied" && r.denial_note ? (
+                                <p style={{ margin: "8px 0 0", fontSize: 12.5, color: "#991b1b", fontWeight: 600 }}>
+                                  From clinic: {r.denial_note}
+                                </p>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    {renderRequestedSection()}
+                    {requestList.length === 0 && videoVisitRequests.filter((x) => x.status === "pending").length === 0 ? (
+                      <p style={{ margin: 0, fontFamily: font, fontSize: 13, color: TEXT_MUTED }}>No pending reschedule approvals.</p>
+                    ) : null}
                   </div>
                 )}
               </>
@@ -1465,6 +2262,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                       flatTop: true,
                       title: "Choose an available time",
                       subtitle: "Pick from the slots your doctor published. Custom times are not available.",
+                      doctorId: bookingDoctorId,
                     })
                   )}
                   {bookErr ? <p style={{ color: "#dc2626", fontSize: 13, marginTop: 12, fontFamily: font }}>{bookErr}</p> : null}
@@ -1481,6 +2279,64 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           </motion.div>
         )}
       </AnimatePresence>
+
+      <VirtualPreVisitModal
+        open={preVisitModalOpen && !!userId}
+        onClose={() => {
+          setPreVisitModalOpen(false);
+          setPreVisitModalAppt(null);
+          setPreVisitModalReadOnly(false);
+        }}
+        userId={userId}
+        initialProfile={patientProfile ?? FALLBACK_VISIT_PROFILE}
+        readOnly={preVisitModalReadOnly}
+        apptSummary={
+          preVisitModalAppt
+            ? `${new Date(`${preVisitModalAppt.date}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} · ${format12hFromTime(preVisitModalAppt.time)} · ${preVisitModalAppt.type || "Virtual Visit"}`
+            : ""
+        }
+        onSaved={
+          preVisitModalReadOnly
+            ? undefined
+            : async (updated, meta) => {
+                if (!isVirtualVisitCheckInComplete(updated)) {
+                  throw new Error("Please answer every required field before continuing.");
+                }
+                setPatientProfile(updated);
+                const dn = formatProfileFullName(updated);
+                if (dn) setDisplayName(dn);
+                const a = preVisitModalAppt;
+                if (!a || !userId) {
+                  throw new Error("Session lost. Please refresh the page and try again.");
+                }
+                const vw = getAppointmentVideoWindow(a);
+                if (!vw) {
+                  throw new Error(
+                    "This visit is not a video visit or the time is invalid. You can close this form and try check-in from your appointment when your visit window is open.",
+                  );
+                }
+                await supabase
+                  .from("appointments")
+                  .update({
+                    virtual_visit_status: VS.CHECKED_IN,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq("id", a.id);
+                setAllAppts((prev) =>
+                  prev.map((row) => (row.id === a.id ? { ...row, virtual_visit_status: VS.CHECKED_IN } : row)),
+                );
+                if (meta?.hadRefillPending) {
+                  await supabase.from("notifications").insert({
+                    user_id: a.doctor_id,
+                    type: "general",
+                    title: "Check-in updated",
+                    body: "Your patient submitted an updated check-in form.",
+                    related_id: a.id,
+                  });
+                }
+              }
+        }
+      />
     </div>
   );
 }

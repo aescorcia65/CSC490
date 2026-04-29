@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
   Pill,
@@ -13,7 +13,9 @@ import {
   ChevronDown,
   Calendar,
   LineChart,
+  X,
 } from "lucide-react";
+import { supabase } from "../../supabase";
 import { COLS } from "../../lib/constants";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import Ring from "../../components/common/Ring";
@@ -129,6 +131,9 @@ export default function AnalyticsPage({ meds, userId, onNavigateTab }) {
   const [streak, setStreak] = useState(0);
   const [bestStreak, setBestStreak] = useState({ days: 0, endDate: null });
   const [medAdherence, setMedAdherence] = useState([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [histLoading, setHistLoading] = useState(false);
+  const [histEntries, setHistEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [range, setRange] = useState("week");
   const [medSort, setMedSort] = useState("high");
@@ -138,7 +143,46 @@ export default function AnalyticsPage({ meds, userId, onNavigateTab }) {
   const todayPct = meds.length ? Math.round((taken / meds.length) * 100) : 0;
   const { total: doseTotal, taken: doseTaken } = useMemo(() => countTodayDoses(meds), [meds]);
 
-  const medDetailById = useMemo(() => Object.fromEntries(meds.map((m) => [m.id, m])), [meds]);
+  const openHealthProgressHistory = useCallback(async () => {
+    setHistoryOpen(true);
+    if (!userId) {
+      setHistEntries([]);
+      return;
+    }
+    setHistLoading(true);
+    try {
+      const [{ data: logRows }, { data: apptRows }] = await Promise.all([
+        supabase.from("medication_logs").select("*").eq("user_id", userId).order("taken_at", { ascending: false }).limit(160),
+        supabase.from("appointments").select("date,time,type,status,notes,created_at").eq("patient_id", userId).order("created_at", { ascending: false }).limit(100),
+      ]);
+      const names = {};
+      meds.forEach((m) => {
+        if (m?.id) names[m.id] = m.name || "Medication";
+      });
+      const doseParts = (logRows || []).map((row) => ({
+        kind: "dose",
+        ts: new Date(row.taken_at || `${row.scheduled_date}T12:00:00`).getTime(),
+        meta: {
+          outcome: row.outcome || "logged",
+          slot: row.dose_slot,
+          medicationName: names[row.medication_id] || "Medication",
+          scheduled_date: row.scheduled_date,
+        },
+      }));
+      const visitParts = (apptRows || []).map((row) => {
+        const iso = row.created_at || `${row.date}T${String(row.time || "12:00:00").slice(0, 8)}`;
+        return {
+          kind: "visit",
+          ts: new Date(iso).getTime(),
+          meta: { ...row },
+        };
+      });
+      const merged = [...doseParts, ...visitParts].sort((a, b) => b.ts - a.ts);
+      setHistEntries(merged);
+    } finally {
+      setHistLoading(false);
+    }
+  }, [userId, meds]);
 
   useEffect(() => {
     if (!userId) return;
@@ -213,6 +257,8 @@ export default function AnalyticsPage({ meds, userId, onNavigateTab }) {
     return list;
   }, [medAdherence, medSort]);
 
+  const medDetailById = useMemo(() => Object.fromEntries(meds.map((m) => [m.id, m])), [meds]);
+
   const prevAvgForInsight = useMemo(() => {
     if (range !== "week") return null;
     const weekStart = getWeekStart();
@@ -273,18 +319,18 @@ export default function AnalyticsPage({ meds, userId, onNavigateTab }) {
 
   const todayBadge =
     todayPct >= 80
-      ? { t: "Excellent! 🌟", bg: "rgba(22,163,74,.12)", c: "#15803d" }
+      ? { t: "Excellent! ", bg: "rgba(22,163,74,.12)", c: "#15803d" }
       : todayPct >= 40
-        ? { t: "Great start! 🎉", bg: "rgba(22,163,74,.12)", c: "#15803d" }
+        ? { t: "Great start! ", bg: "rgba(22,163,74,.12)", c: "#15803d" }
         : todayPct > 0
-          ? { t: "Keep going 💪", bg: "rgba(234,179,8,.15)", c: "#a16207" }
+          ? { t: "Keep going ", bg: "rgba(234,179,8,.15)", c: "#a16207" }
           : { t: "Log your first dose", bg: "rgba(59,130,246,.1)", c: ACCENT };
 
   const weekAvgBadge =
     avg >= 80
-      ? { t: "On track 🎯", bg: "rgba(22,163,74,.12)", c: "#15803d" }
+      ? { t: "On track ", bg: "rgba(22,163,74,.12)", c: "#15803d" }
       : avg >= 40
-        ? { t: "Keep it up 💪", bg: "rgba(234,179,8,.18)", c: "#a16207" }
+        ? { t: "Keep it up ", bg: "rgba(234,179,8,.18)", c: "#a16207" }
         : { t: "Room to grow", bg: "rgba(239,68,68,.1)", c: "#b91c1c" };
 
   const streakBadge =
@@ -294,7 +340,7 @@ export default function AnalyticsPage({ meds, userId, onNavigateTab }) {
 
   const bestBadge =
     bestStreak.days > 0
-      ? { t: "New record! 🏆", bg: "rgba(22,163,74,.12)", c: "#15803d" }
+      ? { t: "New record! ", bg: "rgba(22,163,74,.12)", c: "#15803d" }
       : { t: "Build your record", bg: "rgba(100,116,139,.12)", c: t3 };
 
   const bestStreakDateLabel = bestStreak.endDate
@@ -909,7 +955,7 @@ export default function AnalyticsPage({ meds, userId, onNavigateTab }) {
           </div>
           <button
             type="button"
-            onClick={() => onNavigateTab?.("medications")}
+            onClick={() => void openHealthProgressHistory()}
             style={{
               padding: "12px 22px",
               borderRadius: 12,
@@ -929,6 +975,155 @@ export default function AnalyticsPage({ meds, userId, onNavigateTab }) {
             View full history <ChevronRight size={18} />
           </button>
         </motion.div>
+
+        {historyOpen ? (
+          <div
+            role="presentation"
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 200,
+              background: "rgba(15,23,42,.52)",
+              display: "flex",
+              alignItems: "stretch",
+              justifyContent: "center",
+              padding: isMob ? 12 : 24,
+              overflowY: "auto",
+              WebkitOverflowScrolling: "touch",
+            }}
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setHistoryOpen(false);
+            }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="health-progress-history-title"
+              style={{
+                ...cardBase,
+                width: "100%",
+                maxWidth: 620,
+                maxHeight: isMob ? "92vh" : "88vh",
+                marginTop: "auto",
+                marginBottom: "auto",
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+                padding: 0,
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div
+                style={{
+                  padding: "16px 18px",
+                  borderBottom: "1px solid var(--b1)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  background: "var(--pd)",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <Calendar size={20} color={ACCENT} />
+                  <h2 id="health-progress-history-title" style={{ margin: 0, fontSize: 17, fontWeight: 700, color: t1 }}>
+                    Health Progress History
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Close history"
+                  onClick={() => setHistoryOpen(false)}
+                  style={{
+                    border: `1px solid var(--b1)`,
+                    background: "var(--s1)",
+                    borderRadius: 10,
+                    width: 36,
+                    height: 36,
+                    display: "grid",
+                    placeItems: "center",
+                    cursor: "pointer",
+                    color: t2,
+                  }}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "14px 16px 18px" }}>
+                {histLoading ? (
+                  <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, padding: 32 }}>
+                    <Loader2 size={22} className="auth-spin" style={{ color: ACCENT }} /> <span style={{ color: t3 }}>Loading timeline…</span>
+                  </div>
+                ) : histEntries.length === 0 ? (
+                  <p style={{ color: t3, margin: 0, lineHeight: 1.55 }}>No medication logs or appointments found yet.</p>
+                ) : (
+                  <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+                    {histEntries.map((e, idx) =>
+                      e.kind === "dose" ? (
+                        <li
+                          key={`dose-${e.meta.scheduled_date}-${e.meta.slot}-${idx}`}
+                          style={{
+                            padding: "12px 14px",
+                            borderRadius: 12,
+                            border: "1px solid var(--b1)",
+                            background: "var(--s2)",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+                            <span style={{ fontSize: 12, fontWeight: 700, color: ACCENT, letterSpacing: "0.04em", textTransform: "uppercase" }}>Medication</span>
+                            <span style={{ fontSize: 11, color: t3 }}>{new Date(e.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                          </div>
+                          <p style={{ margin: "6px 0 0", fontSize: 14, fontWeight: 600, color: t1 }}>{e.meta.medicationName}</p>
+                          <p style={{ margin: "6px 0 0", fontSize: 12.5, color: t3, lineHeight: 1.45 }}>
+                            Status:{" "}
+                            <span style={{ color: t1, fontWeight: 600 }}>{String(e.meta.outcome || "logged")}</span>
+                            {e.meta.slot ? ` · scheduled slot ${String(e.meta.slot)}` : ""}
+                            {e.meta.scheduled_date ? ` · day ${String(e.meta.scheduled_date)}` : ""}
+                          </p>
+                        </li>
+                      ) : (
+                        <li
+                          key={`visit-${e.meta.date}-${idx}`}
+                          style={{
+                            padding: "12px 14px",
+                            borderRadius: 12,
+                            border: "1px solid var(--b1)",
+                            background: "var(--s2)",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+                            <span style={{ fontSize: 12, fontWeight: 700, color: "#059669", letterSpacing: "0.04em", textTransform: "uppercase" }}>Visit</span>
+                            <span style={{ fontSize: 11, color: t3 }}>{new Date(e.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                          </div>
+                          <p style={{ margin: "6px 0 0", fontSize: 14, fontWeight: 600, color: t1 }}>
+                            {(e.meta.type || "Appointment") + (e.meta.status ? ` · ${String(e.meta.status)}` : "")}
+                          </p>
+                          {e.meta.notes ? (
+                            <p style={{ margin: "6px 0 0", fontSize: 13, color: t2, lineHeight: 1.45 }}>
+                              <span style={{ color: t3, fontWeight: 600 }}>Reason:</span> {String(e.meta.notes)}
+                            </p>
+                          ) : null}
+                        </li>
+                      )
+                    )}
+                  </ul>
+                )}
+              </div>
+
+              <div style={{ padding: "12px 16px", borderTop: "1px solid var(--b1)", background: "var(--s1)" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ width: "100%", padding: "11px", borderRadius: 11, fontWeight: 600 }}
+                  onClick={() => setHistoryOpen(false)}
+                >
+                  Back to Analytics
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

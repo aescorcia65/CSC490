@@ -106,7 +106,7 @@ export async function playMessageNotificationSound(soundId, volume = 0.75) {
   primeNotifAudioOutput(ctx);
   if (ctx.state !== "running") return;
   const t0 = ctx.currentTime + 0.02;
-  const baseGain = 0.22 * v;
+  const baseGain = 0.48 * v;
 
   if (soundId === "chime") {
     playTone(ctx, 523.25, t0, 0.18, baseGain * 0.9, "sine");

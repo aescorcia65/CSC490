@@ -2,6 +2,7 @@ import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Loader2 } from "lucide-react";
 import { supabase } from "../../supabase";
+import { hasActiveRescheduleRequest } from "../../lib/rescheduleRequest";
 import { useIsMobile } from "../../hooks/useIsMobile";
 
 export default function AppointmentRow({ appt, onCancel, onRescheduled }) {
@@ -22,8 +23,17 @@ export default function AppointmentRow({ appt, onCancel, onRescheduled }) {
   async function requestReschedule() {
     if (!reqText.trim()) return;
     setBusy(true);
-    await supabase.from("appointments").update({ reschedule_request: reqText.trim(), status: "rescheduled", updated_at: new Date().toISOString() }).eq("id", appt.id);
-    setDone(true); setBusy(false);
+    const t = appt.time && String(appt.time).length === 5 ? `${appt.time}:00` : (appt.time || "12:00:00");
+    await supabase
+      .from("appointments")
+      .update({
+        reschedule_request: { v: 2, phase: "patient_proposed", patient: { date: appt.date, time: t }, message: reqText.trim() },
+        status: "scheduled",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", appt.id);
+    setDone(true);
+    setBusy(false);
     onRescheduled(appt.id, reqText.trim());
   }
 
@@ -37,7 +47,7 @@ export default function AppointmentRow({ appt, onCancel, onRescheduled }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
             <p style={{ color: t1, fontSize: 13.5, fontWeight: 700, margin: 0 }}>{appt.type}</p>
-            {appt.status === "rescheduled" && (
+            {hasActiveRescheduleRequest(appt) && (
               <span style={{ padding: "2px 7px", borderRadius: 99, fontSize: 10, fontWeight: 700, background: "rgba(217,119,6,.1)", border: "1px solid rgba(217,119,6,.2)", color: "var(--am)" }}>
                 Reschedule requested
               </span>
@@ -46,7 +56,7 @@ export default function AppointmentRow({ appt, onCancel, onRescheduled }) {
           <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>{apptDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{appt.notes ? ` · ${appt.notes}` : ""}</p>
         </div>
         <div className="flex gap-1.5 shrink-0 flex-wrap justify-end">
-          {appt.status !== "rescheduled" && (
+          {!hasActiveRescheduleRequest(appt) && (
             <motion.button whileHover={{ scale: 1.04 }} whileTap={{ scale: .96 }} onClick={() => setShowReschedule(s => !s)}
               style={{ padding: "6px 12px", borderRadius: 9, border: "1px solid var(--b1)", background: "transparent", color: t2, fontSize: 11.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
               Reschedule

@@ -3,13 +3,14 @@ import { motion } from "framer-motion";
 import { Pill, Calendar, Plus, CheckCircle2, Check, Flame, TrendingUp, MessageCircle, AlertTriangle, ChevronRight, ChevronDown, Pencil, Clock, Bell, Lightbulb, Moon, Sun, Utensils, Sparkles, Stethoscope, X } from "lucide-react";
 import { supabase } from "../../supabase";
 import { TIPS } from "../../lib/constants";
-import { to12h, to12hNoSeconds } from "../../lib/utils";
+import { to12h, to12hNoSeconds, to24h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useClock } from "../../hooks/useClock";
 import Ring from "../../components/common/Ring";
-import { logMedicationTaken, unlogMedicationTaken, getAdherenceStreak, doseRowLogged, patchMedDoseToggle } from "../../lib/adherence";
+import { logMedicationTaken, unlogMedicationTaken, getAdherenceStreak, doseRowLogged, patchMedDoseToggle, reloadAfterDoseMark } from "../../lib/adherence";
 import { expandDoseTimesForToday, timeHMToMins, ringMaxSecForMedSpacing } from "../../lib/medScheduleGroups";
 import { openExternalLink } from "../../lib/openExternalLink";
+import { useAuth } from "../../contexts/AuthContext";
 
 const DASHBOARD_HEALTH_TIPS_URL = "https://medlineplus.gov/druginformation.html";
 const HEALTH_TIP_DISMISS_STORAGE_KEY = "mt_dashboard_health_tip_dismissed";
@@ -39,6 +40,40 @@ function formatCountdownHM(sec) {
 
 const NEXT_HOUR_SEC = 3600;
 const NEXT_DOSE_RING_FALLBACK_SEC = 8 * 3600;
+
+function localDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Normalize Supabase date or ISO string to YYYY-MM-DD for local parsing */
+function appointmentDateOnly(appt) {
+  if (!appt?.date) return null;
+  const s = String(appt.date).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+function calendarDaysFromTodayFor(apptWhen, now) {
+  if (!apptWhen) return null;
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startAppt = new Date(apptWhen.getFullYear(), apptWhen.getMonth(), apptWhen.getDate());
+  return Math.round((startAppt.getTime() - startToday.getTime()) / 86400000);
+}
+
+function appointmentDateTime(appt) {
+  const dateOnly = appointmentDateOnly(appt);
+  if (!dateOnly) return null;
+  let rawTime = String(appt.time != null && appt.time !== "" ? appt.time : "12:00").trim();
+  if (!/^\d{2}:\d{2}/.test(rawTime) && /AM|PM/i.test(rawTime)) {
+    rawTime = to24h(rawTime);
+  }
+  const normalizedTime = /^\d{2}:\d{2}(:\d{2})?$/.test(rawTime)
+    ? (rawTime.length === 5 ? `${rawTime}:00` : rawTime)
+    : "12:00:00";
+  const dt = new Date(`${dateOnly}T${normalizedTime}`);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
 
 function summarizeNextDoseMeds(medsAtSlot) {
   if (!medsAtSlot?.length) return "";
@@ -98,6 +133,7 @@ function doseRowsDueInNextHour(untakenRows, curSec) {
 }
 
 export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onEditName, onNavigateTab }) {
+  const { loadUserMeds } = useAuth();
   const now = useClock();
   const isMob = useIsMobile();
   const hr = now.getHours();
@@ -171,26 +207,42 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
 
   useEffect(() => {
     if (!user?.id) return;
+    const todayStr = localDateStr(new Date());
     supabase.from("appointments")
       .select("id,date,time,type,notes,status,doctor_id")
       .eq("patient_id", user.id)
       .in("status", ["scheduled", "rescheduled"])
+      .gte("date", todayStr)
       .order("date", { ascending: true })
-      .limit(5)
+      .limit(20)
       .then(({ data }) => setAppointments(data || []));
 
     const ch = supabase.channel(`pt-appt-dash-${user.id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${user.id}` }, () => {
-        supabase.from("appointments").select("id,date,time,type,notes,status,doctor_id").eq("patient_id", user.id).in("status", ["scheduled", "rescheduled"]).order("date", { ascending: true }).limit(5)
+        const tStr = localDateStr(new Date());
+        supabase.from("appointments").select("id,date,time,type,notes,status,doctor_id").eq("patient_id", user.id).in("status", ["scheduled", "rescheduled"]).gte("date", tStr).order("date", { ascending: true }).limit(20)
           .then(({ data }) => setAppointments(data || []));
       }).subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [user?.id]);
 
-  const nextAppt = appointments[0];
-  const daysToAppt = nextAppt?.date
-    ? Math.max(0, Math.round((new Date(`${nextAppt.date}T12:00:00`).getTime() - new Date(new Date().toDateString()).getTime()) / 86400000))
-    : null;
+  const { nextAppt, nextApptWhen } = useMemo(() => {
+    const nowMs = now.getTime();
+    const upcoming = appointments
+      .map((appt) => ({ appt, when: appointmentDateTime(appt) }))
+      .filter(({ when }) => when && when.getTime() >= nowMs)
+      .sort((a, b) => a.when.getTime() - b.when.getTime());
+    const first = upcoming[0];
+    return first ? { nextAppt: first.appt, nextApptWhen: first.when } : { nextAppt: null, nextApptWhen: null };
+  }, [appointments, now]);
+  const daysToAppt = calendarDaysFromTodayFor(nextApptWhen, now);
+  const apptDayLabel = daysToAppt == null || daysToAppt < 0
+    ? null
+    : daysToAppt === 0
+      ? "Today"
+      : daysToAppt === 1
+        ? "Tomorrow"
+        : `In ${daysToAppt} days`;
 
   useEffect(() => {
     const id = nextAppt?.doctor_id;
@@ -334,10 +386,21 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
     const med = medList.find((m) => m.id === id);
     if (!med || slotTime == null || String(slotTime).trim() === "") return;
     const wasLogged = doseRowLogged(med, slotTime);
-    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, !wasLogged) : m)));
-    if (wasLogged) await unlogMedicationTaken(user.id, id, slotTime);
-    else await logMedicationTaken(user.id, id, slotTime);
-  }, [medList, user?.id, setMeds]);
+    const turningOn = !wasLogged;
+    setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, turningOn) : m)));
+    const result = wasLogged
+      ? await unlogMedicationTaken(user.id, id, slotTime)
+      : await logMedicationTaken(user.id, id, slotTime);
+    if (result.ok) {
+      await reloadAfterDoseMark(loadUserMeds);
+      getAdherenceStreak(user.id).then(setStreak);
+    } else {
+      setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, wasLogged) : m)));
+      if (typeof window !== "undefined") {
+        window.alert(`Could not save this dose.\n\n${result.error || "Unknown error."}`);
+      }
+    }
+  }, [medList, user?.id, setMeds, loadUserMeds]);
 
   const uiFont = "'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   const cardSh = "var(--shadow-card-hover)";
@@ -345,11 +408,11 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
   const dailyHealthTipText = TIPS[healthTipIndex];
   const dosesRemainingToday = Math.max(0, totalDoseSlots - takenDoseSlots);
   const doseTrackerEncouragement = !totalDoseSlots
-    ? { text: "Add your meds 💊", bg: "var(--s2)", color: "var(--t2)", border: "1px solid var(--b1)" }
+    ? { text: "Add your meds ", bg: "var(--s2)", color: "var(--t2)", border: "1px solid var(--b1)" }
     : takenDoseSlots >= totalDoseSlots
-      ? { text: "Perfect! 🎉", bg: "var(--auth-ok-bg)", color: "var(--auth-ok-text)", border: "1px solid var(--auth-ok-border)" }
+      ? { text: "Perfect! ", bg: "var(--auth-ok-bg)", color: "var(--auth-ok-text)", border: "1px solid var(--auth-ok-border)" }
       : adherencePctSlots >= 50
-        ? { text: "You're on track! 🥳", bg: "var(--auth-ok-bg)", color: "var(--auth-ok-text)", border: "1px solid var(--auth-ok-border)" }
+        ? { text: "You're on track! ", bg: "var(--auth-ok-bg)", color: "var(--auth-ok-text)", border: "1px solid var(--auth-ok-border)" }
         : { text: "Keep going!", bg: "rgba(251,191,36,.14)", color: "var(--am)", border: "1px solid rgba(251,191,36,.28)" };
   const greetVisual = hr < 12
     ? { Icon: Sun, bg: "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)", showStars: false }
@@ -361,7 +424,7 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
     {
       l: "Daily progress",
       v: `${takenDoseSlots}/${totalDoseSlots || 0}`,
-      sub: totalDoseSlots ? (takenDoseSlots >= totalDoseSlots ? "Perfect — all doses logged! 🎉" : takenDoseSlots >= totalDoseSlots * 0.6 ? "You're on track! 🥳" : "You've got this — keep going!") : "Add meds to track progress",
+      sub: totalDoseSlots ? (takenDoseSlots >= totalDoseSlots ? "Perfect — all doses logged! " : takenDoseSlots >= totalDoseSlots * 0.6 ? "You're on track! " : "You've got this — keep going!") : "Add meds to track progress",
       subColor: "#10b981",
       I: CheckCircle2,
       c: "#10b981",
@@ -407,8 +470,10 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
     { label: "Care Hub", icon: Stethoscope, onClick: () => onNavigateTab?.("care-hub"), bg: "var(--pd)", c: "var(--pl)", border: "1px solid var(--ph)" },
   ];
 
-  const apptLabel = nextAppt
-    ? `${new Date(`${nextAppt.date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}${nextAppt.time ? `, ${to12h(String(nextAppt.time).slice(0, 5))}` : ""}`
+  const apptLabel = nextAppt && nextApptWhen
+    ? `${nextApptWhen.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${to12h(
+        `${String(nextApptWhen.getHours()).padStart(2, "0")}:${String(nextApptWhen.getMinutes()).padStart(2, "0")}:${String(nextApptWhen.getSeconds()).padStart(2, "0")}`
+      )}`
     : "None scheduled";
 
   const c1 = "var(--t1)";
@@ -431,37 +496,10 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
           background: "var(--bg)",
         }}
       >
-        <div style={{ display: "grid", gridTemplateColumns: isMob ? "repeat(2, minmax(0,1fr))" : "repeat(4, minmax(0,1fr))", gap: 12, marginBottom: 16 }}>
-          {statCards.map((s, si) => {
-            const Inner = (
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                <div style={{ width: 44, height: 44, borderRadius: 999, background: s.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <s.I size={20} color={s.c} strokeWidth={2.2} />
-                </div>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <p style={{ color: c1, fontSize: 22, fontWeight: 700, fontVariantNumeric: "tabular-nums", margin: 0, letterSpacing: "-0.02em", lineHeight: 1.15 }}>{s.v}</p>
-                  <p style={{ color: cMuted, fontSize: 12, fontWeight: 600, margin: "6px 0 0" }}>{s.l}</p>
-                  {s.sub ? <p style={{ color: s.subColor || "var(--t3)", fontSize: 11, fontWeight: 500, margin: "8px 0 0", lineHeight: 1.35 }}>{s.sub}</p> : null}
-                  {si === 0 && totalDoseSlots > 0 ? (
-                    <div style={{ marginTop: 12, height: 4, borderRadius: 4, background: "var(--b1)", overflow: "hidden" }}>
-                      <div style={{ width: `${adherencePctSlots}%`, height: "100%", background: "var(--gr)", borderRadius: 4, transition: "width .35s ease" }} />
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            );
-            const cardStyle = { textAlign: "left", ...cardBase, padding: "14px 16px", fontFamily: "inherit" };
-            return (
-              <motion.button type="button" key={s.l} className="au" whileHover={{ y: -2, boxShadow: cardSh }} onClick={s.onClick} style={{ ...cardStyle, cursor: "pointer" }}>{Inner}</motion.button>
-            );
-          })}
-        </div>
-
         <div
           style={{
             display: "grid",
             gridTemplateColumns: isMob ? "1fr" : "minmax(0, 2fr) minmax(0, 1fr)",
-            gridTemplateRows: isMob ? "none" : "auto auto auto",
             gap: 14,
             marginBottom: 16,
             alignItems: "start",
@@ -535,6 +573,84 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
               </div>
             </motion.div>
 
+            <section
+              className="au"
+              style={{
+                ...cardBase,
+                padding: isMob ? 14 : 16,
+                ...(isMob ? {} : { gridColumn: 2, gridRow: 1, alignSelf: "start" }),
+              }}
+            >
+              <h2 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: c1 }}>Quick actions</h2>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {quickActions.map((a) => (
+                  <button
+                    key={a.label}
+                    type="button"
+                    onClick={a.onClick}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      padding: "12px 12px",
+                      borderRadius: 12,
+                      background: "var(--s1)",
+                      cursor: "pointer",
+                      color: a.c,
+                      fontWeight: 600,
+                      fontSize: 11,
+                      textAlign: "left",
+                      fontFamily: "inherit",
+                      minHeight: 72,
+                      border: a.border || "1px solid var(--b1)",
+                      boxShadow: "var(--shadow-card)",
+                    }}
+                  >
+                    <a.icon size={22} strokeWidth={2.2} />
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: isMob ? "repeat(2, minmax(0,1fr))" : "repeat(4, minmax(0,1fr))", gap: 12, marginBottom: 16 }}>
+          {statCards.map((s, si) => {
+            const Inner = (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 999, background: s.bg, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <s.I size={20} color={s.c} strokeWidth={2.2} />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <p style={{ color: c1, fontSize: 22, fontWeight: 700, fontVariantNumeric: "tabular-nums", margin: 0, letterSpacing: "-0.02em", lineHeight: 1.15 }}>{s.v}</p>
+                  <p style={{ color: cMuted, fontSize: 12, fontWeight: 600, margin: "6px 0 0" }}>{s.l}</p>
+                  {s.sub ? <p style={{ color: s.subColor || "var(--t3)", fontSize: 11, fontWeight: 500, margin: "8px 0 0", lineHeight: 1.35 }}>{s.sub}</p> : null}
+                  {si === 0 && totalDoseSlots > 0 ? (
+                    <div style={{ marginTop: 12, height: 4, borderRadius: 4, background: "var(--b1)", overflow: "hidden" }}>
+                      <div style={{ width: `${adherencePctSlots}%`, height: "100%", background: "var(--gr)", borderRadius: 4, transition: "width .35s ease" }} />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            );
+            const cardStyle = { textAlign: "left", ...cardBase, padding: "14px 16px", fontFamily: "inherit" };
+            return (
+              <motion.button type="button" key={s.l} className="au" whileHover={{ y: -2, boxShadow: cardSh }} onClick={s.onClick} style={{ ...cardStyle, cursor: "pointer" }}>{Inner}</motion.button>
+            );
+          })}
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: isMob ? "1fr" : "minmax(0, 2fr) minmax(0, 1fr)",
+            gridTemplateRows: isMob ? "none" : "auto auto",
+            gap: 14,
+            marginBottom: 16,
+            alignItems: "start",
+          }}
+        >
             <motion.div
               className="au"
               initial={{ opacity: 0, y: 6 }}
@@ -543,7 +659,7 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
               style={{
                 ...cardBase,
                 padding: isMob ? 16 : 18,
-                ...(isMob ? {} : { gridColumn: 1, gridRow: 2 }),
+                ...(isMob ? {} : { gridColumn: 1, gridRow: 1 }),
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: isMob ? 12 : 16, flexWrap: "wrap" }}>
@@ -614,7 +730,7 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
               style={{
                 ...cardBase,
                 padding: isMob ? 16 : 18,
-                ...(isMob ? {} : { gridColumn: 1, gridRow: 3, alignSelf: "stretch" }),
+                ...(isMob ? {} : { gridColumn: 1, gridRow: 2, alignSelf: "stretch" }),
               }}
             >
               <div style={{ display: "flex", flexDirection: isMob ? "column" : "row", alignItems: "center", gap: isMob ? 16 : 20 }}>
@@ -685,52 +801,11 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
               style={{
                 ...cardBase,
                 padding: isMob ? 14 : 16,
-                ...(isMob ? {} : { gridColumn: 2, gridRow: 1, alignSelf: "start" }),
-              }}
-            >
-              <h2 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: c1 }}>Quick actions</h2>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                {quickActions.map((a) => (
-                  <button
-                    key={a.label}
-                    type="button"
-                    onClick={a.onClick}
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "flex-start",
-                      gap: 8,
-                      padding: "12px 12px",
-                      borderRadius: 12,
-                      background: "var(--s1)",
-                      cursor: "pointer",
-                      color: a.c,
-                      fontWeight: 600,
-                      fontSize: 11,
-                      textAlign: "left",
-                      fontFamily: "inherit",
-                      minHeight: 72,
-                      border: a.border || "1px solid var(--b1)",
-                      boxShadow: "var(--shadow-card)",
-                    }}
-                  >
-                    <a.icon size={22} strokeWidth={2.2} />
-                    {a.label}
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            <section
-              className="au"
-              style={{
-                ...cardBase,
-                padding: isMob ? 14 : 16,
                 ...(isMob
                   ? {}
                   : {
                       gridColumn: 2,
-                      gridRow: "2 / 4",
+                      gridRow: "1 / 3",
                       alignSelf: "stretch",
                       minHeight: 0,
                       display: "flex",
@@ -1055,7 +1130,7 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
                     {nextAppt && (
                       <>
                         <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--t3)" }}>
-                          {[nextAppt.type, daysToAppt != null ? `In ${daysToAppt} day${daysToAppt === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ")}
+                          {[nextAppt.type, apptDayLabel].filter(Boolean).join(" · ")}
                         </p>
                         {(apptProvider?.fullName || apptProvider?.kindLabel) && (
                           <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--t3)", lineHeight: 1.45 }}>
