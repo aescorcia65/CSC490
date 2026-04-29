@@ -448,6 +448,7 @@ export default function Auth({ authMode = "landing" }) {
 
   const isMob = useIsMobile();
   const isTab = useIsTablet();
+  const isDedicatedAuthMobile = (isSignupPage || isSigninPage) && isMob;
   const reducedMotionPref = useReducedMotion();
   const reducedMotion = reducedMotionPref === true;
   const [signupPageVisible, setSignupPageVisible] = useState(
@@ -490,6 +491,7 @@ export default function Auth({ authMode = "landing" }) {
   const [heroWordWidths, setHeroWordWidths] = useState({});
 
   useEffect(() => {
+    if (isDedicatedAuthMobile) return undefined;
     const body = document.body;
     const html = document.documentElement;
     const prevBody = body.style.overflow;
@@ -500,7 +502,7 @@ export default function Auth({ authMode = "landing" }) {
       body.style.overflow = prevBody;
       html.style.overscrollBehaviorY = prevHtmlOs;
     };
-  }, []);
+  }, [isDedicatedAuthMobile]);
 
   useEffect(() => {
     if (isSignupPage || isSigninPage) return undefined;
@@ -726,7 +728,7 @@ export default function Auth({ authMode = "landing" }) {
         inset: 0,
         width: "100%",
         overflowX: "hidden",
-        overflowY: isSignupPage || isSigninPage ? "hidden" : "auto",
+        overflowY: isSignupPage || isSigninPage ? (isMob ? "auto" : "hidden") : "auto",
         scrollBehavior: "smooth",
         WebkitOverflowScrolling: "touch",
         touchAction: "pan-y",
@@ -741,14 +743,14 @@ export default function Auth({ authMode = "landing" }) {
     ) : null}
     <div style={{
       minHeight: "100dvh",
-      maxHeight: isSignupPage || isSigninPage ? "100dvh" : "none",
+      maxHeight: isSignupPage || isSigninPage ? (isMob ? "none" : "100dvh") : "none",
       display: "flex",
       flexDirection: isMob ? "column" : "row",
       alignItems: isMob ? "stretch" : (isSignupPage || isSigninPage ? "stretch" : "flex-start"),
       width: "100%",
       position: "relative",
       background: pageBg,
-      overflow: isSignupPage || isSigninPage ? "hidden" : "visible",
+      overflow: isSignupPage || isSigninPage ? (isMob ? "visible" : "hidden") : "visible",
       boxSizing: "border-box",
     }}>
       {isSignupPage ? (
@@ -1277,7 +1279,7 @@ export default function Auth({ authMode = "landing" }) {
         position:"relative",
         zIndex: isSignupPage || isSigninPage ? 1 : undefined,
         overflowX: "hidden",
-        overflowY: isSignupPage || isSigninPage ? "hidden" : (isMob ? "visible" : "hidden"),
+        overflowY: isSignupPage || isSigninPage ? (isMob ? "visible" : "hidden") : (isMob ? "visible" : "hidden"),
       }}>
         <div aria-hidden style={{
           position:"absolute",width:320,height:320,top:"-60px",right:"-40px",borderRadius:"50%",pointerEvents:"none",

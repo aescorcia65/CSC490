@@ -283,6 +283,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
   const typingTimer = useRef(null);
   const typingChRef = useRef(null);
   const activePeerRef = useRef(null);
+  const loadMessagesSeqRef = useRef(0);
 
   const activeDoctor = useMemo(() => doctors.find((d) => d.id === selectedDoctorId) || null, [doctors, selectedDoctorId]);
   const activePeer = peerTab === "doctor" ? activeDoctor : pharmacist;
@@ -663,9 +664,15 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       setMessages([]);
       return;
     }
+    activePeerRef.current = peerId;
+    const reqId = ++loadMessagesSeqRef.current;
     setThreadLoading(true);
     const q = `and(sender_id.eq.${userId},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${userId})`;
     const { data, error } = await supabase.from("patient_messages").select("*").or(q).order("created_at", { ascending: true }).limit(200);
+    if (reqId !== loadMessagesSeqRef.current) {
+      setThreadLoading(false);
+      return;
+    }
     if (error) {
       console.error("patient_messages:", error.message);
       setMessages([]);

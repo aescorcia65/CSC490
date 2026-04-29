@@ -8,7 +8,6 @@ import { to12h, to12hNoSeconds, formatOverdueDurationMinutes } from "../../lib/u
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { logMedicationTaken, unlogMedicationTaken, doseRowLogged, patchMedDoseToggle, allDoseSlotsLogged } from "../../lib/adherence";
 import { supabase } from "../../supabase";
-import { useAuth } from "../../contexts/AuthContext";
 
 const FDA_LABEL_ENDPOINT = "https://api.fda.gov/drug/label.json";
 
@@ -233,7 +232,6 @@ function FdaLabelSections({ data, t1, t3 }) {
 }
 
 export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userId, focusMedicationId, onConsumedFocus }) {
-  const { loadUserMeds } = useAuth();
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
   const now = new Date();
@@ -264,7 +262,6 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
   const [refillBusy, setRefillBusy] = useState(null);
   const [refillNotice, setRefillNotice] = useState(null);
   const [refillRequests, setRefillRequests] = useState([]);
-  const doseReloadTimerRef = useRef(null);
   const [history, setHistory] = useState([]);
   const [histLoading, setHistLoading] = useState(false);
   const [detailMed, setDetailMed] = useState(null);
@@ -341,19 +338,6 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
       .then(({ data }) => { setHistory(data || []); setHistLoading(false); });
   }, [userId, meds]);
 
-  const scheduleDoseReload = useCallback(() => {
-    if (!userId) return;
-    if (doseReloadTimerRef.current) clearTimeout(doseReloadTimerRef.current);
-    doseReloadTimerRef.current = setTimeout(() => {
-      doseReloadTimerRef.current = null;
-      void loadUserMeds();
-    }, 1200);
-  }, [userId, loadUserMeds]);
-
-  useEffect(() => () => {
-    if (doseReloadTimerRef.current) clearTimeout(doseReloadTimerRef.current);
-  }, []);
-
   const toggle = useCallback(async (id, slotTime) => {
     const med = meds.find((m) => m.id === id);
     if (!med || slotTime == null || String(slotTime).trim() === "") return;
@@ -364,14 +348,13 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
     const result = wasLogged
       ? await unlogMedicationTaken(userId, id, slotTime)
       : await logMedicationTaken(userId, id, slotTime);
-    if (result.ok) scheduleDoseReload();
-    else {
+    if (!result.ok) {
       setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, wasLogged) : m)));
       if (typeof window !== "undefined") {
         window.alert(`Could not save this dose.\n\n${result.error || "Unknown error."}`);
       }
     }
-  }, [meds, userId, setMeds, scheduleDoseReload]);
+  }, [meds, userId, setMeds]);
 
   const logDetailPrimary = useCallback(async () => {
     const m = detailMed;
@@ -381,8 +364,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
       setMeds((ms) => ms.map((x) => (x.id === m.id ? { ...x, loggedAllDay: false, loggedSlotTimes: [], taken: false } : x)));
       const unres = await unlogMedicationTaken(userId, m.id);
       setDetailMed((dm) => (dm && dm.id === m.id ? { ...dm, loggedAllDay: false, loggedSlotTimes: [], taken: false } : dm));
-      if (unres.ok) scheduleDoseReload();
-      else {
+      if (!unres.ok) {
         setMeds((ms) => ms.map((x) => (x.id === m.id ? { ...x, loggedAllDay: prevSnap.loggedAllDay, loggedSlotTimes: prevSnap.loggedSlotTimes, taken: prevSnap.taken } : x)));
         setDetailMed((dm) => (dm && dm.id === m.id ? { ...dm, loggedAllDay: prevSnap.loggedAllDay, loggedSlotTimes: prevSnap.loggedSlotTimes, taken: prevSnap.taken } : dm));
         if (typeof window !== "undefined") window.alert(`Could not update doses.\n\n${unres.error || "Try again."}`);
@@ -395,13 +377,12 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
     setMeds((ms) => ms.map((x) => (x.id === m.id ? patchMedDoseToggle(x, next, true) : x)));
     const logres = await logMedicationTaken(userId, m.id, next);
     setDetailMed((dm) => (dm && dm.id === m.id ? patchMedDoseToggle(dm, next, true) : dm));
-    if (logres.ok) scheduleDoseReload();
-    else {
+    if (!logres.ok) {
       setMeds((ms) => ms.map((x) => (x.id === m.id ? patchMedDoseToggle(x, next, false) : x)));
       setDetailMed((dm) => (dm && dm.id === m.id ? patchMedDoseToggle(dm, next, false) : dm));
       if (typeof window !== "undefined") window.alert(`Could not save this dose.\n\n${logres.error || "Try again."}`);
     }
-  }, [detailMed, userId, setMeds, scheduleDoseReload]);
+  }, [detailMed, userId, setMeds]);
 
   async function openDetail(med) {
     setDetailMed(med);

@@ -50,9 +50,16 @@ function parseRescheduleRequest(raw) {
 function parseBookingAvailability(raw) {
   if (!raw || typeof raw !== "object") return { timezone: "America/New_York", slots: {} };
   const slots = raw.slots || raw.slotsByDate || {};
+  const cleanSlots = Object.entries(slots || {}).reduce((acc, [date, times]) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) return acc;
+    if (!Array.isArray(times)) return acc;
+    const normalized = [...new Set(times.map((t) => normTime(t)).filter(Boolean))].sort();
+    if (normalized.length) acc[date] = normalized;
+    return acc;
+  }, {});
   return {
     timezone: typeof raw.timezone === "string" && raw.timezone ? raw.timezone : "America/New_York",
-    slots: typeof slots === "object" && slots !== null ? slots : {},
+    slots: cleanSlots,
   };
 }
 
@@ -445,8 +452,17 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       let data = await loadProfiles(uniq);
       if (rpcDoctors.length) {
         const byId = {};
-        [...data, ...rpcDoctors].forEach((d) => {
-          byId[d.id] = d;
+        [...rpcDoctors, ...data].forEach((d) => {
+          const prev = byId[d.id] || {};
+          byId[d.id] = {
+            ...prev,
+            ...d,
+            // Always trust direct profiles query for booking availability (rpc responses can lag).
+            booking_availability:
+              Object.prototype.hasOwnProperty.call(d || {}, "booking_availability")
+                ? d.booking_availability
+                : prev.booking_availability,
+          };
         });
         data = Object.values(byId);
       }
