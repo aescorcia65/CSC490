@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import MarketingLanding from "../components/auth/MarketingLanding";
@@ -7,10 +7,14 @@ import { clearStoredPortalLandingPage } from "../lib/clearStoredPortalLandingPag
 export default function LoginPage() {
   const { user, userRole, onboardingComplete } = useAuth();
   const navigate = useNavigate();
+  const [isMobile] = useState(() => window.innerWidth < 760);
 
   useEffect(() => {
     if (user === undefined) return;
-    if (!user) return;
+    if (!user) {
+      if (isMobile) navigate("/signin", { replace: true });
+      return;
+    }
     if (userRole == null) return;
     if (!onboardingComplete) {
       navigate("/onboarding", { replace: true });
@@ -26,7 +30,7 @@ export default function LoginPage() {
       return;
     }
     navigate("/dashboard", { replace: true });
-  }, [user, userRole, onboardingComplete, navigate]);
+  }, [user, userRole, onboardingComplete, navigate, isMobile]);
 
   if (user && user !== undefined) {
     if (userRole == null) {
@@ -41,6 +45,8 @@ export default function LoginPage() {
     }
     return null;
   }
+
+  if (isMobile) return null;
 
   return <MarketingLanding variant="full" />;
 }
