@@ -7,10 +7,9 @@ import { to12h, to12hNoSeconds, to24h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useClock } from "../../hooks/useClock";
 import Ring from "../../components/common/Ring";
-import { logMedicationTaken, unlogMedicationTaken, getAdherenceStreak, doseRowLogged, patchMedDoseToggle, reloadAfterDoseMark } from "../../lib/adherence";
+import { logMedicationTaken, unlogMedicationTaken, getAdherenceStreak, doseRowLogged, patchMedDoseToggle } from "../../lib/adherence";
 import { expandDoseTimesForToday, timeHMToMins, ringMaxSecForMedSpacing } from "../../lib/medScheduleGroups";
 import { openExternalLink } from "../../lib/openExternalLink";
-import { useAuth } from "../../contexts/AuthContext";
 
 const DASHBOARD_HEALTH_TIPS_URL = "https://medlineplus.gov/druginformation.html";
 const HEALTH_TIP_DISMISS_STORAGE_KEY = "mt_dashboard_health_tip_dismissed";
@@ -133,7 +132,6 @@ function doseRowsDueInNextHour(untakenRows, curSec) {
 }
 
 export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onEditName, onNavigateTab }) {
-  const { loadUserMeds } = useAuth();
   const now = useClock();
   const isMob = useIsMobile();
   const hr = now.getHours();
@@ -392,7 +390,6 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
       ? await unlogMedicationTaken(user.id, id, slotTime)
       : await logMedicationTaken(user.id, id, slotTime);
     if (result.ok) {
-      await reloadAfterDoseMark(loadUserMeds);
       getAdherenceStreak(user.id).then(setStreak);
     } else {
       setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, wasLogged) : m)));
@@ -400,7 +397,7 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
         window.alert(`Could not save this dose.\n\n${result.error || "Unknown error."}`);
       }
     }
-  }, [medList, user?.id, setMeds, loadUserMeds]);
+  }, [medList, user?.id, setMeds]);
 
   const uiFont = "'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   const cardSh = "var(--shadow-card-hover)";

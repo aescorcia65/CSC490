@@ -1,14 +1,14 @@
 /** How stale last_seen may be before we treat "is_online: true" as not actually active (mirror client inactivity threshold). */
-export const PRESENCE_MAX_AGE_MS = 4 * 60 * 1000;
+export const PRESENCE_MAX_AGE_MS = 2 * 60 * 1000;
 
 /** No heartbeat/activity pings for this long → mark row offline ourselves. */
 export const PRESENCE_INACTIVITY_OFFLINE_MS = 3 * 60 * 1000;
 
 /** How often we upsert our own presence while the app is foregrounded and active enough. */
-export const PRESENCE_HEARTBEAT_MS = 45 * 1000;
+export const PRESENCE_HEARTBEAT_MS = 20 * 1000;
 
 /** Recompute everyone's online map (drop stale peers). */
-export const PRESENCE_STALE_REFRESH_MS = 60 * 1000;
+export const PRESENCE_STALE_REFRESH_MS = 10 * 1000;
 
 export function presenceRowIndicatesOnline(row, nowMs = Date.now(), maxAgeMs = PRESENCE_MAX_AGE_MS) {
   if (!row?.user_id) return false;
@@ -38,13 +38,10 @@ export function subscribeSelfPresenceHeartbeat(supabase, userId, {
 
   const targets = [["pointerdown", touch], ["keydown", touch], ["touchstart", touch]];
   targets.forEach(([ev, fn]) => window.addEventListener(ev, fn, true));
-  window.addEventListener(
-    "visibilitychange",
-    () => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible") touch();
-    },
-    true,
-  );
+  const onVisibility = () => {
+    if (typeof document !== "undefined" && document.visibilityState === "visible") touch();
+  };
+  window.addEventListener("visibilitychange", onVisibility, true);
 
   async function heartbeat() {
     const idleMs = Date.now() - lastActivity.t;
@@ -84,6 +81,7 @@ export function subscribeSelfPresenceHeartbeat(supabase, userId, {
 
   return () => {
     targets.forEach(([ev, fn]) => window.removeEventListener(ev, fn, true));
+    window.removeEventListener("visibilitychange", onVisibility, true);
     window.clearInterval(tid);
     window.removeEventListener("pagehide", offlineOnUnload);
     window.removeEventListener("beforeunload", offlineOnUnload);

@@ -4,14 +4,12 @@ import { Calendar, Pill, Pencil, Trash2, Clock, CheckCircle2, AlertCircle, Loade
 import { COLS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
-import { logMedicationTaken, unlogMedicationTaken, doseRowLogged, patchMedDoseToggle, reloadAfterDoseMark } from "../../lib/adherence";
+import { logMedicationTaken, unlogMedicationTaken, doseRowLogged, patchMedDoseToggle } from "../../lib/adherence";
 import { groupMedicationsByDayPeriod } from "../../lib/medScheduleGroups";
 import { supabase } from "../../supabase";
-import { useAuth } from "../../contexts/AuthContext";
 import { buildPatientRescheduleRequestPayload, hasActiveRescheduleRequest, normalizeRescheduleRequest } from "../../lib/rescheduleRequest";
 
 export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, scrollToSection }) {
-  const { loadUserMeds } = useAuth();
   const isMob = useIsMobile();
   const t1 = "var(--t1)", t3 = "var(--t3)", b1 = "var(--b1)";
   const periodBlocks = useMemo(() => groupMedicationsByDayPeriod(meds), [meds]);
@@ -104,14 +102,13 @@ export default function SchedulePage({ meds, setMeds, onEdit, onDelete, userId, 
     const result = wasLogged
       ? await unlogMedicationTaken(userId, id, slotTime)
       : await logMedicationTaken(userId, id, slotTime);
-    if (result.ok) await reloadAfterDoseMark(loadUserMeds);
-    else {
+    if (!result.ok) {
       setMeds((ms) => ms.map((m) => (m.id === id ? patchMedDoseToggle(m, slotTime, wasLogged) : m)));
       if (typeof window !== "undefined") {
         window.alert(`Could not save this dose.\n\n${result.error || "Unknown error."}`);
       }
     }
-  }, [meds, userId, setMeds, loadUserMeds]);
+  }, [meds, userId, setMeds]);
 
   const STATUS_CONFIG = {
     scheduled: { label: "Confirmed", color: "var(--gr)", bg: "rgba(5,150,105,.1)", border: "rgba(5,150,105,.25)", icon: CheckCircle2 },

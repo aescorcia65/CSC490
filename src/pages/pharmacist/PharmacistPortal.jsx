@@ -263,6 +263,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     })();
   }, [user?.id]);
   const selChatRef = useRef(selChat);
+  const loadMessagesSeqRef = useRef(0);
   const msgModeRef = useRef(msgMode);
   const chatContactsRef = useRef(chatContacts);
   const patientChatContactsRef = useRef(patientChatContacts);
@@ -429,6 +430,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         supabase.from("patient_messages").select("*").or(q).order("created_at", { ascending: true }).limit(200)
           .then(({ data }) => {
             if (!data) return;
+            if (selChatRef.current?.id !== chat.id) return;
             setMessages(prev => {
               const realPrev = prev.filter(m => !String(m.id).startsWith("temp-"));
               const lastPrevId = realPrev[realPrev.length - 1]?.id;
@@ -448,6 +450,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         .order("created_at", { ascending: true })
         .then(({ data }) => {
           if (!data) return;
+          if (selChatRef.current?.id !== chat.id) return;
           setMessages(prev => {
             const realPrev = prev.filter(m => !String(m.id).startsWith("temp-"));
             const lastPrevId = realPrev[realPrev.length - 1]?.id;
@@ -620,6 +623,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   }
 
   async function loadMessages(peerId) {
+    const reqId = ++loadMessagesSeqRef.current;
     try {
       let usePatientMsgs = patientChatContacts.some(c => c.id === peerId);
       if (!usePatientMsgs && !chatContacts.some(c => c.id === peerId)) {
@@ -631,6 +635,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         const q = `and(sender_id.eq.${user.id},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${user.id})`;
         const { data, error } = await supabase.from("patient_messages").select("*").or(q).order("created_at", { ascending: true }).limit(200);
         if (error) { console.error("Load patient msgs:", error.message); return; }
+        if (reqId !== loadMessagesSeqRef.current || selChatRef.current?.id !== peerId) return;
         atBottomRef.current = true;
         setMessages(sortMsgs(data || []));
         setUnreadPerPatient(prev => { const n = { ...prev }; delete n[peerId]; return n; });
@@ -651,6 +656,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         .eq("doctor_id", peerId)
         .order("created_at", { ascending: true });
       if (error) { console.error("Load messages error:", error.message); return; }
+      if (reqId !== loadMessagesSeqRef.current || selChatRef.current?.id !== peerId) return;
       atBottomRef.current = true;
       setMessages(sortMsgs(data || []));
       setUnreadPerContact(prev => { const n = { ...prev }; delete n[peerId]; return n; });
@@ -927,11 +933,22 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   async function sendRxMessage() {
     if (!rxMsgInput.trim() || !selRx || rxMsgSending) return;
     const body = rxMsgInput.trim();
+    setRxMsgSending(true);
     setRxMsgInput("");
     const tempId = `temp-${Date.now()}`;
     const tempMsg = { id: tempId, prescription_id: selRx.id, sender_id: user.id, body, created_at: new Date().toISOString() };
     setRxMessages(prev => [...prev, tempMsg]);
     try {
+      // Some policies only allow prescription chat when the pharmacist has claimed the row.
+      if (!selRx.pharmacist_id || String(selRx.pharmacist_id) !== String(user.id)) {
+        const { error: claimErr } = await supabase
+          .from("prescriptions")
+          .update({ pharmacist_id: user.id, updated_at: new Date().toISOString() })
+          .eq("id", selRx.id);
+        if (claimErr) throw claimErr;
+        setSelRx((p) => (p?.id === selRx.id ? { ...p, pharmacist_id: user.id } : p));
+        setPrescriptions((prev) => prev.map((rx) => (rx.id === selRx.id ? { ...rx, pharmacist_id: user.id } : rx)));
+      }
       const { data: msg, error } = await supabase.from("prescription_messages").insert({ prescription_id: selRx.id, sender_id: user.id, body }).select("*").single();
       if (error) throw error;
       setRxMessages(prev => prev.map(m => m.id === tempId ? msg : m));
@@ -955,9 +972,14 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       if (rows.length) {
         try { await supabase.from("notifications").insert(rows); } catch {}
       }
-    } catch {
+    } catch (e) {
       setRxMessages(prev => prev.filter(m => m.id !== tempId));
       setRxMsgInput(body);
+      if (typeof window !== "undefined") {
+        window.alert(`Could not send prescription message.\n\n${e?.message || "Please try again."}`);
+      }
+    } finally {
+      setRxMsgSending(false);
     }
   }
 

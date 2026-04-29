@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, Component, useTransition, useRef, Suspense, lazy } from "react";
+import { useState, useCallback, useEffect, Component, useRef, Suspense, lazy } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { HeartPulse, Calendar, BarChart3, SlidersHorizontal, Moon, Sun, LogOut, X, Stethoscope, MessageSquare, LayoutGrid, Pill, Bell, FileHeart, MoreHorizontal, ChevronRight, Loader2 } from "lucide-react";
 import { supabase } from "../../supabase";
@@ -131,7 +131,6 @@ export default function PatientDashboard() {
   const [focusMedicationId, setFocusMedicationId] = useState(null);
   const [messagesPeer, setMessagesPeer] = useState(null);
   const [headerAlertCount, setHeaderAlertCount] = useState(0);
-  const [isNavPending, startNavTransition] = useTransition();
   const pageRestoreDoneRef = useRef(false);
   const isMob = useIsMobile();
   const saveName = (n) => { setDisplayName(n); };
@@ -208,16 +207,14 @@ export default function PatientDashboard() {
   }, [page, user?.id, pageRestoreDoneRef]);
 
   const goToPage = useCallback((navId, pageId, opts = {}) => {
-    startNavTransition(() => {
-      setPage(pageId);
-      setActiveNavId(navId);
-      setSettingsExpand(opts.settingsExpand ?? null);
-      if (pageId === "medications") setFocusMedicationId(opts.medicationId || null);
-      else setFocusMedicationId(null);
-      if (pageId === "messages") setMessagesPeer(opts.messagesPeer ?? null);
-      else setMessagesPeer(null);
-      setMobMenu(false);
-    });
+    setPage(pageId);
+    setActiveNavId(navId);
+    setSettingsExpand(opts.settingsExpand ?? null);
+    if (pageId === "medications") setFocusMedicationId(opts.medicationId || null);
+    else setFocusMedicationId(null);
+    if (pageId === "messages") setMessagesPeer(opts.messagesPeer ?? null);
+    else setMessagesPeer(null);
+    setMobMenu(false);
   }, []);
 
   const selectNavItem = useCallback((item) => {
@@ -368,35 +365,6 @@ export default function PatientDashboard() {
             position: "relative",
           }}
         >
-          {isNavPending && (
-            <div
-              role="status"
-              aria-live="polite"
-              aria-busy="true"
-              style={{
-                position: "absolute",
-                top: 12,
-                left: "50%",
-                transform: "translateX(-50%)",
-                zIndex: 6,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "8px 14px",
-                borderRadius: 10,
-                background: "var(--s1)",
-                border: `1px solid ${b1}`,
-                color: t2,
-                fontSize: 12,
-                fontWeight: 500,
-                boxShadow: "0 6px 20px rgba(0,0,0,.08)",
-                pointerEvents: "none",
-              }}
-            >
-              <Loader2 size={14} color="var(--p)" style={{ animation: "spin360 .7s linear infinite" }} />
-              Loading…
-            </div>
-          )}
           <PatientMainErrorBoundary>
             {page === "dashboard" && (
               <Dashboard user={user} meds={meds} setMeds={setMeds} onAdd={() => setAddOpen(true)} displayName={userName} onEditName={() => setShowNickname(true)} onNavigateTab={handleDashboardNavigate} />

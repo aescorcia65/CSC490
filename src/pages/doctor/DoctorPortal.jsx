@@ -214,9 +214,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const msgEndRef=useRef(null);
   const msgListRef=useRef(null);
   const atBottomRef=useRef(true);
+  const loadMessagesSeqRef=useRef(0);
   const typingTimeoutRef=useRef(null);
   const typingBroadcastRef=useRef(null);
   const announcedInboundMsgAlertIdsRef=useRef(new Set());
+  const announcedNotifAlertIdsRef=useRef(new Set());
   const selPatRef=useRef(selPat);
   const patientIdsForRealtimeRef=useRef(new Set());
   const [peerTyping,setPeerTyping]=useState(false);
@@ -678,6 +680,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         supabase.from("patient_messages").select("*").or(q).order("created_at",{ascending:true}).limit(200)
           .then(({data})=>{
             if(!data) return;
+            if(selChatRef.current?.id!==chat.id) return;
             setMessages(prev=>{
               const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
               const lastPrevId=realPrev[realPrev.length-1]?.id;
@@ -696,6 +699,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           .order("created_at",{ascending:true})
           .then(({data})=>{
             if(!data) return;
+            if(selChatRef.current?.id!==chat.id) return;
             setMessages(prev=>{
               const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
               const lastPrevId=realPrev[realPrev.length-1]?.id;
@@ -863,6 +867,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   }
 
   async function loadMessages(peerId){
+    const reqId=++loadMessagesSeqRef.current;
     try{
       let usePatientMsgs=patientChatContacts.some(c=>c.id===peerId);
       if(!usePatientMsgs&&!chatContacts.some(c=>c.id===peerId)){
@@ -874,6 +879,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         const q=`and(sender_id.eq.${user.id},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${user.id})`;
         const{data,error}=await supabase.from("patient_messages").select("*").or(q).order("created_at",{ascending:true}).limit(200);
         if(error){ console.error("Load patient msgs:",error.message); return; }
+        if(reqId!==loadMessagesSeqRef.current||selChatRef.current?.id!==peerId) return;
         atBottomRef.current=true;
         setMessages(sortMsgs(data||[]));
         setUnreadPerPatient(prev=>{ const n={...prev}; delete n[peerId]; return n; });
@@ -893,6 +899,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         .eq("doctor_id",user.id).eq("pharmacist_id",peerId)
         .order("created_at",{ascending:true});
       if(error){ console.error("Load msgs:",error.message); return; }
+      if(reqId!==loadMessagesSeqRef.current||selChatRef.current?.id!==peerId) return;
       atBottomRef.current=true;
       setMessages(sortMsgs(data||[]));
       setUnreadPerContact(prev=>{ const n={...prev}; delete n[peerId]; return n; });
@@ -1026,6 +1033,20 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const poll=setInterval(load,15000);
     const ch=supabase.channel(`doc-notifs-${user.id}`)
       .on("postgres_changes",{event:"*",schema:"public",table:"notifications",filter:`user_id=eq.${user.id}`},(p)=>{
+        if(
+          p?.eventType==="INSERT" &&
+          p?.new?.id &&
+          !p?.new?.read_at &&
+          typeof window!=="undefined"
+        ){
+          const idKey=String(p.new.id);
+          if(!announcedNotifAlertIdsRef.current.has(idKey)){
+            announcedNotifAlertIdsRef.current.add(idKey);
+            const title=String(p.new.title||"Notification").trim();
+            const body=String(p.new.body||"").trim();
+            try{ window.alert(body?`${title}: ${body}`:title); }catch{}
+          }
+        }
         setDocNotifs(prev=>mergeNotificationRows(prev,p,30));
       }).subscribe();
     return ()=>{ clearInterval(poll); supabase.removeChannel(ch); };
@@ -1249,14 +1270,31 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const tempMsg={id:tempId,sender_id:user.id,recipient_id:patientId,body,created_at:nowIso,read_at:null};
     const shouldMirror=mirrorInOpenThread&&msgMode==="patients"&&selChat?.id===patientId;
     try{
-      if(overlapping?.id){
+      let targetAppt=overlapping;
+      if(!targetAppt){
+        const { data:freshRows } = await supabase
+          .from("appointments")
+          .select("id,patient_id,doctor_id,date,time,type,status,virtual_visit_status,updated_at")
+          .eq("doctor_id", user.id)
+          .eq("patient_id", patientId)
+          .neq("status", "cancelled")
+          .order("date", { ascending: true });
+        targetAppt=findVirtualAppointmentForDoctorVideoEnd(
+          freshRows||[],
+          user.id,
+          patientId,
+          windowStartMs,
+          windowEndMs,
+        );
+      }
+      if(targetAppt?.id){
         const { error: upErr } = await supabase.from("appointments").update({
           status: "completed",
           virtual_visit_status: VS.COMPLETED,
           updated_at: new Date().toISOString(),
-        }).eq("id", overlapping.id);
+        }).eq("id", targetAppt.id);
         if(!upErr){
-          const mergeW=(a)=> (a.id===overlapping.id ? { ...a, status: "completed", virtual_visit_status: VS.COMPLETED } : a);
+          const mergeW=(a)=> (a.id===targetAppt.id ? { ...a, status: "completed", virtual_visit_status: VS.COMPLETED } : a);
           setAllAppointments((prev)=>prev.map(mergeW));
           setAppointments((prev)=>prev.map(mergeW));
         }
@@ -1449,8 +1487,79 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     if(!n?.id||!user?.id) return;
     if(!n.read_at) await markNotifRead(n.id);
     setShowNotifPanel(false);
-    const rxId=n.related_id;
+    const rawRelatedId=n.related_id;
     const blob=notificationTextBlob(n);
+    const resolvePrescriptionId=async(relatedId)=>{
+      const rid=String(relatedId||"").trim();
+      if(!rid) return null;
+      const { data: directRx } = await supabase
+        .from("prescriptions")
+        .select("id")
+        .eq("id", rid)
+        .eq("doctor_id", user.id)
+        .maybeSingle();
+      if(directRx?.id) return directRx.id;
+      const { data: pmRow } = await supabase
+        .from("prescription_messages")
+        .select("prescription_id")
+        .eq("id", rid)
+        .maybeSingle();
+      return pmRow?.prescription_id || null;
+    };
+    const rxId=await resolvePrescriptionId(rawRelatedId);
+    const openMessageByRelatedId=async(relatedId)=>{
+      const rid=String(relatedId||"").trim();
+      if(!rid) return false;
+      const { data:pm,error:pmErr }=await supabase.from("patient_messages").select("id,sender_id,recipient_id").eq("id",rid).maybeSingle();
+      if(pmErr) console.error("openNotificationTarget patient_messages:",pmErr.message);
+      if(pm){
+        const other=pm.sender_id===user.id?pm.recipient_id:pm.sender_id;
+        if(other&&other!==user.id){
+          setPage("messages");
+          setMsgMode("patients");
+          let target=patientChatContactsRef.current.find(c=>String(c.id)===String(other))||null;
+          if(!target){
+            const { data:prof }=await supabase.from("profiles").select("id,first_name,last_name,email").eq("id",other).maybeSingle();
+            if(prof){
+              target={
+                id:prof.id,
+                name:[prof.first_name,prof.last_name].filter(Boolean).join(" ")||prof.email||"Patient",
+                email:prof.email||"",
+                lastMessageAt:null,
+              };
+              setPatientChatContacts(prev=>sortContacts(prev.some(c=>c.id===target.id)?prev:[...prev,target]));
+            }else{
+              target={id:other,name:"Patient",email:"",lastMessageAt:null};
+            }
+          }
+          setSelChat(target);
+          return true;
+        }
+      }
+      const { data:cm,error:cmErr }=await supabase.from("chat_messages").select("id,pharmacist_id").eq("id",rid).maybeSingle();
+      if(cmErr) console.error("openNotificationTarget chat_messages:",cmErr.message);
+      if(cm?.pharmacist_id){
+        setPage("messages");
+        setMsgMode("pharmacy");
+        let target=chatContactsRef.current.find(c=>String(c.id)===String(cm.pharmacist_id))||null;
+        if(!target){
+          const { data:prof }=await supabase.from("profiles").select("id,first_name,last_name,email,pharmacy_name").eq("id",cm.pharmacist_id).maybeSingle();
+          target=prof
+            ? {
+                id:prof.id,
+                name:[prof.first_name,prof.last_name].filter(Boolean).join(" ")||prof.email||"Pharmacist",
+                pharmacy:prof.pharmacy_name||"Pharmacy",
+                email:prof.email||"",
+                lastMessageAt:null,
+              }
+            : { id:cm.pharmacist_id,name:"Pharmacist",pharmacy:"Pharmacy",email:"",lastMessageAt:null };
+          setChatContacts(prev=>sortContacts(prev.some(c=>c.id===target.id)?prev:[...prev,target]));
+        }
+        setSelChat(target);
+        return true;
+      }
+      return false;
+    };
     if(rxId&&notificationSuggestsPrescription(n)){
       const { data:rx,error:rxErr}=await supabase.from("prescriptions").select("id,patient_id").eq("id",rxId).eq("doctor_id",user.id).maybeSingle();
       if(rxErr) console.error("openNotificationTarget:",rxErr.message);
@@ -1472,6 +1581,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       }
     }
     if(notificationSuggestsChat(n)||/appointment|reschedule|scheduled/i.test(blob)){
+      if(notificationSuggestsChat(n)&&rxId){
+        const opened=await openMessageByRelatedId(rxId);
+        if(opened) return;
+      }
       setPage("messages");
       if(/patient|follow-up|lab|visit|your patient|patient message/i.test(blob)) setMsgMode("patients");
       else setMsgMode("pharmacy");
@@ -1580,7 +1693,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     if(!user?.id||availBusy) return;
     setAvailBusy(true); setAvailMsg(null);
     try{
-      const payload={timezone:bookingAvailability.timezone||"America/New_York",slots:bookingAvailability.slots||{}};
+      const clean=parseDocBookingAvailability(bookingAvailability);
+      const payload={timezone:clean.timezone||"America/New_York",slots:clean.slots||{}};
       const { data, error }=await supabase
         .from("profiles")
         .update({booking_availability:payload})

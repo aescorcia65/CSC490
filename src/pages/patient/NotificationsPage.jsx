@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useState, useCallback } from "react";
+import { useMemo, useEffect, useState, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { Bell, Pill, Calendar, MessageSquare, X, Trash2, CheckCheck, Video } from "lucide-react";
 import { supabase } from "../../supabase";
@@ -195,12 +195,24 @@ function AppointmentRemindersBlock({ userId, onNavigate }) {
   const [videoBusy, setVideoBusy] = useState(false);
   const [videoCheckedIn, setVideoCheckedIn] = useState(false);
   const [latestVideoEventType, setLatestVideoEventType] = useState(null);
-  useEffect(() => {
+  const nextRef = useRef(null);
+  const videoWindowRef = useRef(null);
+  const loadUpcoming = useCallback(() => {
     if (!userId) return;
     const today = new Date().toISOString().slice(0, 10);
-    supabase.from("appointments").select("id,date,time,type,doctor_id,status,virtual_visit_status").eq("patient_id", userId).in("status", ["scheduled", "rescheduled"]).gte("date", today).order("date", { ascending: true }).limit(5)
+    supabase
+      .from("appointments")
+      .select("id,date,time,type,doctor_id,status,virtual_visit_status")
+      .eq("patient_id", userId)
+      .in("status", ["scheduled", "rescheduled"])
+      .gte("date", today)
+      .order("date", { ascending: true })
+      .limit(5)
       .then(({ data }) => setAppts(data || []));
   }, [userId]);
+  useEffect(() => {
+    loadUpcoming();
+  }, [loadUpcoming]);
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 15000);
     return () => clearInterval(timer);
@@ -223,6 +235,10 @@ function AppointmentRemindersBlock({ userId, onNavigate }) {
     !!userId &&
     (vv === VS.WAITING_FOR_DOCTOR || vv === VS.VIDEO_STARTED) &&
     latestVideoEventType !== "ended";
+  useEffect(() => {
+    nextRef.current = next;
+    videoWindowRef.current = videoWindow;
+  }, [next, videoWindow]);
 
   useEffect(() => {
     if (!userId || !next?.doctor_id || !videoWindow) {
@@ -251,6 +267,36 @@ function AppointmentRemindersBlock({ userId, onNavigate }) {
       cancelled = true;
     };
   }, [next?.doctor_id, next?.id, userId, videoWindow?.windowEndMs, videoWindow?.windowStartMs]);
+  useEffect(() => {
+    if (!userId) return undefined;
+    const chAppt = supabase
+      .channel(`pt-notif-appt-reminders-${userId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${userId}` }, () => {
+        loadUpcoming();
+      })
+      .subscribe();
+    const chMsgs = supabase
+      .channel(`pt-notif-video-events-${userId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "patient_messages", filter: `recipient_id=eq.${userId}` }, (payload) => {
+        const row = payload?.new;
+        if (!row?.body) return;
+        const parsed = parseVideoApprovalMessageBody(row.body || "");
+        if (!parsed || (parsed.eventType !== "started" && parsed.eventType !== "ended")) return;
+        const curNext = nextRef.current;
+        const curWindow = videoWindowRef.current;
+        if (!curNext?.doctor_id || !curWindow) return;
+        if (String(row.sender_id) !== String(curNext.doctor_id)) return;
+        const roomId = buildVideoRoomId(userId, curNext.doctor_id);
+        if (parsed.roomId !== roomId) return;
+        if (!windowsOverlap(parsed.windowStartMs, parsed.windowEndMs, curWindow.windowStartMs, curWindow.windowEndMs)) return;
+        setLatestVideoEventType(parsed.eventType);
+      })
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(chAppt);
+      void supabase.removeChannel(chMsgs);
+    };
+  }, [userId, loadUpcoming]);
   if (!appts.length) return null;
   const joinVideo = async () => {
     if (!canJoinVideo || !next?.doctor_id || !videoWindow) return;
