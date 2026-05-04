@@ -1305,40 +1305,12 @@ export default function Auth({ authMode = "landing" }) {
         }}/>
 
         {/* Mobile-only compact logo bar (hero is hidden on mobile dedicated auth) */}
-        {isDedicatedAuthMobile && (
-          <div style={{
-            display:"flex",alignItems:"center",justifyContent:"center",
-            paddingTop:"max(20px, calc(10px + env(safe-area-inset-top)))",
-            paddingBottom:4,
-            gap:10,
-          }}>
-            <div style={{
-              width:38,height:38,borderRadius:10,
-              background:"linear-gradient(135deg,#2563eb,#0ea5e9)",
-              display:"flex",alignItems:"center",justifyContent:"center",
-              boxShadow:"0 2px 8px rgba(37,99,235,.35)",
-              flexShrink:0,
-            }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
-              </svg>
-            </div>
-            <div>
-              <div style={{fontFamily:font,fontWeight:800,fontSize:18,letterSpacing:"-.02em",color:L?"#0f172a":"#f8fafc",lineHeight:1.1}}>
-                Med<span style={{color:"#2563eb"}}>Track</span>
-              </div>
-              <div style={{fontFamily:font,fontSize:9,fontWeight:700,letterSpacing:".14em",textTransform:"uppercase",color:L?"#94a3b8":"#7dd3fc",marginTop:1}}>
-                Health Management
-              </div>
-            </div>
-          </div>
-        )}
 
         <div style={{
           position:"relative",zIndex:30,flexShrink:0,
           display:"flex",justifyContent:isDedicatedAuthPage?"center":"flex-end",alignItems:"center",gap:10,
           width:"100%",
-          paddingTop:isSignupPage||isSigninPage?(isDedicatedAuthMobile?"10px":"max(26px, calc(12px + env(safe-area-inset-top)))"):"max(14px, env(safe-area-inset-top))",
+          paddingTop:isSignupPage||isSigninPage?(isDedicatedAuthMobile?"max(20px, calc(10px + env(safe-area-inset-top)))":"max(26px, calc(12px + env(safe-area-inset-top)))"):"max(14px, env(safe-area-inset-top))",
           paddingBottom:10,
         }}>
           {isDedicatedAuthPage ? (
