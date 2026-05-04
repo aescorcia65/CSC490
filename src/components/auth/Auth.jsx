@@ -1271,7 +1271,7 @@ export default function Auth({ authMode = "landing" }) {
       </div>
 
       {/* ── Form column ── */}
-      <div style={{
+      <div className={isDedicatedAuthMobile ? "auth-mobile-visible" : undefined} style={{
         width:"100%",
         maxWidth: isMob ? "100%" : isTab ? "100%" : (isSignupPage || isSigninPage ? signupCardMaxW : 480),
         flexShrink:0,
