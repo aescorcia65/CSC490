@@ -5,13 +5,16 @@ import Auth from "../components/auth/Auth";
 import { clearStoredPortalLandingPage } from "../lib/clearStoredPortalLandingPage";
 
 export default function SigninPage() {
-  const { user, userRole, onboardingComplete } = useAuth();
+  const { user, userRole, onboardingComplete, profileLoaded } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
     if (user === undefined) return;
     if (!user) return;
-    if (userRole == null) return;
+    // Wait for the full profile to load before navigating — prevents
+    // premature redirects when userRole comes from cache but
+    // onboardingComplete is still null (treated as falsy → wrong /onboarding redirect).
+    if (!profileLoaded) return;
     if (!onboardingComplete) {
       navigate("/onboarding", { replace: true });
       return;
@@ -26,10 +29,10 @@ export default function SigninPage() {
       return;
     }
     navigate("/dashboard", { replace: true });
-  }, [user, userRole, onboardingComplete, navigate]);
+  }, [user, userRole, onboardingComplete, profileLoaded, navigate]);
 
   if (user && user !== undefined) {
-    if (userRole == null) {
+    if (!profileLoaded) {
       return (
         <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
           <div style={{ width: 52, height: 52, borderRadius: 16, background: "var(--pd)", border: "1px solid rgba(37,99,235,.3)", display: "flex", alignItems: "center", justifyContent: "center" }}>

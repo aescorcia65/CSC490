@@ -742,15 +742,15 @@ export default function Auth({ authMode = "landing" }) {
       </div>
     ) : null}
     <div style={{
-      minHeight: "100dvh",
-      maxHeight: isSignupPage || isSigninPage ? (isMob ? "none" : "100dvh") : "none",
+      minHeight: isDedicatedAuthMobile ? "auto" : "100dvh",
+      maxHeight: "none",
       display: "flex",
       flexDirection: isMob ? "column" : "row",
       alignItems: isMob ? "stretch" : (isSignupPage || isSigninPage ? "stretch" : "flex-start"),
       width: "100%",
       position: "relative",
       background: pageBg,
-      overflow: isSignupPage || isSigninPage ? (isMob ? "visible" : "hidden") : "visible",
+      overflow: "visible",
       boxSizing: "border-box",
     }}>
       {isSignupPage ? (
@@ -806,7 +806,15 @@ export default function Auth({ authMode = "landing" }) {
       `}</style>
 
       {/* ── Hero ── */}
-      <div style={{flex:1,position:"relative",zIndex:isSignupPage||isSigninPage?1:undefined,overflow:isSignupPage||isSigninPage?"visible":"hidden",display:"flex",alignSelf:isMob?"auto":"stretch"}} id="auth-lp">
+      {/* On mobile dedicated auth pages, collapse hero to just show top branding, no dead space */}
+      <div style={{
+        flex: isDedicatedAuthMobile ? "0 0 auto" : 1,
+        position:"relative",
+        zIndex:isSignupPage||isSigninPage?1:undefined,
+        overflow:isSignupPage||isSigninPage?"visible":"hidden",
+        display: isDedicatedAuthMobile ? "none" : "flex",
+        alignSelf:isMob?"auto":"stretch",
+      }} id="auth-lp">
         <style>{`
           #auth-lp::before{
             content:"";
@@ -1268,18 +1276,18 @@ export default function Auth({ authMode = "landing" }) {
         maxWidth: isMob ? "100%" : isTab ? "100%" : (isSignupPage || isSigninPage ? signupCardMaxW : 480),
         flexShrink:0,
         flex: isSignupPage || isSigninPage ? "1 1 0" : undefined,
-        minHeight: isSignupPage || isSigninPage ? 0 : "100dvh",
-        maxHeight: (isSignupPage || isSigninPage) && !isMob ? "100dvh" : undefined,
+        minHeight: isDedicatedAuthMobile ? 0 : (isSignupPage || isSigninPage ? 0 : "100dvh"),
+        maxHeight: (isSignupPage || isSigninPage) && !isMob ? "100dvh" : "none",
         display:"flex",
         flexDirection:"column",
         alignItems:"stretch",
         paddingLeft: isSignupPage || isSigninPage ? (isMob ? 14 : isTab ? 20 : 24) : (isMob ? 18 : isTab ? 28 : 32),
         paddingRight: isSignupPage || isSigninPage ? (isMob ? 14 : isTab ? 20 : 24) : (isMob ? 18 : isTab ? 28 : 32),
-        paddingBottom: isMob ? "max(24px, env(safe-area-inset-bottom))" : 32,
+        paddingBottom: isMob ? "max(32px, env(safe-area-inset-bottom))" : 32,
         position:"relative",
         zIndex: isSignupPage || isSigninPage ? 1 : undefined,
         overflowX: "hidden",
-        overflowY: isSignupPage || isSigninPage ? (isMob ? "visible" : "hidden") : (isMob ? "visible" : "hidden"),
+        overflowY: "visible",
       }}>
         <div aria-hidden style={{
           position:"absolute",width:320,height:320,top:"-60px",right:"-40px",borderRadius:"50%",pointerEvents:"none",
@@ -1296,11 +1304,41 @@ export default function Auth({ authMode = "landing" }) {
           filter:isSignupPage||isSigninPage?"blur(22px)":"blur(44px)",zIndex:0,
         }}/>
 
+        {/* Mobile-only compact logo bar (hero is hidden on mobile dedicated auth) */}
+        {isDedicatedAuthMobile && (
+          <div style={{
+            display:"flex",alignItems:"center",justifyContent:"center",
+            paddingTop:"max(20px, calc(10px + env(safe-area-inset-top)))",
+            paddingBottom:4,
+            gap:10,
+          }}>
+            <div style={{
+              width:38,height:38,borderRadius:10,
+              background:"linear-gradient(135deg,#2563eb,#0ea5e9)",
+              display:"flex",alignItems:"center",justifyContent:"center",
+              boxShadow:"0 2px 8px rgba(37,99,235,.35)",
+              flexShrink:0,
+            }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+              </svg>
+            </div>
+            <div>
+              <div style={{fontFamily:font,fontWeight:800,fontSize:18,letterSpacing:"-.02em",color:L?"#0f172a":"#f8fafc",lineHeight:1.1}}>
+                Med<span style={{color:"#2563eb"}}>Track</span>
+              </div>
+              <div style={{fontFamily:font,fontSize:9,fontWeight:700,letterSpacing:".14em",textTransform:"uppercase",color:L?"#94a3b8":"#7dd3fc",marginTop:1}}>
+                Health Management
+              </div>
+            </div>
+          </div>
+        )}
+
         <div style={{
           position:"relative",zIndex:30,flexShrink:0,
           display:"flex",justifyContent:isDedicatedAuthPage?"center":"flex-end",alignItems:"center",gap:10,
           width:"100%",
-          paddingTop:isSignupPage||isSigninPage?"max(26px, calc(12px + env(safe-area-inset-top)))":"max(14px, env(safe-area-inset-top))",
+          paddingTop:isSignupPage||isSigninPage?(isDedicatedAuthMobile?"10px":"max(26px, calc(12px + env(safe-area-inset-top)))"):"max(14px, env(safe-area-inset-top))",
           paddingBottom:10,
         }}>
           {isDedicatedAuthPage ? (
@@ -1387,7 +1425,7 @@ export default function Auth({ authMode = "landing" }) {
         ) : (
         <motion.div
           ref={formCardRef}
-          initial={isSignupPage || isSigninPage ? (reducedMotion ? false : { opacity: 0, y: 20 }) : false}
+          initial={isDedicatedAuthMobile ? false : (isSignupPage || isSigninPage ? (reducedMotion ? false : { opacity: 0, y: 20 }) : false)}
           animate={isSignupPage || isSigninPage ? { opacity: 1, y: 0 } : undefined}
           transition={{ duration: 0.55, ease: [0.4, 0, 0.2, 1] }}
           style={{
@@ -1506,7 +1544,7 @@ export default function Auth({ authMode = "landing" }) {
             {step==="form"&&(
               <motion.div
                 key="form"
-                initial={{ opacity: 0, y: 12 }}
+                initial={isDedicatedAuthMobile ? false : { opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: isSignupPage && tab === "signup" ? 0.42 : 0.2, ease: [0.4, 0, 0.2, 1] }}

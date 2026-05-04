@@ -63,8 +63,8 @@ export function AuthProvider({ children }) {
         .single();
 
       if (error || !data) {
-        if (attempt < 6) {
-          await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+        if (attempt < 4) {
+          await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
           return fetchProfile(uid, attempt + 1);
         }
         const cachedRole = cacheRead(uid, "role") || "client";
@@ -92,8 +92,8 @@ export function AuthProvider({ children }) {
         if (cached) setDisplayNameState(cached);
       }
     } catch (e) {
-      if (attempt < 6) {
-        await new Promise(r => setTimeout(r, 400));
+      if (attempt < 4) {
+        await new Promise(r => setTimeout(r, 300));
         return fetchProfile(uid, attempt + 1);
       }
       const cachedOnboarding = cacheRead(uid, "onboarding");

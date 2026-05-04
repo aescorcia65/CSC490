@@ -39,7 +39,7 @@ const authedLoading = (
  * On mobile, skip the marketing page and go straight to sign-in.
  */
 export default function HomePage() {
-  const { user, userRole, onboardingComplete } = useAuth();
+  const { user, userRole, onboardingComplete, profileLoaded } = useAuth();
   const navigate = useNavigate();
   const [isMobile] = useState(() => window.innerWidth < 760);
 
@@ -49,7 +49,7 @@ export default function HomePage() {
       if (isMobile) navigate("/signin", { replace: true });
       return;
     }
-    if (userRole == null) return;
+    if (!profileLoaded) return;
     if (!onboardingComplete) {
       navigate("/onboarding", { replace: true });
       return;
@@ -63,10 +63,10 @@ export default function HomePage() {
       return;
     }
     navigate("/dashboard", { replace: true });
-  }, [user, userRole, onboardingComplete, navigate, isMobile]);
+  }, [user, userRole, onboardingComplete, profileLoaded, navigate, isMobile]);
 
   if (user && user !== undefined) {
-    if (userRole == null) {
+    if (!profileLoaded) {
       return authedLoading;
     }
     return null;
