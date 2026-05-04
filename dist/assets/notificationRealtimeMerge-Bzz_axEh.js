@@ -1,0 +1,1 @@
+function u(n,t,f=50){const c=t==null?void 0:t.eventType,i=t==null?void 0:t.new,s=t==null?void 0:t.old;return c==="INSERT"&&(i!=null&&i.id)?n.some(e=>e.id===i.id)?n:[i,...n].slice(0,f):c==="UPDATE"&&(i!=null&&i.id)?n.some(e=>e.id===i.id)?n.map(e=>e.id===i.id?{...e,...i}:e):[i,...n].slice(0,f):c==="DELETE"&&(s!=null&&s.id)?n.filter(e=>e.id!==s.id):n}export{u as m};
