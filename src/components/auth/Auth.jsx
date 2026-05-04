@@ -1397,9 +1397,9 @@ export default function Auth({ authMode = "landing" }) {
         ) : (
         <motion.div
           ref={formCardRef}
-          initial={isDedicatedAuthMobile ? false : (isSignupPage || isSigninPage ? (reducedMotion ? false : { opacity: 0, y: 20 }) : false)}
+          initial={isDedicatedAuthMobile ? { opacity: 1, y: 0 } : (isSignupPage || isSigninPage ? (reducedMotion ? false : { opacity: 0, y: 20 }) : false)}
           animate={isSignupPage || isSigninPage ? { opacity: 1, y: 0 } : undefined}
-          transition={{ duration: 0.55, ease: [0.4, 0, 0.2, 1] }}
+          transition={isDedicatedAuthMobile ? { duration: 0 } : { duration: 0.55, ease: [0.4, 0, 0.2, 1] }}
           style={{
           position:"relative",zIndex:2,width:"100%",maxWidth:isSignupPage||isSigninPage?signupCardMaxW:440,
           borderRadius: isSignupPage || isSigninPage ? 14 : (isMob ? 20 : 24),
@@ -1516,10 +1516,10 @@ export default function Auth({ authMode = "landing" }) {
             {step==="form"&&(
               <motion.div
                 key="form"
-                initial={isDedicatedAuthMobile ? false : { opacity: 0, y: 12 }}
+                initial={isDedicatedAuthMobile ? { opacity: 1, y: 0 } : { opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: isSignupPage && tab === "signup" ? 0.42 : 0.2, ease: [0.4, 0, 0.2, 1] }}
+                exit={isDedicatedAuthMobile ? {} : { opacity: 0, y: -8 }}
+                transition={{ duration: isDedicatedAuthMobile ? 0 : (isSignupPage && tab === "signup" ? 0.42 : 0.2), ease: [0.4, 0, 0.2, 1] }}
               >
                 {isSignupPage ? (
                   <div
