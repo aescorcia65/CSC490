@@ -1937,20 +1937,11 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           <p style={{ margin: 0, fontSize: 14, color: TEXT_MUTED, fontFamily: font }}>{empty}</p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {rows.map((a) => {
-              const doc = doctorProfiles[a.doctor_id];
-              return (
-                <div key={a.id} style={{ padding: 14, borderRadius: 12, border: `1px solid ${BORDER}`, background: "var(--s2)" }}>
-                  <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: TEXT, fontFamily: font }}>{a.type}</p>
-                  <p style={{ margin: "6px 0 0", fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>
-                    {a.date} · {format12hFromTime(a.time)} · Dr. {doctorDisplayName(doc)}
-                  </p>
-                  {a.status === "cancelled" ? (
-                    <span style={{ display: "inline-block", marginTop: 8, fontSize: 11, fontWeight: 700, color: "#94a3b8" }}>Cancelled</span>
-                  ) : null}
-                </div>
-              );
-            })}
+            {rows.map((a) => (
+              <div key={a.id}>
+                {appointmentMainCard(a)}
+              </div>
+            ))}
           </div>
         )}
       </div>
