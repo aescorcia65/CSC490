@@ -709,9 +709,7 @@ export default function MarketingLanding({ variant = "full" }) {
         >
           <section id="about" style={{ maxWidth: 1120, margin: "0 auto", padding: isMob ? "40px 16px 44px" : "52px 24px 60px" }}>
             <h2 style={{ margin: "0 0 10px", fontSize: isMob ? 28 : 34, color: T1, letterSpacing: "-.5px" }}>Guided Health Workflow</h2>
-            <p style={{ margin: "0 0 22px", color: T2, lineHeight: 1.65, maxWidth: 760 }}>
-              Your MedTrack assistant stays with you while you scroll, guiding each core feature in a clean health-tech flow.
-            </p>
+            <p style={{ margin: "0 0 22px", color: T2, lineHeight: 1.65, maxWidth: 760 }}></p>
 
             <div
               style={{

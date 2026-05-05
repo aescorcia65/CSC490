@@ -47,8 +47,9 @@ export function usePresenceOnlineMap(userId) {
       setOnlineUsers(presenceRowsToOnlineMap(Object.values(rowsRef.current)));
     })().catch(() => {});
 
+    // Unique channel name per user so multiple portal instances don't share a subscription slot.
     const ch = supabase
-      .channel("presence-all")
+      .channel(`presence-all-${userId}`)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "user_presence" }, (payload) => {
         if (!payload.new) return;
         mergeRow(payload.new);

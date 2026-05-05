@@ -1,14 +1,14 @@
-/** How stale last_seen may be before we treat "is_online: true" as not actually active (mirror client inactivity threshold). */
-export const PRESENCE_MAX_AGE_MS = 2 * 60 * 1000;
+/** How stale last_seen may be before we treat "is_online: true" as not actually active. */
+export const PRESENCE_MAX_AGE_MS = 45 * 1000;
 
 /** No heartbeat/activity pings for this long → mark row offline ourselves. */
-export const PRESENCE_INACTIVITY_OFFLINE_MS = 3 * 60 * 1000;
+export const PRESENCE_INACTIVITY_OFFLINE_MS = 60 * 1000;
 
 /** How often we upsert our own presence while the app is foregrounded and active enough. */
-export const PRESENCE_HEARTBEAT_MS = 20 * 1000;
+export const PRESENCE_HEARTBEAT_MS = 15 * 1000;
 
-/** Recompute everyone's online map (drop stale peers). */
-export const PRESENCE_STALE_REFRESH_MS = 10 * 1000;
+/** Recompute everyone's online map (drop stale peers) — keeps UI in sync without DB round-trip. */
+export const PRESENCE_STALE_REFRESH_MS = 5 * 1000;
 
 export function presenceRowIndicatesOnline(row, nowMs = Date.now(), maxAgeMs = PRESENCE_MAX_AGE_MS) {
   if (!row?.user_id) return false;
