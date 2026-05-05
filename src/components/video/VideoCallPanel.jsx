@@ -105,13 +105,26 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
     pendingIce.current = [];
 
     async function start() {
-      // 1. Local media
+      // 1. Local media — try video+audio first, fall back to audio-only
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       } catch {
-        setError("Camera/microphone access denied.\n\nClick the camera icon 🔒 in your browser address bar → choose Allow → then close this and click Join Call again.");
-        return;
+        // Camera may be in use by another tab or blocked — try audio-only
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+          if (mounted) setError("Camera not available (may be in use by another tab). Connected with audio only.");
+        } catch {
+          // Both denied — guide user to fix browser permissions
+          if (mounted) setError(
+            "Microphone access denied.\n\n" +
+            "To fix:\n" +
+            "1. Click the 🔒 lock icon in your browser address bar\n" +
+            "2. Set Camera and Microphone to Allow\n" +
+            "3. Refresh the page and try again"
+          );
+          return;
+        }
       }
       localStreamRef.current = stream;
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
@@ -361,9 +374,14 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
       {error && (
         <div style={{ marginTop: 8, padding: "12px 18px", borderRadius: 10, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", maxWidth: 480, textAlign: "center" }}>
           <p style={{ color: "#f87171", fontSize: 13, margin: 0, whiteSpace: "pre-line", lineHeight: 1.6 }}>{error}</p>
-          <button onClick={() => onEnd?.()} style={{ marginTop: 10, padding: "7px 16px", borderRadius: 8, border: "1px solid rgba(239,68,68,.5)", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
-            Close &amp; Retry
-          </button>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 10 }}>
+            <button onClick={() => setError("")} style={{ padding: "7px 16px", borderRadius: 8, border: "1px solid rgba(239,68,68,.5)", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+              Dismiss
+            </button>
+            <button onClick={() => onEnd?.()} style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: "rgba(239,68,68,.3)", color: "#f87171", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+              Leave Call
+            </button>
+          </div>
         </div>
       )}
 
