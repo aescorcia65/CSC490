@@ -238,12 +238,19 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
   const curMins = now.getHours() * 60 + now.getMinutes();
   const overdueDoseRows = useMemo(() => {
     const rows = [];
+    const seenByName = new Set();
+    const seenById = new Set();
     for (const m of meds) {
       const slots = expandDoseTimesForToday(m);
       const past = slots
         .filter((s) => timeHMToMins(s) < curMins && !doseRowLogged(m, s))
         .sort((a, b) => timeHMToMins(a) - timeHMToMins(b));
       for (const slotTime of past) {
+        const nameKey = `${String(m.name || "").toLowerCase().trim()}|${slotTime}`;
+        const idKey = `${String(m.id || "").trim()}|${slotTime}`;
+        if (seenByName.has(nameKey) || seenById.has(idKey)) continue;
+        seenByName.add(nameKey);
+        seenById.add(idKey);
         rows.push({ med: m, slotTime });
       }
     }
