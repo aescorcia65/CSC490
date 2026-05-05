@@ -16,10 +16,11 @@ const ICE_SERVERS = {
  * Props:
  *   appointmentId  string          – DB appointment row id
  *   userId         string          – current user's auth UID
+ *   peerId         string          – the other participant's UID (patient ID when role="doctor")
  *   role           "doctor"|"patient"
  *   onEnd          () => void
  */
-export default function VideoCallPanel({ appointmentId, userId, role, onEnd }) {
+export default function VideoCallPanel({ appointmentId, userId, peerId, role, onEnd }) {
   const [callStatus, setCallStatus] = useState("connecting");
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
@@ -212,6 +213,23 @@ export default function VideoCallPanel({ appointmentId, userId, role, onEnd }) {
           console.error("Failed to set call_started:", apptErr.message);
           if (mounted) setError(`Could not start call: ${apptErr.message}`);
           return;
+        }
+
+        // Notify patient via notification bell + chat message
+        if (peerId) {
+          await Promise.allSettled([
+            supabase.from("notifications").insert({
+              user_id: peerId,
+              type: "general",
+              title: "Your doctor has started the call",
+              body: "Join your virtual visit now from Appointments → Virtual.",
+            }),
+            supabase.from("patient_messages").insert({
+              sender_id: userId,
+              recipient_id: peerId,
+              body: "📞 Your virtual visit is starting now. Please join the call from your Appointments page (Visits → Virtual tab).",
+            }),
+          ]);
         }
 
         // Insert offer (this will throw a clear error if the SQL table wasn't created)
