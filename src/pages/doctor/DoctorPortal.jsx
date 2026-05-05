@@ -526,8 +526,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const channels=[];
     channels.push(
       supabase.channel(`doc-appt-${user.id}`)
-        .on("postgres_changes",{event:"*",schema:"public",table:"appointments",filter:`doctor_id=eq.${user.id}`},(payload)=>{
+        // No server-side filter — without REPLICA IDENTITY FULL, column filters on UPDATE
+        // events are silently dropped. Filter by doctor_id client-side instead.
+        .on("postgres_changes",{event:"*",schema:"public",table:"appointments"},(payload)=>{
           if(payload.eventType==="INSERT"){
+            if(payload.new.doctor_id!==user.id) return;
             if(payload.new.status!=="cancelled"){
               setAllAppointments(prev=>prev.some(a=>a.id===payload.new.id)?prev:[...prev,payload.new]);
               setAppointments(prev=>{
@@ -539,8 +542,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           } else if(payload.eventType==="UPDATE"){
             const updater=a=>a.id===payload.new.id?{...a,...payload.new}:a;
             setAllAppointments(prev=>{
-              if(payload.new.status==="cancelled") return prev.filter(a=>a.id!==payload.new.id);
               const hasRow=prev.some(a=>a.id===payload.new.id);
+              if(!hasRow&&payload.new.doctor_id!==user.id) return prev;
+              if(payload.new.status==="cancelled") return prev.filter(a=>a.id!==payload.new.id);
               return hasRow?prev.map(updater):[...prev,payload.new];
             });
             setAppointments(prev=>{

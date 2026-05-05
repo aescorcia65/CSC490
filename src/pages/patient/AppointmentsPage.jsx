@@ -282,9 +282,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
     const ch = supabase
       .channel(`appts-full-${userId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${userId}` }, (payload) => {
+      // No server-side filter — without REPLICA IDENTITY FULL, column filters on UPDATE
+      // events are silently dropped. We filter by patient_id client-side instead.
+      .on("postgres_changes", { event: "*", schema: "public", table: "appointments" }, (payload) => {
         if (payload.eventType === "INSERT" && payload.new) {
           const row = payload.new;
+          if (row.patient_id !== userId) return;
           setAllAppts((prev) => {
             if (prev.some((a) => a.id === row.id)) return prev;
             return [...prev, row].sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
@@ -301,8 +304,10 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         }
         if (payload.eventType === "UPDATE" && payload.new?.id) {
           const row = payload.new;
+          // Only process rows that belong to this patient (client-side guard)
           setAllAppts((prev) => {
             const exists = prev.some((a) => a.id === row.id);
+            if (!exists && row.patient_id !== userId) return prev;
             const next = exists ? prev.map((a) => (a.id === row.id ? { ...a, ...row } : a)) : [...prev, row];
             return next.sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
           });
