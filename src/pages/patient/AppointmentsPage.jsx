@@ -199,6 +199,14 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     return () => clearInterval(t);
   }, []);
 
+  // Poll for appointment status changes (e.g. call_started) every 6 seconds
+  // so the Join Call button appears even if a realtime event was missed.
+  useEffect(() => {
+    if (!userId) return;
+    const t = setInterval(() => { refresh(); }, 6000);
+    return () => clearInterval(t);
+  }, [userId, refresh]);
+
   const performVirtualCheckIn = useCallback(
     async (appt, videoWindow, videoRoomId, _waitingKey) => {
       if (!userId) throw new Error("You must be signed in to check in.");
