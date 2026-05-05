@@ -110,7 +110,7 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       } catch {
-        setError("Camera/microphone access denied. Allow permissions in your browser and try again.");
+        setError("Camera/microphone access denied.\n\nClick the camera icon 🔒 in your browser address bar → choose Allow → then close this and click Join Call again.");
         return;
       }
       localStreamRef.current = stream;
@@ -359,10 +359,10 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
       </p>
 
       {error && (
-        <div style={{ marginTop: 8, padding: "10px 16px", borderRadius: 10, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", maxWidth: 460, textAlign: "center" }}>
-          <p style={{ color: "#f87171", fontSize: 13, margin: 0 }}>{error}</p>
-          <button onClick={() => onEnd?.()} style={{ marginTop: 8, padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(239,68,68,.5)", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
-            Close
+        <div style={{ marginTop: 8, padding: "12px 18px", borderRadius: 10, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", maxWidth: 480, textAlign: "center" }}>
+          <p style={{ color: "#f87171", fontSize: 13, margin: 0, whiteSpace: "pre-line", lineHeight: 1.6 }}>{error}</p>
+          <button onClick={() => onEnd?.()} style={{ marginTop: 10, padding: "7px 16px", borderRadius: 8, border: "1px solid rgba(239,68,68,.5)", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+            Close &amp; Retry
           </button>
         </div>
       )}
