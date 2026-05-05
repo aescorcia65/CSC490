@@ -1414,7 +1414,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         supabase.from("profiles").select("*").eq("id",pat.id).single(),
         supabase.from("user_medications").select("*").eq("user_id",pat.id),
         supabase.from("doctor_notes").select("*").eq("doctor_id",user.id).eq("patient_id",pat.id).order("created_at",{ascending:false}),
-        supabase.from("prescriptions").select("id,status,notes,created_at,pharmacist_id,patient_id,doctor_id").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
+        supabase.from("prescriptions").select("id,status,notes,created_at,pharmacist_id,patient_id,doctor_id,prescription_medications(medication_name,dosage_amount,dosage_unit)").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
         supabase.from("appointments").select("*").eq("patient_id",pat.id).eq("doctor_id",user.id).order("date",{ascending:true}),
       ]);
       setPatProfile(profRes.data||{});
@@ -3265,7 +3265,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                   <div key={rx.id} className="min-w-0" style={{border:`1px solid ${b1}`,borderRadius:14,overflow:"hidden"}}>
                                     <div style={{padding:"12px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"var(--s2)"}}>
                                       <div style={{flex:1,minWidth:0}}>
-                                        <span style={{color:t2,fontSize:12,fontWeight:600}}>{new Date(rx.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span>
+                                        {rx.prescription_medications?.length>0&&(
+                                          <p className="truncate" style={{margin:"0 0 2px",color:t1,fontSize:13,fontWeight:700}}>
+                                            {rx.prescription_medications.map(m=>`${m.medication_name}${m.dosage_amount?` ${m.dosage_amount}${m.dosage_unit||""}`:""}`).join(", ")}
+                                          </p>
+                                        )}
+                                        <span style={{color:t3,fontSize:11,fontWeight:500}}>{new Date(rx.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span>
                                         {rx.notes&&<p style={{color:t3,fontSize:11,margin:"3px 0 0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rx.notes}</p>}
                                       </div>
                                       <span style={{padding:"3px 10px",borderRadius:99,fontSize:11,fontWeight:700,background:sc.bg,color:sc.color,flexShrink:0}}>{PRESCRIPTION_STATUS_LABELS[rx.status]||rx.status}</span>
