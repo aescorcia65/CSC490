@@ -33,6 +33,8 @@ export default function VideoCallPanel({ appointmentId, userId, role, onEnd }) {
   const channelRef     = useRef(null);
   // ICE candidates that arrive before remoteDescription is ready are queued here
   const pendingIce     = useRef([]);
+  // Unique channel name per mount so React Strict Mode double-invoke doesn't collide
+  const channelName    = useRef(`vsig-${appointmentId}-${userId}-${Date.now()}`);
 
   /* ── helpers ─────────────────────────────────────────────────────────────── */
 
@@ -147,7 +149,7 @@ export default function VideoCallPanel({ appointmentId, userId, role, onEnd }) {
       // 4. Realtime subscription — NO server-side column filter so it works
       //    regardless of REPLICA IDENTITY setting; filter client-side instead.
       const ch = supabase
-        .channel(`vsig-${appointmentId}-${userId}`)
+        .channel(channelName.current)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "video_signals" },
