@@ -6,6 +6,7 @@ import { useIsMobile } from "../../hooks/useIsMobile";
 import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
 import { buildVideoCallUrlFromRoom, buildVideoRoomId, createVideoWaitingCheckinMessageBody, getAppointmentVideoWindow, parseVideoApprovalMessageBody } from "../../lib/videoCall";
 import { getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
+import VideoCallPanel from "../../components/video/VideoCallPanel";
 
 function windowsOverlap(startA, endA, startB, endB) {
   return Math.min(endA, endB) - Math.max(startA, startB) > 0;
@@ -195,6 +196,7 @@ function AppointmentRemindersBlock({ userId, onNavigate }) {
   const [videoBusy, setVideoBusy] = useState(false);
   const [videoCheckedIn, setVideoCheckedIn] = useState(false);
   const [latestVideoEventType, setLatestVideoEventType] = useState(null);
+  const [activeCallApptId, setActiveCallApptId] = useState(null);
   const nextRef = useRef(null);
   const videoWindowRef = useRef(null);
   const loadUpcoming = useCallback(() => {
@@ -213,6 +215,12 @@ function AppointmentRemindersBlock({ userId, onNavigate }) {
   useEffect(() => {
     loadUpcoming();
   }, [loadUpcoming]);
+  // Poll every 6s so Join Call button appears as soon as doctor starts the call
+  useEffect(() => {
+    if (!userId) return;
+    const t = setInterval(loadUpcoming, 6000);
+    return () => clearInterval(t);
+  }, [userId, loadUpcoming]);
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 15000);
     return () => clearInterval(timer);
@@ -228,6 +236,11 @@ function AppointmentRemindersBlock({ userId, onNavigate }) {
       : nowMs > portalEnd
         ? "expired"
         : "waiting";
+
+  // Doctor started the WebRTC call — patient can join now
+  const isCallStarted = vv === VS.CALL_STARTED;
+  const isCallEnded = vv === VS.CALL_ENDED;
+
   const canJoinVideo =
     !!next &&
     videoState === "waiting" &&
@@ -298,85 +311,62 @@ function AppointmentRemindersBlock({ userId, onNavigate }) {
     };
   }, [userId, loadUpcoming]);
   if (!appts.length) return null;
-  const joinVideo = async () => {
-    if (!canJoinVideo || !next?.doctor_id || !videoWindow) return;
-    setVideoBusy(true);
-    try {
-      const { data } = await supabase
-        .from("patient_messages")
-        .select("body,created_at")
-        .eq("sender_id", next.doctor_id)
-        .eq("recipient_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(25);
-      const sessionRows = (data || [])
-        .map((m) => {
-          const parsed = parseVideoApprovalMessageBody(m?.body || "");
-          if (!parsed || (parsed.eventType !== "started" && parsed.eventType !== "ended")) return null;
-          if (parsed.roomId !== buildVideoRoomId(userId, next.doctor_id)) return null;
-          if (!windowsOverlap(parsed.windowStartMs, parsed.windowEndMs, videoWindow.windowStartMs, videoWindow.windowEndMs)) return null;
-          return { parsed, created_at: m.created_at };
-        })
-        .filter(Boolean);
-      sessionRows.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
-      const started = sessionRows.length > 0 && sessionRows[0].parsed.eventType === "started";
-      if (!started) {
-        if (!videoCheckedIn) {
-          const roomId = buildVideoRoomId(userId, next.doctor_id);
-          const checkinBody = createVideoWaitingCheckinMessageBody({
-            roomId,
-            windowStartIso: new Date(videoWindow.windowStartMs).toISOString(),
-            windowEndIso: new Date(videoWindow.windowEndMs).toISOString(),
-          });
-          if (checkinBody) {
-            await supabase.from("patient_messages").insert({
-              sender_id: userId,
-              recipient_id: next.doctor_id,
-              body: checkinBody,
-            });
-          }
-          setVideoCheckedIn(true);
-        }
-        if (typeof window !== "undefined") window.alert("You are checked in. Waiting for doctor to start the visit.");
-        return;
-      }
-      const roomId = buildVideoRoomId(userId, next.doctor_id);
-      const url = buildVideoCallUrlFromRoom(roomId);
-      if (typeof window !== "undefined" && url) window.open(url, "_blank", "noopener,noreferrer");
-    } finally {
-      setVideoBusy(false);
-    }
-  };
-  return (
-    <motion.div className="card au" style={{ padding: 14, marginBottom: 12, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-      <Calendar size={20} color="var(--gr)" />
-      <div style={{ flex: 1 }}>
-        <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>Upcoming visit</p>
-        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--t3)" }}>{next.type} · {new Date(`${next.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} at {new Date(`2000-01-01T${String(next.time).slice(0, 5)}`).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
-        {videoWindow ? (
-          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--t3)" }}>
-            {latestVideoEventType === "ended"
+
+  const statusText = isCallEnded
+    ? "Call has ended."
+    : isCallStarted
+      ? "Doctor is ready — join now!"
+      : latestVideoEventType === "ended"
+        ? "This video session has ended."
+        : vv === VS.VIDEO_STARTED
+          ? "Your doctor has joined. You can join now."
+          : vv === VS.CHECKED_IN || vv === VS.WAITING_FOR_DOCTOR
+            ? "Checked in. Waiting for doctor to start."
+            : vv === VS.COMPLETED || vv === VS.DENIED || vv === VS.CANCELLED
               ? "This video session has ended."
-              : vv === VS.VIDEO_STARTED
-              ? "Your doctor has joined. You can join now."
-              : vv === VS.CHECKED_IN
-                ? "Checked in. Waiting for doctor to start."
-                : vv === VS.COMPLETED || vv === VS.DENIED || vv === VS.CANCELLED
-                  ? "This video session has ended."
-                  : videoState === "too_early"
-              ? `Waiting room opens at ${new Date(videoWindow.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
-              : videoState === "expired"
-                ? "Video window expired."
-                : "Waiting room open now."}
-          </p>
-        ) : null}
-      </div>
-      {videoWindow ? (
-        <button type="button" onClick={joinVideo} disabled={!canJoinVideo || videoBusy} style={{ padding: "8px 12px", borderRadius: 10, border: "none", background: canJoinVideo ? "var(--p)" : "var(--s2)", color: canJoinVideo ? "#fff" : "var(--t3)", fontSize: 12, fontWeight: 600, cursor: canJoinVideo ? "pointer" : "not-allowed", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6, opacity: videoBusy ? 0.7 : 1 }}>
-          <Video size={14} /> {videoBusy ? "Checking..." : "Join"}
-        </button>
-      ) : null}
-      <button type="button" onClick={() => onNavigate?.({ page: "appointments" })} style={{ padding: "8px 12px", borderRadius: 10, border: "none", background: "var(--gr)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>View</button>
-    </motion.div>
+              : videoState === "too_early"
+                ? `Waiting room opens at ${new Date(videoWindow?.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+                : videoState === "expired"
+                  ? "Video window expired."
+                  : "Waiting room open now.";
+
+  return (
+    <>
+      <motion.div className="card au" style={{ padding: 14, marginBottom: 12, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <Calendar size={20} color="var(--gr)" />
+        <div style={{ flex: 1 }}>
+          <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>Upcoming visit</p>
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--t3)" }}>{next.type} · {new Date(`${next.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} at {new Date(`2000-01-01T${String(next.time).slice(0, 5)}`).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+          {videoWindow || isCallStarted ? (
+            <p style={{ margin: "4px 0 0", fontSize: 11, color: isCallStarted ? "#22c55e" : "var(--t3)", fontWeight: isCallStarted ? 700 : 400 }}>
+              {statusText}
+            </p>
+          ) : null}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {isCallStarted && !isCallEnded && (
+            <button
+              type="button"
+              onClick={() => setActiveCallApptId(next.id)}
+              style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: "#059669", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6, boxShadow: "0 0 0 3px rgba(5,150,105,.25)" }}
+            >
+              <Video size={14} /> Join Call
+            </button>
+          )}
+          <button type="button" onClick={() => onNavigate?.({ page: "appointments" })} style={{ padding: "8px 12px", borderRadius: 10, border: "none", background: "var(--gr)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>View</button>
+        </div>
+      </motion.div>
+      {activeCallApptId && (
+        <VideoCallPanel
+          appointmentId={activeCallApptId}
+          userId={userId}
+          role="patient"
+          onEnd={() => {
+            setActiveCallApptId(null);
+            setAppts((prev) => prev.map((a) => a.id === activeCallApptId ? { ...a, virtual_visit_status: VS.CALL_ENDED } : a));
+          }}
+        />
+      )}
+    </>
   );
 }
