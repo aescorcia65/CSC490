@@ -2020,6 +2020,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       })
       .sort((x,y)=>x.window.startMs-y.window.startMs);
   },[allAppointments,videoNowMs]);
+  const inPersonAppointments=useMemo(()=>{
+    const todayDate=new Date().toISOString().slice(0,10);
+    return (allAppointments||[])
+      .filter(a=>
+        ["scheduled","rescheduled"].includes(String(a?.status||"")) &&
+        !isVideoStyleVisitType(a) &&
+        a?.date>=todayDate
+      )
+      .sort((x,y)=>(`${x.date}T${x.time}`).localeCompare(`${y.date}T${y.time}`));
+  },[allAppointments]);
   const waitingRoomList=useMemo(()=>{
     const list=[];
     Object.keys(videoSessionByWindowKey).forEach((k)=>{
@@ -2124,7 +2134,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             <p style={{color:DocAC,fontSize:26,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>{patients.length}</p>
           </div>
           <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:2}}>
-            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Virtual Visits",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
               <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
                 <I size={15}/>{l}
                 {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
@@ -2246,7 +2256,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             <div style={{position:"absolute",bottom:1,right:1,width:9,height:9,borderRadius:"50%",background:isOnline?"#22c55e":"var(--b1)",border:"2px solid var(--s1)",transition:"background .4s"}}/>
                           </div>
                           <div style={{flex:1,minWidth:0}}>
-                            <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                            <div style={{display:"flex",alignItems:"center",gap:5}}>
+                              <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                              <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,background:"rgba(124,58,237,.13)",color:"#7c3aed",letterSpacing:".03em",textTransform:"uppercase",flexShrink:0}}>Pharmacist</span>
+                            </div>
                             <p style={{color:unread>0?DocAC:t3,fontSize:11,margin:"2px 0 0",fontWeight:unread>0?700:400}}>
                               {isOnline?"Online now":contact.lastMessageAt?new Date(contact.lastMessageAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):contact.pharmacy}
                             </p>
@@ -2278,7 +2291,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             <div style={{position:"absolute",bottom:1,right:1,width:9,height:9,borderRadius:"50%",background:isOnline?"#22c55e":"var(--b1)",border:"2px solid var(--s1)",transition:"background .4s"}}/>
                           </div>
                           <div style={{flex:1,minWidth:0}}>
-                            <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                            <div style={{display:"flex",alignItems:"center",gap:5}}>
+                              <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                              <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,background:"rgba(6,182,212,.13)",color:"#0e7490",letterSpacing:".03em",textTransform:"uppercase",flexShrink:0}}>Patient</span>
+                            </div>
                             <p style={{color:unread>0?DocAC:t3,fontSize:11,margin:"2px 0 0",fontWeight:unread>0?700:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                               {isOnline?"Online now":contact.lastMessageAt?new Date(contact.lastMessageAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):(contact.email||"Patient")}
                             </p>
@@ -2320,54 +2336,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         </div>
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-                        {peerIsPatient&&(
-                        <div style={{display:"flex",alignItems:"center",gap:6}}>
-                        <button
-                          type="button"
-                          onClick={openVideoVisit}
-                          disabled={videoApprovalBusy||videoEndBusy}
-                          title="Start video visit"
-                          style={{
-                            width:isMob?44:40,
-                            height:isMob?44:40,
-                            borderRadius:10,
-                            border:`1px solid ${b1}`,
-                            background:"var(--s1)",
-                            color:DocAC,
-                            display:"grid",
-                            placeItems:"center",
-                            cursor:(videoApprovalBusy||videoEndBusy)?"not-allowed":"pointer",
-                            opacity:(videoApprovalBusy||videoEndBusy)?0.55:1,
-                            fontFamily:"inherit",
-                          }}
-                          aria-label="Start video call"
-                        >
-                          {videoApprovalBusy?<Loader2 size={18} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={18}/>}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={endVideoVisitForPatient}
-                          disabled={videoApprovalBusy||videoEndBusy}
-                          title="End video visit — patient can no longer join until you start again"
-                          style={{
-                            width:isMob?44:40,
-                            height:isMob?44:40,
-                            borderRadius:10,
-                            border:`1px solid rgba(185,28,28,.3)`,
-                            background:"var(--s1)",
-                            color:"var(--ro)",
-                            display:"grid",
-                            placeItems:"center",
-                            cursor:(videoApprovalBusy||videoEndBusy)?"not-allowed":"pointer",
-                            opacity:(videoApprovalBusy||videoEndBusy)?0.55:1,
-                            fontFamily:"inherit",
-                          }}
-                          aria-label="End video visit"
-                        >
-                          {videoEndBusy?<Loader2 size={18} style={{animation:"spin360 .7s linear infinite"}}/>:<PhoneOff size={17}/>}
-                        </button>
-                        </div>
-                        )}
                         <button
                           type="button"
                           onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}}
@@ -2477,7 +2445,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                 )}
                               </div>
                               <div style={{maxWidth:isMob?"88%":"72%",minWidth:0,display:"flex",flexDirection:"column",alignItems:isMe?"flex-end":"flex-start"}}>
-                                {groupTop&&!isMe&&<p style={{color:t3,fontSize:10,marginBottom:4,fontWeight:600,paddingLeft:2}}>{selChat.name}</p>}
+                                {groupTop&&!isMe&&(
+                                  <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:4,paddingLeft:2}}>
+                                    <span style={{color:t2,fontSize:11,fontWeight:700}}>{selChat.name}</span>
+                                    <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,letterSpacing:".03em",textTransform:"uppercase",background:peerIsPatient?"rgba(6,182,212,.13)":"rgba(124,58,237,.13)",color:peerIsPatient?"#0e7490":"#7c3aed"}}>{peerIsPatient?"Patient":"Pharmacist"}</span>
+                                  </div>
+                                )}
                                 {(isPatRef||isNewPatRef)&&patCard&&(
                                   <div style={{marginBottom:6,width:"100%",background:"var(--s1)",border:"1.5px solid rgba(14,116,144,.25)",borderRadius:12,overflow:"hidden",boxShadow:"0 2px 8px rgba(14,116,144,.08)"}}>
                                     <div style={{padding:"7px 12px",background:"rgba(14,116,144,.08)",borderBottom:"1px solid rgba(14,116,144,.15)",display:"flex",alignItems:"center",gap:6}}>
@@ -2803,7 +2776,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(66px + env(safe-area-inset-bottom,0px))":0}}>
               <div className="w-full min-w-0 max-w-[960px] mx-auto" style={{padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
                 <motion.div className="au" style={{marginBottom:isMob?18:22}}>
-                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Virtual Visits</h2>
+                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Appointments</h2>
                 </motion.div>
                 {doctorVideoVisitRequests.filter((r)=>r.status==="pending").length>0&&(
                 <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)",marginBottom:12}}>
@@ -2842,6 +2815,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     </div>
                 </motion.div>
                 )}
+                <p style={{margin:"0 0 10px",color:t1,fontSize:15,fontWeight:700,fontFamily:"inherit"}}>Virtual</p>
                 <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
                   <div style={{marginBottom:12,padding:"10px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}>
                     <p style={{margin:0,color:t1,fontSize:12.5,fontWeight:700}}>Waiting room list ({waitingRoomList.length})</p>
@@ -2986,6 +2960,33 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                 style={{padding:"9px 10px",borderRadius:10,border:"1px solid rgba(5,150,105,.35)",background:"rgba(5,150,105,.08)",color:"var(--gr)",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600}}>End video</button>
                             ):null}
                             </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </motion.div>
+                <p style={{margin:"22px 0 10px",color:t1,fontSize:15,fontWeight:700,fontFamily:"inherit"}}>In-person</p>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
+                  {inPersonAppointments.length===0?(
+                    <div style={{padding:isMob?"16px 8px":"24px 6px",textAlign:"center"}}>
+                      <Calendar size={26} color={t3} style={{opacity:.25,margin:"0 auto 10px",display:"block"}}/>
+                      <p style={{color:t3,fontSize:13,margin:0}}>No upcoming in-person appointments.</p>
+                    </div>
+                  ):(
+                    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                      {inPersonAppointments.map((appt)=>{
+                        const patName=patientNameById?.[appt.patient_id]||"Patient";
+                        const apptDate=new Date(`${appt.date}T12:00:00`);
+                        const dateLabel=apptDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+                        const timeLabel=to12h(appt.time);
+                        return (
+                          <div key={appt.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",padding:isMob?"10px 10px":"12px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}>
+                            <div style={{minWidth:0,flex:1}}>
+                              <p className="truncate" style={{margin:0,color:t1,fontSize:13,fontWeight:700}}>{patName}</p>
+                              <p className="truncate" style={{margin:"4px 0 0",color:t3,fontSize:12}}>{appt.type||"In-person Visit"} · {dateLabel} at {timeLabel}</p>
+                            </div>
+                            <span style={{padding:"4px 10px",borderRadius:99,background:"rgba(14,116,144,.1)",color:DocAC,fontSize:11,fontWeight:700,flexShrink:0}}>{appt.status}</span>
                           </div>
                         );
                       })}
@@ -3555,7 +3556,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
               <div style={{height:1,background:"var(--b0)",margin:"0 12px 8px"}}/>
               <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:1}}>
-                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Virtual Visits",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
                   <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);setMobMenu(false);}}>
                     <I size={15}/>{l}
                     {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
