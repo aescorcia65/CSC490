@@ -11,44 +11,68 @@ const ICE_SERVERS = {
 };
 
 /**
- * Full-screen WebRTC video call overlay.
- * - Doctor (role="doctor"): creates offer, sets appointment status to call_started.
- * - Patient (role="patient"): fetches existing offer, creates answer.
- * - Signaling uses the `video_signals` Supabase table (must be created via SQL before use).
+ * Full-screen WebRTC video call overlay tied to a single appointment_id.
  *
  * Props:
- *   appointmentId  string   — which appointment this call belongs to
- *   userId         string   — current user's auth UID
- *   peerId         string   — the other participant's auth UID (not currently sent but kept for future TURN)
- *   role           "doctor" | "patient"
+ *   appointmentId  string          – DB appointment row id
+ *   userId         string          – current user's auth UID
+ *   role           "doctor"|"patient"
  *   onEnd          () => void
  */
-export default function VideoCallPanel({ appointmentId, userId, peerId, role, onEnd }) {
-  const [callStatus, setCallStatus] = useState("connecting"); // connecting | waiting | active | ended
+export default function VideoCallPanel({ appointmentId, userId, role, onEnd }) {
+  const [callStatus, setCallStatus] = useState("connecting");
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [error, setError] = useState("");
 
-  const localVideoRef = useRef(null);
+  const localVideoRef  = useRef(null);
   const remoteVideoRef = useRef(null);
-  const pcRef = useRef(null);
+  const pcRef          = useRef(null);
   const localStreamRef = useRef(null);
-  const endedRef = useRef(false);
-  const channelRef = useRef(null);
+  const endedRef       = useRef(false);
+  const channelRef     = useRef(null);
+  // ICE candidates that arrive before remoteDescription is ready are queued here
+  const pendingIce     = useRef([]);
+
+  /* ── helpers ─────────────────────────────────────────────────────────────── */
 
   const cleanup = useCallback(() => {
     if (endedRef.current) return;
     endedRef.current = true;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
-    if (pcRef.current) {
-      pcRef.current.close();
-      pcRef.current = null;
-    }
+    if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current).catch(() => {});
       channelRef.current = null;
     }
+    pendingIce.current = [];
   }, []);
+
+  /** Drain the pending ICE queue after remoteDescription has been set. */
+  async function flushPendingIce(pc) {
+    for (const ice of pendingIce.current) {
+      try { await pc.addIceCandidate(ice); } catch {}
+    }
+    pendingIce.current = [];
+  }
+
+  /** Insert a signal row and surface the error to the user if the table is missing. */
+  async function insertSignal(type, payload) {
+    const { error: err } = await supabase.from("video_signals").insert({
+      appointment_id: appointmentId,
+      sender_id: userId,
+      type,
+      payload,
+    });
+    if (err) {
+      const msg = err.message || String(err);
+      // Table not created → give the user actionable guidance
+      if (msg.includes("does not exist") || msg.includes("relation") || msg.includes("42P01")) {
+        throw new Error("Setup needed: run the video_signals SQL in Supabase first, then retry.");
+      }
+      throw new Error(`Signal error: ${msg}`);
+    }
+  }
 
   const endCall = useCallback(async () => {
     cleanup();
@@ -66,32 +90,34 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
         }),
       ]);
     } catch (e) {
-      console.warn("VideoCallPanel endCall:", e?.message);
+      console.warn("endCall cleanup:", e?.message);
     }
     setCallStatus("ended");
     setTimeout(() => onEnd?.(), 900);
   }, [appointmentId, userId, cleanup, onEnd]);
 
+  /* ── main setup effect ───────────────────────────────────────────────────── */
+
   useEffect(() => {
     let mounted = true;
     endedRef.current = false;
+    pendingIce.current = [];
 
     async function start() {
-      // ── 1. Local media ──────────────────────────────────────────────────────
+      // 1. Local media
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       } catch {
-        setError("Camera / microphone access denied. Please allow and reload.");
+        setError("Camera/microphone access denied. Allow permissions in your browser and try again.");
         return;
       }
       localStreamRef.current = stream;
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
-      // ── 2. Peer connection ──────────────────────────────────────────────────
+      // 2. RTCPeerConnection
       const pc = new RTCPeerConnection(ICE_SERVERS);
       pcRef.current = pc;
-
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
 
       const remoteStream = new MediaStream();
@@ -103,10 +129,11 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
       pc.onconnectionstatechange = () => {
         if (!mounted) return;
         if (pc.connectionState === "connected") setCallStatus("active");
-        if (pc.connectionState === "failed" && !endedRef.current) setError("Connection failed. Check your network and try again.");
+        if (pc.connectionState === "failed" && !endedRef.current)
+          setError("Connection failed. Both devices must allow camera/mic and be on a reachable network.");
       };
 
-      // ── 3. ICE → insert into video_signals ─────────────────────────────────
+      // 3. Send ICE candidates as they're gathered
       pc.onicecandidate = ({ candidate }) => {
         if (!candidate || endedRef.current) return;
         supabase.from("video_signals").insert({
@@ -117,37 +144,44 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
         }).catch(() => {});
       };
 
-      // ── 4. Subscribe to incoming signals ───────────────────────────────────
+      // 4. Realtime subscription — NO server-side column filter so it works
+      //    regardless of REPLICA IDENTITY setting; filter client-side instead.
       const ch = supabase
         .channel(`vsig-${appointmentId}-${userId}`)
         .on(
           "postgres_changes",
-          { event: "INSERT", schema: "public", table: "video_signals", filter: `appointment_id=eq.${appointmentId}` },
+          { event: "INSERT", schema: "public", table: "video_signals" },
           async (payload) => {
             if (!mounted || endedRef.current || !pcRef.current) return;
             const sig = payload.new;
-            if (sig.sender_id === userId) return; // skip own signals
+            // Only handle signals for our appointment and not our own
+            if (sig.appointment_id !== appointmentId) return;
+            if (sig.sender_id === userId) return;
             try {
               if (sig.type === "answer" && role === "doctor") {
                 if (pcRef.current.signalingState === "have-local-offer") {
                   await pcRef.current.setRemoteDescription(new RTCSessionDescription(sig.payload.sdp));
+                  await flushPendingIce(pcRef.current);
                 }
+
               } else if (sig.type === "offer" && role === "patient") {
                 if (pcRef.current.signalingState === "stable") {
                   await pcRef.current.setRemoteDescription(new RTCSessionDescription(sig.payload.sdp));
+                  await flushPendingIce(pcRef.current);
                   const answer = await pcRef.current.createAnswer();
                   await pcRef.current.setLocalDescription(answer);
-                  await supabase.from("video_signals").insert({
-                    appointment_id: appointmentId,
-                    sender_id: userId,
-                    type: "answer",
-                    payload: { sdp: answer },
-                  });
+                  await insertSignal("answer", { sdp: answer });
                 }
+
               } else if (sig.type === "ice-candidate") {
+                const ice = new RTCIceCandidate(sig.payload.candidate);
                 if (pcRef.current.remoteDescription) {
-                  await pcRef.current.addIceCandidate(new RTCIceCandidate(sig.payload.candidate));
+                  await pcRef.current.addIceCandidate(ice);
+                } else {
+                  // Queue until remoteDescription is ready
+                  pendingIce.current.push(ice);
                 }
+
               } else if (sig.type === "end") {
                 if (mounted && !endedRef.current) {
                   cleanup();
@@ -156,35 +190,32 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
                 }
               }
             } catch (err) {
-              console.warn("VideoCallPanel signal error:", err?.message);
+              console.warn("Signal handler:", err?.message);
             }
           },
         )
         .subscribe();
       channelRef.current = ch;
 
-      // ── 5a. Doctor: create offer ────────────────────────────────────────────
+      // 5a. Doctor: create offer
       if (role === "doctor") {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
+        // Mark appointment as call_started so patient sees "Join Call"
         await supabase
           .from("appointments")
           .update({ virtual_visit_status: "call_started", updated_at: new Date().toISOString() })
           .eq("id", appointmentId);
 
-        await supabase.from("video_signals").insert({
-          appointment_id: appointmentId,
-          sender_id: userId,
-          type: "offer",
-          payload: { sdp: offer },
-        });
+        // Insert offer (this will throw a clear error if the SQL table wasn't created)
+        await insertSignal("offer", { sdp: offer });
 
         if (mounted) setCallStatus("waiting");
 
-      // ── 5b. Patient: fetch offer + create answer ────────────────────────────
+      // 5b. Patient: fetch offer → answer
       } else {
-        const { data: offerRows } = await supabase
+        const { data: offerRows, error: fetchErr } = await supabase
           .from("video_signals")
           .select("*")
           .eq("appointment_id", appointmentId)
@@ -192,24 +223,25 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
           .order("created_at", { ascending: false })
           .limit(1);
 
+        if (fetchErr) {
+          const msg = fetchErr.message || "";
+          if (msg.includes("does not exist") || msg.includes("relation") || msg.includes("42P01")) {
+            throw new Error("Setup needed: run the video_signals SQL in Supabase first.");
+          }
+          throw new Error(`Could not load call: ${msg}`);
+        }
+
         if (!offerRows?.length) {
-          if (mounted) setError("No active call found. Ask the doctor to start and try again.");
+          if (mounted) setError("No active call found. Ask the doctor to click Start Call first.");
           return;
         }
 
         if (pc.signalingState === "stable") {
           await pc.setRemoteDescription(new RTCSessionDescription(offerRows[0].payload.sdp));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          await supabase.from("video_signals").insert({
-            appointment_id: appointmentId,
-            sender_id: userId,
-            type: "answer",
-            payload: { sdp: answer },
-          });
+          // Apply any ICE candidates already stored before we joined
+          await flushPendingIce(pc);
 
-          // Apply any ICE candidates from the doctor that arrived before we joined
-          const { data: iceSigs } = await supabase
+          const { data: priorIce } = await supabase
             .from("video_signals")
             .select("*")
             .eq("appointment_id", appointmentId)
@@ -217,9 +249,13 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
             .neq("sender_id", userId)
             .order("created_at", { ascending: true });
 
-          for (const s of iceSigs || []) {
+          for (const s of priorIce || []) {
             try { await pc.addIceCandidate(new RTCIceCandidate(s.payload.candidate)); } catch {}
           }
+
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await insertSignal("answer", { sdp: answer });
         }
 
         if (mounted) setCallStatus("connecting");
@@ -236,21 +272,24 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
     };
   }, [appointmentId, userId, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /* ── controls ────────────────────────────────────────────────────────────── */
+
   const toggleMute = () => {
-    const track = localStreamRef.current?.getAudioTracks()[0];
-    if (!track) return;
-    track.enabled = !track.enabled;
-    setMuted(!track.enabled);
+    const t = localStreamRef.current?.getAudioTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    setMuted(!t.enabled);
   };
 
   const toggleCamera = () => {
-    const track = localStreamRef.current?.getVideoTracks()[0];
-    if (!track) return;
-    track.enabled = !track.enabled;
-    setCameraOff(!track.enabled);
+    const t = localStreamRef.current?.getVideoTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    setCameraOff(!t.enabled);
   };
 
-  // ── "Call ended" screen ───────────────────────────────────────────────────
+  /* ── render ──────────────────────────────────────────────────────────────── */
+
   if (callStatus === "ended") {
     return (
       <div style={overlayStyle}>
@@ -265,12 +304,10 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
 
   return (
     <div style={overlayStyle}>
-      {/* ── Video area ──────────────────────────────────────────────────────── */}
+      {/* Video area */}
       <div style={{ position: "relative", width: "min(880px,96vw)", aspectRatio: "16/9", background: "#111", borderRadius: 16, overflow: "hidden", flexShrink: 0 }}>
-        {/* Remote video (full area) */}
         <video ref={remoteVideoRef} autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
 
-        {/* Waiting / connecting overlays */}
         {callStatus === "waiting" && (
           <div style={centerOverlay}>
             <Loader2 size={36} style={{ animation: "spin360 .7s linear infinite", marginBottom: 12 }} />
@@ -280,26 +317,33 @@ export default function VideoCallPanel({ appointmentId, userId, peerId, role, on
         {callStatus === "connecting" && (
           <div style={centerOverlay}>
             <Loader2 size={28} style={{ animation: "spin360 .7s linear infinite" }} />
+            <p style={{ fontSize: 13, margin: "8px 0 0", color: "rgba(255,255,255,.7)" }}>Connecting…</p>
           </div>
         )}
 
-        {/* Local video picture-in-picture */}
+        {/* Local PiP */}
         <video
           ref={localVideoRef}
-          autoPlay
-          muted
-          playsInline
+          autoPlay muted playsInline
           style={{ position: "absolute", bottom: 12, right: 12, width: 160, height: 90, objectFit: "cover", borderRadius: 10, border: "2px solid rgba(255,255,255,.22)", background: "#222" }}
         />
       </div>
 
-      {/* ── Status badge ────────────────────────────────────────────────────── */}
+      {/* Status */}
       <p style={{ margin: "10px 0 0", fontSize: 13, fontWeight: 700, color: callStatus === "active" ? "#22c55e" : "#94a3b8" }}>
         {callStatus === "active" ? "● Connected" : callStatus === "waiting" ? "● Waiting for patient…" : "● Connecting…"}
       </p>
-      {error && <p style={{ color: "#f87171", fontSize: 13, margin: "4px 0 0", textAlign: "center", maxWidth: 400 }}>{error}</p>}
 
-      {/* ── Controls ────────────────────────────────────────────────────────── */}
+      {error && (
+        <div style={{ marginTop: 8, padding: "10px 16px", borderRadius: 10, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.4)", maxWidth: 460, textAlign: "center" }}>
+          <p style={{ color: "#f87171", fontSize: 13, margin: 0 }}>{error}</p>
+          <button onClick={() => onEnd?.()} style={{ marginTop: 8, padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(239,68,68,.5)", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+            Close
+          </button>
+        </div>
+      )}
+
+      {/* Controls */}
       <div style={{ display: "flex", gap: 16, marginTop: 16 }}>
         <button onClick={toggleMute} title={muted ? "Unmute" : "Mute"} style={btn(muted, "#f59e0b")}>
           {muted ? <MicOff size={20} /> : <Mic size={20} />}
@@ -324,7 +368,7 @@ const overlayStyle = {
 const centerOverlay = {
   position: "absolute", inset: 0,
   display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-  color: "#fff", gap: 8,
+  color: "#fff", gap: 4,
 };
 
 function btn(active, activeColor, isEnd = false) {
