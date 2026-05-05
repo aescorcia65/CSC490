@@ -146,6 +146,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const [bookBusy, setBookBusy] = useState(false);
   const [bookErr, setBookErr] = useState("");
   const [bookNotice, setBookNotice] = useState("");
+  /** Toast shown when the doctor books/updates an appointment on the patient's behalf. */
+  const [apptToast, setApptToast] = useState(null);
   const [videoActionBusyId, setVideoActionBusyId] = useState(null);
   /** Bumps every 1s so visit-window UI (check-in, join) stays in sync with real time. */
   const [, setVideoUiTick] = useState(0);
@@ -154,6 +156,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => localDateKey());
   const [expandedRequestId, setExpandedRequestId] = useState(null);
   const autoExpandRescheduleRef = useRef(false);
+  /** Set to true after the initial appointments load — prevents the realtime INSERT handler
+   *  from firing a toast for rows that arrive during the first fetch. */
+  const initialLoadDoneRef = useRef(false);
+  /** Tracks appointment IDs the patient just booked themselves, so the realtime echo
+   *  does not double-show a toast for their own booking. */
+  const selfBookedIdsRef = useRef(new Set());
   /** Debounced full refetch so realtime + doctor-created rows always match Supabase (partial payloads). */
   const appointmentsRefreshTimerRef = useRef(null);
 
@@ -252,7 +260,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         setPatientProfile(prof || null);
       });
     reloadLinkedDoctors();
-    refresh().finally(() => setLoading(false));
+    initialLoadDoneRef.current = false;
+    refresh().finally(() => {
+      setLoading(false);
+      // Allow a short grace window before treating incoming INSERTs as doctor-booked toasts.
+      setTimeout(() => { initialLoadDoneRef.current = true; }, 600);
+    });
 
     const scheduleAppointmentsFetch = () => {
       if (appointmentsRefreshTimerRef.current != null) {
@@ -273,6 +286,13 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             if (prev.some((a) => a.id === row.id)) return prev;
             return [...prev, row].sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
           });
+          // Show a toast only when: initial load is done AND the patient didn't book this themselves.
+          if (initialLoadDoneRef.current && !selfBookedIdsRef.current.has(row.id)) {
+            const dateStr = row.date ? new Date(row.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+            const timeStr = row.time ? format12hFromTime(row.time) : "";
+            const label = [dateStr, timeStr].filter(Boolean).join(" at ");
+            setApptToast(label ? `New appointment scheduled: ${label}` : "Your doctor has scheduled a new appointment for you.");
+          }
           scheduleAppointmentsFetch();
           return;
         }
@@ -705,6 +725,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   }, [bookNotice]);
 
   useEffect(() => {
+    if (!apptToast) return;
+    const t = setTimeout(() => setApptToast(null), 8000);
+    return () => clearTimeout(t);
+  }, [apptToast]);
+
+  useEffect(() => {
     if (loading || autoExpandRescheduleRef.current || tab !== TAB.UPCOMING) return;
     const first = upcomingConfirmed[0];
     if (!first) return;
@@ -911,6 +937,9 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     setBookSelected(null);
     setBookVisitMode("in_person");
     if (createdAppt) {
+      // Mark this ID so the realtime echo doesn't re-show a "doctor booked" toast.
+      selfBookedIdsRef.current.add(createdAppt.id);
+      setTimeout(() => selfBookedIdsRef.current.delete(createdAppt.id), 10000);
       setAllAppts((prev) => (prev.some((a) => a.id === createdAppt.id) ? prev : [...prev, createdAppt]));
     }
     setBookNotice(`Successfully booked for ${apptLabel}.`);
@@ -2014,6 +2043,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             {bookNotice}
           </div>
         ) : null}
+        {apptToast ? (
+          <div style={{ marginBottom: 12, borderRadius: 10, padding: "10px 14px", background: "rgba(37,99,235,.1)", border: "1px solid rgba(37,99,235,.3)", color: "var(--pl)", fontSize: 13, fontWeight: 600, fontFamily: font, display: "flex", alignItems: "center", gap: 8 }}>
+            <Calendar size={15} style={{ flexShrink: 0 }} />
+            {apptToast}
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", gap: isMob ? 0 : 28, alignItems: "flex-start", flexDirection: isMob ? "column" : "row" }}>
           <main style={{ flex: 1, minWidth: 0 }}>
@@ -2203,6 +2238,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       {bookNotice ? (
         <div style={{ position: "fixed", top: "calc(12px + env(safe-area-inset-top,0px))", right: 12, zIndex: 200, borderRadius: 10, padding: "10px 12px", background: "rgba(16,185,129,.94)", color: "#fff", fontSize: 13, fontWeight: 700, boxShadow: "0 8px 20px rgba(6,95,70,.28)", maxWidth: isMob ? "92vw" : 420 }}>
           {bookNotice}
+        </div>
+      ) : null}
+      {apptToast ? (
+        <div style={{ position: "fixed", top: "calc(56px + env(safe-area-inset-top,0px))", right: 12, zIndex: 200, borderRadius: 10, padding: "10px 14px", background: "rgba(37,99,235,.94)", color: "#fff", fontSize: 13, fontWeight: 700, boxShadow: "0 8px 20px rgba(37,99,235,.28)", maxWidth: isMob ? "92vw" : 420, display: "flex", alignItems: "center", gap: 8 }}>
+          <Calendar size={14} style={{ flexShrink: 0 }} />
+          {apptToast}
         </div>
       ) : null}
 
