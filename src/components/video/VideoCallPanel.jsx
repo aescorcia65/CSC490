@@ -80,7 +80,7 @@ export default function VideoCallPanel({ appointmentId, userId, role, onEnd }) {
       await Promise.all([
         supabase
           .from("appointments")
-          .update({ virtual_visit_status: "call_ended", updated_at: new Date().toISOString() })
+          .update({ virtual_visit_status: "call_ended" })
           .eq("id", appointmentId),
         supabase.from("video_signals").insert({
           appointment_id: appointmentId,
@@ -204,10 +204,15 @@ export default function VideoCallPanel({ appointmentId, userId, role, onEnd }) {
         await pc.setLocalDescription(offer);
 
         // Mark appointment as call_started so patient sees "Join Call"
-        await supabase
+        const { error: apptErr } = await supabase
           .from("appointments")
-          .update({ virtual_visit_status: "call_started", updated_at: new Date().toISOString() })
+          .update({ virtual_visit_status: "call_started" })
           .eq("id", appointmentId);
+        if (apptErr) {
+          console.error("Failed to set call_started:", apptErr.message);
+          if (mounted) setError(`Could not start call: ${apptErr.message}`);
+          return;
+        }
 
         // Insert offer (this will throw a clear error if the SQL table wasn't created)
         await insertSignal("offer", { sdp: offer });
