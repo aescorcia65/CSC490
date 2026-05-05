@@ -37,7 +37,7 @@ const BORDER = "var(--b1)";
 const SHADOW = "var(--shadow-card)";
 const SHADOW_LG = "var(--shadow-card-hover)";
 
-const TAB = { UPCOMING: "upcoming", PAST: "past", CANCELLED: "cancelled", REQUESTS: "requests" };
+const TAB = { UPCOMING: "upcoming", VIRTUAL: "virtual", IN_PERSON: "in_person", PAST: "past", CANCELLED: "cancelled", REQUESTS: "requests" };
 
 /** @deprecated use normalizeRescheduleRequest — kept for a few call sites expecting { date, time } */
 function parseRescheduleRequest(raw) {
@@ -565,7 +565,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     [doctorTakenSlots],
   );
 
-  const { upcomingConfirmed, pastList, cancelledList, requestList, counts } = useMemo(() => {
+  const { upcomingConfirmed, virtualList, inPersonList, pastList, cancelledList, requestList, counts } = useMemo(() => {
     const upcomingConfirmed = [];
     const pastList = [];
     const cancelledList = [];
@@ -601,15 +601,22 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     cancelledList.sort((x, y) => apptSortKey(y).localeCompare(apptSortKey(x)));
     requestList.sort((x, y) => apptSortKey(x).localeCompare(apptSortKey(y)));
 
+    const virtualList = upcomingConfirmed.filter((a) => isVideoStyleVisitType(a));
+    const inPersonList = upcomingConfirmed.filter((a) => !isVideoStyleVisitType(a));
+
     const pendingVisitReq = videoVisitRequests.filter((r) => String(r?.status || "") === "pending").length;
 
     return {
       upcomingConfirmed,
+      virtualList,
+      inPersonList,
       pastList,
       cancelledList,
       requestList,
       counts: {
         upcoming: upcomingConfirmed.length,
+        virtual: virtualList.length,
+        inPerson: inPersonList.length,
         pending: requestList.length + pendingVisitReq,
         cancelled: cancelledList.length,
       },
@@ -1025,6 +1032,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     <div style={{ display: "flex", alignItems: "center", gap: 0, borderBottom: `1px solid ${BORDER}`, marginBottom: 20, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       {[
         { id: TAB.UPCOMING, label: "Upcoming" },
+        { id: TAB.VIRTUAL, label: "Virtual" },
+        { id: TAB.IN_PERSON, label: "In-person" },
         { id: TAB.PAST, label: "Past" },
         { id: TAB.CANCELLED, label: "Cancelled" },
         { id: TAB.REQUESTS, label: "Requests", badge: counts.pending },
@@ -2087,6 +2096,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                   </>
                 )}
 
+                {tab === TAB.VIRTUAL && listCard("Virtual appointments", virtualList, "No upcoming virtual appointments.")}
+                {tab === TAB.IN_PERSON && listCard("In-person appointments", inPersonList, "No upcoming in-person appointments.")}
                 {tab === TAB.PAST && listCard("Past appointments", pastList, "No past appointments yet.")}
                 {tab === TAB.CANCELLED && listCard("Cancelled appointments", cancelledList, "No cancelled appointments.")}
                 {tab === TAB.REQUESTS && (
