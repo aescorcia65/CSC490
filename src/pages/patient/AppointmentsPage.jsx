@@ -23,6 +23,7 @@ import { careTeamDoctorEntries } from "../../lib/careTeam";
 import { buildVideoCallUrlFromRoom, buildVideoRoomId, getAppointmentVideoWindow, isVideoStyleVisitType } from "../../lib/videoCall";
 import { buildPatientRescheduleRequestPayload, hasActiveRescheduleRequest, normalizeRescheduleRequest } from "../../lib/rescheduleRequest";
 import VirtualPreVisitModal from "../../components/appointments/VirtualPreVisitModal";
+import VideoCallPanel from "../../components/video/VideoCallPanel";
 import { isVirtualVisitCheckInComplete, patientEnterVirtualWaitingRoom } from "../../lib/virtualVisitCheckIn";
 import { getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
 
@@ -149,6 +150,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   /** Toast shown when the doctor books/updates an appointment on the patient's behalf. */
   const [apptToast, setApptToast] = useState(null);
   const [videoActionBusyId, setVideoActionBusyId] = useState(null);
+  const [activeCallApptId, setActiveCallApptId] = useState(null);
+  const [activeCallDoctorId, setActiveCallDoctorId] = useState(null);
   /** Bumps every 1s so visit-window UI (check-in, join) stays in sync with real time. */
   const [, setVideoUiTick] = useState(0);
 
@@ -1230,6 +1233,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const videoUrl = videoRoomId ? buildVideoCallUrlFromRoom(videoRoomId) : "";
     const waitingKey = videoWindow ? `${appt.id}:${videoWindow.windowStartMs}` : "";
     const evs = getEffectiveVirtualVisitStatus(appt);
+    const isCallStarted = evs === VS.CALL_STARTED;  // WebRTC: doctor opened call
+    const isCallEnded = evs === VS.CALL_ENDED;       // WebRTC: call finished
     const isInWaitingRoom = evs === VS.WAITING_FOR_DOCTOR || evs === VS.VIDEO_STARTED;
     const isDoctorVideoStartedDb = evs === VS.VIDEO_STARTED;
     const isStarted = isDoctorVideoStartedDb;
@@ -1439,7 +1444,36 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           </div>
 
           <div style={{ display: "flex", flexDirection: isMob ? "row" : "column", gap: 10, flexShrink: 0, width: isMob ? "100%" : 132, justifyContent: "flex-start" }}>
-            {videoWindow && showPrimaryVideoBtn ? (
+            {/* WebRTC Join Call button — shown when doctor has opened the call */}
+            {isCallStarted ? (
+              <button
+                type="button"
+                onClick={() => { setActiveCallApptId(appt.id); setActiveCallDoctorId(appt.doctor_id); }}
+                style={{
+                  flex: 1,
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  border: "none",
+                  background: "#059669",
+                  color: "#fff",
+                  fontFamily: font,
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  boxShadow: "0 0 0 3px rgba(5,150,105,.25)",
+                }}
+              >
+                <Video size={14} /> Join Call
+              </button>
+            ) : isCallEnded ? (
+              <div style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `1px solid ${BORDER}`, background: "var(--s2)", fontFamily: font, fontSize: 13, fontWeight: 600, color: "var(--b1, #94a3b8)", textAlign: "center" }}>
+                Call ended
+              </div>
+            ) : videoWindow && showPrimaryVideoBtn ? (
               <button
                 type="button"
                 onClick={handleVirtualVisitClick}
@@ -1484,25 +1518,6 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                 }}
               >
                 <span>{waitingForDoctorLocked ? "Checked in. Waiting for doctor to start the video." : "Your doctor has joined. Join video chat."}</span>
-                {!waitingForDoctorLocked && videoState === "doctor_started" ? (
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab?.("messages")}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 8,
-                      border: `2px solid ${PRIMARY}`,
-                      background: SURFACE,
-                      color: PRIMARY,
-                      fontFamily: font,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Open Messages to join
-                  </button>
-                ) : null}
               </div>
             ) : null}
             <button
@@ -2405,6 +2420,23 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
               }
         }
       />
+      {/* WebRTC video call overlay */}
+      {activeCallApptId && (
+        <VideoCallPanel
+          appointmentId={activeCallApptId}
+          userId={userId}
+          peerId={activeCallDoctorId}
+          role="patient"
+          onEnd={() => {
+            setActiveCallApptId(null);
+            setActiveCallDoctorId(null);
+            // Update local appointment state so the button shows "Call ended"
+            setAllAppts((prev) =>
+              prev.map((a) => a.id === activeCallApptId ? { ...a, virtual_visit_status: "call_ended" } : a)
+            );
+          }}
+        />
+      )}
     </div>
   );
 }

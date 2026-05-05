@@ -25,6 +25,7 @@ import { usePresenceOnlineMap } from "../../hooks/usePresenceOnlineMap";
 import { doctorRequestCheckInRefill, downloadVirtualVisitCheckInPdf, doctorClearPatientVirtualVisitCheckIn } from "../../lib/virtualVisitCheckIn";
 import { findVirtualAppointmentForDoctorVideoStart, findVirtualAppointmentForDoctorVideoEnd, getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
 import DoctorVirtualCheckInReadout from "../../components/appointments/DoctorVirtualCheckInReadout";
+import VideoCallPanel from "../../components/video/VideoCallPanel";
 import ErrBanner from "../../components/common/ErrBanner";
 import OkBanner from "../../components/common/OkBanner";
 import NicknameModal from "../../components/modals/NicknameModal";
@@ -159,6 +160,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [videoApprovalBusy,setVideoApprovalBusy]=useState(false);
   const [videoStartTargetId,setVideoStartTargetId]=useState(null);
   const [videoEndBusy,setVideoEndBusy]=useState(false);
+  const [activeCallApptId,setActiveCallApptId]=useState(null);
+  const [activeCallPeerId,setActiveCallPeerId]=useState(null);
   const [videoNowMs,setVideoNowMs]=useState(()=>Date.now());
   const [videoEventRows,setVideoEventRows]=useState([]);
   const [unreadCount,setUnreadCount]=useState(0);
@@ -2835,26 +2838,13 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                               </p>
                               <button
                                 type="button"
-                                onClick={()=>void startVideoVisitForPatient({patientId:w.patientId,windowStartMs:w.windowStartMs,windowEndMs:w.windowEndMs})}
-                                disabled={videoApprovalBusy&&(videoStartTargetId===w.patientId)}
-                                style={{
-                                  padding:"7px 10px",
-                                  borderRadius:9,
-                                  border:"none",
-                                  background:DocAC,
-                                  color:"#fff",
-                                  cursor:(videoApprovalBusy&&(videoStartTargetId===w.patientId))?"wait":"pointer",
-                                  fontFamily:"inherit",
-                                  fontSize:11,
-                                  fontWeight:700,
-                                  display:"inline-flex",
-                                  alignItems:"center",
-                                  gap:5,
-                                  opacity:(videoApprovalBusy&&(videoStartTargetId===w.patientId))?0.75:1,
+                                onClick={()=>{
+                                  const wAppt=virtualAppointments.find(r=>r.appt.patient_id===w.patientId);
+                                  if(wAppt){setActiveCallApptId(wAppt.appt.id);setActiveCallPeerId(w.patientId);}
                                 }}
+                                style={{padding:"7px 10px",borderRadius:9,border:"none",background:DocAC,color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:700,display:"inline-flex",alignItems:"center",gap:5}}
                               >
-                                {videoApprovalBusy&&(videoStartTargetId===w.patientId)?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={13}/>}
-                                {(videoApprovalBusy&&(videoStartTargetId===w.patientId))?"Starting...":"Start video"}
+                                <Video size={13}/> Start Call
                               </button>
                               <button
                                 type="button"
@@ -2934,12 +2924,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:isMob?"stretch":"flex-end",alignItems:"center",width:isMob?"100%":"auto"}}>
                             <button
                               type="button"
-                              onClick={()=>void startVideoVisitForPatient({patientId:appt.patient_id,windowStartMs:window.windowStartMs,windowEndMs:window.windowEndMs})}
-                              disabled={!canStart}
-                              style={{padding:"9px 12px",borderRadius:10,border:"none",background:canStart?DocAC:"var(--b1)",color:"#fff",cursor:canStart?"pointer":"not-allowed",fontFamily:"inherit",fontSize:12,fontWeight:700,minWidth:isMob?"100%":0,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,opacity:videoApprovalBusy&&videoStartTargetId===appt.patient_id?0.75:1}}
+                              onClick={()=>{setActiveCallApptId(appt.id);setActiveCallPeerId(appt.patient_id);}}
+                              style={{padding:"9px 12px",borderRadius:10,border:"none",background:DocAC,color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700,minWidth:isMob?"100%":0,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}
                             >
-                              {videoApprovalBusy&&videoStartTargetId===appt.patient_id?<Loader2 size={14} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={14}/>}
-                              {videoApprovalBusy&&videoStartTargetId===appt.patient_id?"Starting...":"Start video"}
+                              <Video size={14}/> Start Call
                             </button>
                             <button
                               type="button"
@@ -3383,6 +3371,21 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         )}
         {showPrescribe&&selPat&&(<PrescribeModal patient={selPat} patientProfile={patProfile} doctor={user} onClose={()=>setShowPrescribe(false)} onSuccess={()=>setShowPrescribe(false)}/>)}
       </AnimatePresence>
+      {/* WebRTC video call overlay */}
+      {activeCallApptId&&(
+        <VideoCallPanel
+          appointmentId={activeCallApptId}
+          userId={user.id}
+          peerId={activeCallPeerId}
+          role="doctor"
+          onEnd={()=>{
+            setActiveCallApptId(null);
+            setActiveCallPeerId(null);
+            setAllAppointments(prev=>prev.map(a=>a.id===activeCallApptId?{...a,virtual_visit_status:"call_ended"}:a));
+            setAppointments(prev=>prev.map(a=>a.id===activeCallApptId?{...a,virtual_visit_status:"call_ended"}:a));
+          }}
+        />
+      )}
       <AnimatePresence>{showNickname&&<NicknameModal currentName={name} onSave={saveName} onClose={()=>setShowNickname(false)} userId={user?.id}/>}</AnimatePresence>
 
       {/* Notification panel */}
