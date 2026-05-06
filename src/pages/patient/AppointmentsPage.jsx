@@ -184,7 +184,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     if (!userId) return;
     const { data } = await supabase
       .from("appointments")
-      .select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status")
+      .select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status,checked_in_at")
       .eq("patient_id", userId)
       .order("date", { ascending: true });
     setAllAppts(data || []);
@@ -208,33 +208,31 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   }, [userId, refresh]);
 
   const performVirtualCheckIn = useCallback(
-    async (appt, videoWindow, videoRoomId, _waitingKey) => {
+    async (appt) => {
       if (!userId) throw new Error("You must be signed in to check in.");
       if (!appt?.doctor_id) throw new Error("This appointment is missing a doctor. Refresh and try again.");
-      if (!videoWindow) throw new Error("This is not a video visit or the time is invalid.");
-      if (!videoRoomId) throw new Error("Could not start check-in. Refresh the page and try again.");
       const st = String(appt.status || "");
-      if (st === "cancelled" || st === "completed") {
-        throw new Error("This appointment cannot be checked in.");
-      }
-      if (String(appt.date || "").slice(0, 10) < localDateKey()) {
-        throw new Error("Past appointments cannot be checked in.");
-      }
-      if (!isVideoStyleVisitType(appt)) {
-        throw new Error("Only video / virtual visits use online check-in.");
-      }
-      if (!isVirtualCheckInWindowOpen(appt, Date.now())) {
-        throw new Error("Check-in is only available during your visit window.");
-      }
+      if (st === "cancelled" || st === "completed") throw new Error("This appointment cannot be checked in.");
+      if (String(appt.date || "").slice(0, 10) < localDateKey()) throw new Error("Past appointments cannot be checked in.");
+      if (!isVideoStyleVisitType(appt)) throw new Error("Only virtual visits support check-in.");
       setVideoActionBusyId(appt.id);
       try {
-        const { error } = await patientEnterVirtualWaitingRoom({ userId, appt, videoWindow });
-        if (error) {
-          const msg = error.message || (typeof error === "string" ? error : "Could not complete check-in.");
-          throw new Error(msg);
-        }
+        const now = new Date().toISOString();
+        const { error } = await supabase
+          .from("appointments")
+          .update({ virtual_visit_status: VS.WAITING_FOR_DOCTOR, checked_in_at: now, updated_at: now })
+          .eq("id", appt.id);
+        if (error) throw new Error(error.message || "Could not complete check-in.");
+        // Notify doctor
+        await supabase.from("notifications").insert({
+          user_id: appt.doctor_id,
+          type: "general",
+          title: "Patient checked in",
+          body: "Patient has checked in and is waiting to be seen.",
+          related_id: appt.id,
+        }).catch(() => {});
         setAllAppts((prev) =>
-          prev.map((a) => (a.id === appt.id ? { ...a, virtual_visit_status: VS.WAITING_FOR_DOCTOR } : a)),
+          prev.map((a) => (a.id === appt.id ? { ...a, virtual_visit_status: VS.WAITING_FOR_DOCTOR, checked_in_at: now } : a)),
         );
       } finally {
         setVideoActionBusyId(null);
@@ -927,7 +925,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       status: "scheduled",
       ...(visitType === "Virtual Visit" ? { virtual_visit_status: VS.PENDING } : {}),
     };
-    const { data: createdAppt, error } = await supabase.from("appointments").insert(insertRow).select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status").single();
+    const { data: createdAppt, error } = await supabase.from("appointments").insert(insertRow).select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status,checked_in_at").single();
     setBookBusy(false);
     if (error) {
       setBookErr(error.message || "Could not book. Check your care team in Settings.");
@@ -1261,33 +1259,15 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           : isStarted
             ? "doctor_started"
             : "waiting";
-    const waitingForDoctorLocked = videoState === "waiting" && isCheckedIn && !isStarted;
+    const waitingForDoctorLocked = isCheckedIn && !isStarted;
     const needsPreVisitComplete = !!(videoWindow && !isVirtualVisitCheckInComplete(patientProfile));
+    // Show check-in button for all upcoming virtual appointments that aren't checked in yet
+    const isVirtualAppt = isVideoStyleVisitType(appt);
+    const showCheckInBtn = isVirtualAppt && !isCheckedIn && !isCallStarted && !isCallEnded && !needsPreVisitComplete;
+    const showPreVisitBtn = isVirtualAppt && needsPreVisitComplete && !isCheckedIn;
     const showPrimaryVideoBtn =
       !!videoWindow && videoState !== "doctor_started" && !waitingForDoctorLocked;
-    /** Pre-visit form only needs an appointment window + doctor — not Jitsi URL — so button stays clickable while profile loads. */
-    const virtualBtnDisabled =
-      !showPrimaryVideoBtn ||
-      (!needsPreVisitComplete && !videoUrl) ||
-      videoActionBusyId === appt.id ||
-      videoState === "expired" ||
-      (!needsPreVisitComplete && videoState === "too_early");
-
-    let virtualPrimaryLabel = "Video unavailable";
-    if (videoWindow) {
-      if (needsPreVisitComplete) {
-        virtualPrimaryLabel =
-          videoState === "too_early"
-            ? "Complete check-in (opens soon)"
-            : "Complete check-in";
-      } else if (videoState === "too_early") {
-        virtualPrimaryLabel = `Opens ${new Date(videoWindow.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
-      } else if (videoState === "expired") {
-        virtualPrimaryLabel = "Visit ended";
-      } else {
-        virtualPrimaryLabel = "Check in for visit.";
-      }
-    }
+    const virtualBtnDisabled = videoActionBusyId === appt.id;
 
     const doc = doctorProfiles[appt.doctor_id];
     const dname = doctorDisplayName(doc);
@@ -1322,7 +1302,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
       if (!isCheckedIn) {
         try {
-          await performVirtualCheckIn(appt, videoWindow, videoRoomId, waitingKey);
+          await performVirtualCheckIn(appt);
         } catch (e) {
           const msg = e?.message || e?.error_description || "Check-in failed. Please try again.";
           if (typeof window !== "undefined") window.alert(msg);
@@ -1486,52 +1466,29 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
               <div style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `1px solid ${BORDER}`, background: "var(--s2)", fontFamily: font, fontSize: 13, fontWeight: 600, color: "var(--b1, #94a3b8)", textAlign: "center" }}>
                 Call ended
               </div>
-            ) : videoWindow && showPrimaryVideoBtn ? (
+            ) : waitingForDoctorLocked ? (
+              // Checked in — waiting for doctor to start
+              <div style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: `1px solid #22c55e44`, background: "rgba(34,197,94,.07)", fontFamily: font, fontSize: 12.5, fontWeight: 600, color: "#16a34a", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                ✓ Checked in · Waiting for doctor
+              </div>
+            ) : showPreVisitBtn ? (
               <button
                 type="button"
                 onClick={handleVirtualVisitClick}
                 disabled={virtualBtnDisabled}
-                style={{
-                  flex: 1,
-                  padding: "10px 14px",
-                  borderRadius: 10,
-                  border: `2px solid ${PRIMARY}`,
-                  background: !virtualBtnDisabled ? PRIMARY : SURFACE,
-                  color: !virtualBtnDisabled ? "#fff" : PRIMARY,
-                  fontFamily: font,
-                  fontSize: 13,
-                  fontWeight: 600,
-                  cursor: !virtualBtnDisabled ? "pointer" : "not-allowed",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 6,
-                  opacity: videoActionBusyId === appt.id ? 0.7 : 1,
-                }}
+                style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `2px solid ${PRIMARY}`, background: SURFACE, color: PRIMARY, fontFamily: font, fontSize: 13, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: virtualBtnDisabled ? 0.7 : 1 }}
               >
-                <Video size={14} /> {videoActionBusyId === appt.id ? "Working..." : virtualPrimaryLabel}
+                <Video size={14} /> {virtualBtnDisabled ? "Working..." : "Complete pre-visit form"}
               </button>
-            ) : videoWindow ? (
-              <div
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: `1px solid ${BORDER}`,
-                  background: "var(--s1)",
-                  fontFamily: font,
-                  fontSize: 12.5,
-                  fontWeight: 600,
-                  color: TEXT,
-                  textAlign: "center",
-                  lineHeight: 1.4,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                }}
+            ) : showCheckInBtn ? (
+              <button
+                type="button"
+                onClick={() => { setVideoActionBusyId(appt.id); performVirtualCheckIn(appt).catch((e) => alert(e.message)).finally(() => setVideoActionBusyId(null)); }}
+                disabled={virtualBtnDisabled}
+                style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: "none", background: PRIMARY, color: "#fff", fontFamily: font, fontSize: 13, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: virtualBtnDisabled ? 0.7 : 1 }}
               >
-                <span>{waitingForDoctorLocked ? "Checked in. Waiting for doctor to start the video." : "Your doctor has joined. Join video chat."}</span>
-              </div>
+                <Video size={14} /> {virtualBtnDisabled ? "Checking in..." : "Check In"}
+              </button>
             ) : null}
             <button
               type="button"

@@ -413,7 +413,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       try{
         const[dpData,apptData,pharmData]=await Promise.all([
           supabase.from("doctor_patients").select("patient_id, profiles!doctor_patients_patient_id_fkey(id,first_name,last_name,email,dob,blood_type,allergies,medical_conditions)").eq("doctor_id",user.id),
-          supabase.from("appointments").select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status").eq("doctor_id",user.id).neq("status","cancelled").order("date",{ascending:true}),
+          supabase.from("appointments").select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status,checked_in_at").eq("doctor_id",user.id).neq("status","cancelled").order("date",{ascending:true}),
           supabase.from("profiles").select("id,first_name,last_name,email,pharmacy_name").eq("role","pharmacist"),
         ]);
         const pRows=(dpData.data||[]).map(r=>r.profiles).filter(Boolean);
@@ -1473,7 +1473,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       }
       const { data: allA } = await supabase
         .from("appointments")
-        .select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status")
+        .select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status,checked_in_at")
         .eq("doctor_id", user.id)
         .neq("status", "cancelled")
         .order("date", { ascending: true });
@@ -2025,7 +2025,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         const pe=row.window.portalEndMs ?? row.window.windowEndMs;
         return videoNowMs<=pe;
       })
-      .sort((x,y)=>x.window.startMs-y.window.startMs);
+      .sort((x,y)=>{
+        // Checked-in patients float to the top
+        const xEvs=getEffectiveVirtualVisitStatus(x.appt);
+        const yEvs=getEffectiveVirtualVisitStatus(y.appt);
+        const xChecked=xEvs===VS.WAITING_FOR_DOCTOR||xEvs===VS.CHECKED_IN?0:1;
+        const yChecked=yEvs===VS.WAITING_FOR_DOCTOR||yEvs===VS.CHECKED_IN?0:1;
+        if(xChecked!==yChecked) return xChecked-yChecked;
+        return x.window.startMs-y.window.startMs;
+      });
   },[allAppointments,videoNowMs]);
   const inPersonAppointments=useMemo(()=>{
     const todayDate=new Date().toISOString().slice(0,10);
@@ -2059,17 +2067,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     });
     const haveKey=new Set(list.map(w=>`${w.patientId}|${w.windowStartMs}|${w.windowEndMs}`));
     (virtualAppointments||[]).forEach(({appt,window})=>{
-      if(getEffectiveVirtualVisitStatus(appt)!==VS.WAITING_FOR_DOCTOR) return;
+      const evs=getEffectiveVirtualVisitStatus(appt);
+      if(evs!==VS.WAITING_FOR_DOCTOR && evs!==VS.CHECKED_IN) return;
       const k=`${appt.patient_id}|${window.windowStartMs}|${window.windowEndMs}`;
       if(haveKey.has(k)) return;
-      const portalEndMs=window.windowEndMs + VIDEO_VISIT_PORTAL_TAIL_MS;
-      if(videoNowMs > portalEndMs) return;
       haveKey.add(k);
       list.push({
         patientId:appt.patient_id,
         windowStartMs:window.windowStartMs,
         windowEndMs:window.windowEndMs,
-        checkedInAt:appt.updated_at || new Date().toISOString(),
+        checkedInAt:appt.checked_in_at || appt.updated_at || new Date().toISOString(),
       });
     });
     const byPatient={};
@@ -2902,37 +2909,47 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         const inNominalWindow=videoNowMs>=window.windowStartMs&&videoNowMs<=window.windowEndMs;
                         const lateReconnect=inPortal&&!beforeNominalStart&&!inNominalWindow;
                         const evs=getEffectiveVirtualVisitStatus(appt);
-                        const checkedInReady=!!checkedInRow||evs===VS.WAITING_FOR_DOCTOR;
+                        const checkedInReady=!!checkedInRow||evs===VS.WAITING_FOR_DOCTOR||evs===VS.CHECKED_IN;
+                        const checkedInTime=appt.checked_in_at||(checkedInRow?.checkedInAt)||appt.updated_at;
                         const statusText=beforeNominalStart
                           ?(inDoctorVideoWindow&&checkedInReady
-                              ?"Early start — you can start video up to 30 min before the visit time."
+                              ?"Patient checked in — you can start the call."
                               :`Opens in ${opensIn} min`)
                           :lateReconnect
                             ?"Reconnect window · you can still start video"
                           :inVisit
                             ?"In visit"
                             :checkedInReady
-                              ?"Patient waiting."
-                              :"Ready to start";
-                        const canStart=inDoctorVideoWindow&&inVisit===false&&!videoApprovalBusy&&checkedInReady;
+                              ?"Patient checked in — ready."
+                              :"Waiting for patient to check in.";
+                        const canStart=inVisit===false&&checkedInReady;
                         return (
-                          <div key={appt.id} style={{padding:isMob?"10px 10px":"12px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",display:"flex",alignItems:isMob?"flex-start":"center",justifyContent:"space-between",gap:10,flexDirection:isMob?"column":"row"}}>
+                          <div key={appt.id} style={{padding:isMob?"10px 10px":"12px 12px",borderRadius:12,border:`1px solid ${checkedInReady?"#22c55e55":b1}`,background:checkedInReady?"rgba(34,197,94,.04)":"var(--s2)",display:"flex",alignItems:isMob?"flex-start":"center",justifyContent:"space-between",gap:10,flexDirection:isMob?"column":"row"}}>
                             <div style={{minWidth:0,flex:1}}>
-                              <p className="truncate" style={{margin:0,color:t1,fontSize:13,fontWeight:700}}>{patientName}</p>
+                              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                                <p className="truncate" style={{margin:0,color:t1,fontSize:13,fontWeight:700}}>{patientName}</p>
+                                {checkedInReady&&<span style={{padding:"2px 8px",borderRadius:20,background:"rgba(34,197,94,.15)",color:"#16a34a",fontSize:10,fontWeight:700}}>✓ Checked In</span>}
+                              </div>
                               <p className="truncate" style={{margin:"4px 0 0",color:t3,fontSize:12}}>{visitLabel}</p>
-                              <p style={{margin:"5px 0 0",color:(beforeNominalStart&&inDoctorVideoWindow||(inNominalWindow&&!beforeNominalStart)||lateReconnect)?"var(--gr)":t3,fontSize:11.5,fontWeight:600}}>{statusText}</p>
-                              {checkedInRow&&inVisit===false&&(
-                                <p style={{margin:"3px 0 0",color:DocAC,fontSize:11,fontWeight:700}}>Checked in at {new Date(checkedInRow.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</p>
+                              <p style={{margin:"5px 0 0",color:checkedInReady?"#16a34a":t3,fontSize:11.5,fontWeight:600}}>{statusText}</p>
+                              {checkedInReady&&checkedInTime&&inVisit===false&&(
+                                <p style={{margin:"3px 0 0",color:DocAC,fontSize:11,fontWeight:700}}>Checked in at {new Date(checkedInTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</p>
                               )}
                             </div>
                             <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:isMob?"stretch":"flex-end",alignItems:"center",width:isMob?"100%":"auto"}}>
+                            {canStart?(
                             <button
                               type="button"
                               onClick={()=>{setActiveCallApptId(appt.id);setActiveCallPeerId(appt.patient_id);}}
-                              style={{padding:"9px 12px",borderRadius:10,border:"none",background:DocAC,color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700,minWidth:isMob?"100%":0,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}
+                              style={{padding:"9px 12px",borderRadius:10,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700,minWidth:isMob?"100%":0,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}
                             >
                               <Video size={14}/> Start Call
                             </button>
+                            ):(
+                            <div style={{padding:"9px 12px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",color:t3,fontFamily:"inherit",fontSize:11,fontWeight:600,display:"inline-flex",alignItems:"center",gap:5}}>
+                              Waiting for check-in
+                            </div>
+                            )}
                             <button
                               type="button"
                               onClick={async()=>{
