@@ -41,7 +41,6 @@ export async function patientEnterVirtualWaitingRoom({ userId, appt, videoWindow
     .update({
       virtual_visit_status: VS.WAITING_FOR_DOCTOR,
       checked_in_at: now,
-      updated_at: now,
     })
     .eq("id", appt.id);
 

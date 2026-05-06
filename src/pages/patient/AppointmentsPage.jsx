@@ -220,17 +220,19 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         const now = new Date().toISOString();
         const { error } = await supabase
           .from("appointments")
-          .update({ virtual_visit_status: VS.WAITING_FOR_DOCTOR, checked_in_at: now, updated_at: now })
+          .update({ virtual_visit_status: VS.WAITING_FOR_DOCTOR, checked_in_at: now })
           .eq("id", appt.id);
         if (error) throw new Error(error.message || "Could not complete check-in.");
-        // Notify doctor
-        await supabase.from("notifications").insert({
-          user_id: appt.doctor_id,
-          type: "general",
-          title: "Patient checked in",
-          body: "Patient has checked in and is waiting to be seen.",
-          related_id: appt.id,
-        }).catch(() => {});
+        // Notify doctor (best-effort)
+        try {
+          await supabase.from("notifications").insert({
+            user_id: appt.doctor_id,
+            type: "general",
+            title: "Patient checked in",
+            body: "Patient has checked in and is waiting to be seen.",
+            related_id: appt.id,
+          });
+        } catch (_) {}
         setAllAppts((prev) =>
           prev.map((a) => (a.id === appt.id ? { ...a, virtual_visit_status: VS.WAITING_FOR_DOCTOR, checked_in_at: now } : a)),
         );
