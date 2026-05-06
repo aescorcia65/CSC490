@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Send, Loader2, Check, CheckCheck, Stethoscope, Pill, ArrowRight, Paperclip, FileText, UserRound, ShieldCheck, SquarePen, ArrowLeft, Bell, BellOff, Volume1, Volume2, Video } from "lucide-react";
+import { Send, Loader2, Check, CheckCheck, Stethoscope, Pill, ArrowRight, Paperclip, FileText, UserRound, ShieldCheck, SquarePen, ArrowLeft, Bell, BellOff, Volume1, Volume2, Video, Trash2 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { careTeamDoctorEntries } from "../../lib/careTeam";
@@ -19,11 +19,12 @@ import {
   buildVideoCallUrlFromRoom,
   buildVideoRoomId,
   getAppointmentVideoWindow,
+  isVideoProtocolBody,
   parseVideoApprovalMessageBody,
 } from "../../lib/videoCall";
 import VirtualPreVisitModal from "../../components/appointments/VirtualPreVisitModal";
 import { isVirtualVisitCheckInComplete, patientEnterVirtualWaitingRoom } from "../../lib/virtualVisitCheckIn";
-import { formatProfileFullName } from "../../lib/profileName";
+import { buildPatientDoctorThreadItems, joinUrlForVideoCard } from "../../lib/patientDoctorThreadItems";
 import { getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
 import { useAuth } from "../../contexts/AuthContext";
 
@@ -272,6 +273,8 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
   const [threadMetaTick, setThreadMetaTick] = useState(0);
   const [showSoundSettings, setShowSoundSettings] = useState(false);
   const [ptSound, setPtSound] = useState(() => loadPatientMessagingSoundSettings());
+  const [clearConfirm, setClearConfirm] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
   const [videoNowMs, setVideoNowMs] = useState(() => Date.now());
   const [videoDoctorAppointments, setVideoDoctorAppointments] = useState([]);
   const [patientProfile, setPatientProfile] = useState(null);
@@ -316,6 +319,12 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       : [];
     return [...docs, ...pharm];
   }, [doctors, pharmacist]);
+  const threadItems = useMemo(() => {
+    if (peerTab !== "doctor" || !activePeer?.id || !userId) {
+      return (messages || []).map((m) => ({ type: "message", msg: m }));
+    }
+    return buildPatientDoctorThreadItems(messages, userId, activePeer.id);
+  }, [messages, peerTab, activePeer?.id, userId]);
   const latestDoctorVideoApproval = useMemo(() => {
     if (peerTab !== "doctor" || !activePeer?.id) return null;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -737,9 +746,14 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       if (!row) return;
       if (row.sender_id !== userId && row.recipient_id !== userId) return;
       if (row.recipient_id === userId && row.sender_id !== userId) {
-        const st = loadPatientMessagingSoundSettings();
-        if (st.enabled) void playPatientInboundChimeDeduped(row.id, st.preset, st.volume);
-        announceIncomingMessageAlert(row);
+        // Auto-mark video/system protocol messages as read — they are sync events, not real chat messages
+        if (isVideoProtocolBody(row.body)) {
+          supabase.from("patient_messages").update({ read_at: new Date().toISOString() }).eq("id", row.id).then(() => {});
+        } else {
+          const st = loadPatientMessagingSoundSettings();
+          if (st.enabled) void playPatientInboundChimeDeduped(row.id, st.preset, st.volume);
+          announceIncomingMessageAlert(row);
+        }
         announceDoctorVideoStarted(row);
         const parsed = parseVideoApprovalMessageBody(row.body || "");
         if (parsed && (parsed.eventType === "started" || parsed.eventType === "ended")) {
@@ -824,9 +838,10 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       const [{ data: unreadRows, error: unreadErr }, ...latestResults] = await Promise.all([
         supabase
           .from("patient_messages")
-          .select("id, sender_id")
+          .select("id, sender_id, body")
           .eq("recipient_id", userId)
-          .is("read_at", null),
+          .is("read_at", null)
+          .not("body", "ilike", "VIDEO_%"),
         ...conversationItems.map((peer) => {
           const q = `and(sender_id.eq.${userId},recipient_id.eq.${peer.id}),and(sender_id.eq.${peer.id},recipient_id.eq.${userId})`;
           return supabase
@@ -841,6 +856,8 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       if (unreadErr) console.error("[PatientMessages] unread query failed:", unreadErr.message);
       const unreadBySender = {};
       (unreadRows || []).forEach((r) => {
+        // Double-guard: skip any video/system protocol messages
+        if (isVideoProtocolBody(r.body)) return;
         unreadBySender[r.sender_id] = (unreadBySender[r.sender_id] || 0) + 1;
       });
       const entries = conversationItems.map((peer, i) => {
@@ -996,6 +1013,35 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     }
   }
 
+  async function clearAllMessages() {
+    if (!userId || clearBusy) return;
+    setClearBusy(true);
+    try {
+      // Use a SECURITY DEFINER RPC to bypass RLS — patients can't delete rows
+      // where they are the recipient using direct table access.
+      const { error } = await supabase.rpc("clear_patient_messages", { p_user_id: userId });
+      if (error) {
+        // RPC not deployed yet — fall back to direct deletes (works if RLS allows it)
+        console.warn("clear_patient_messages RPC failed, trying direct delete:", error.message);
+        const [r1, r2] = await Promise.all([
+          supabase.from("patient_messages").delete().eq("sender_id", userId),
+          supabase.from("patient_messages").delete().eq("recipient_id", userId),
+        ]);
+        if (r1.error) console.error("delete sender:", r1.error.message);
+        if (r2.error) console.error("delete recipient:", r2.error.message);
+      }
+      // Reset local state regardless
+      setMessages([]);
+      setThreadMeta({});
+      setThreadMetaTick((n) => n + 1);
+    } catch (e) {
+      console.error("clearAllMessages:", e);
+    } finally {
+      setClearBusy(false);
+      setClearConfirm(false);
+    }
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || !userId || !activePeer?.id || sending) return;
@@ -1026,7 +1072,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages.length, peerTyping]);
+  }, [threadItems.length, peerTyping]);
 
   if (bootLoading) {
     return (
@@ -1146,9 +1192,40 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
         <section style={{ width: isPhone ? "100%" : isTablet ? 296 : 336, minWidth: isPhone ? 0 : isTablet ? 280 : 320, border: panelBorder, borderRadius: 16, background: panelBg, boxShadow: panelShadow, display: "flex", flexDirection: "column", minHeight: isPhone ? 260 : 0 }}>
           <div style={{ padding: "12px 12px 8px", borderBottom: `1px solid ${b1}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
             <p style={{ color: t1, fontSize: 14, fontWeight: 700, margin: 0 }}>Conversations</p>
-            <button type="button" style={{ width: 26, height: 26, borderRadius: 8, border: panelBorder, background: "var(--s2)", color: "var(--p)", display: "grid", placeItems: "center", cursor: "not-allowed" }} disabled aria-label="New conversation">
-              <SquarePen size={13} />
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              {!clearConfirm ? (
+                <button
+                  type="button"
+                  title="Clear all messages"
+                  onClick={() => setClearConfirm(true)}
+                  style={{ width: 26, height: 26, borderRadius: 8, border: "1px solid rgba(220,38,38,.3)", background: "rgba(220,38,38,.07)", color: "#dc2626", display: "grid", placeItems: "center", cursor: "pointer" }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <span style={{ fontSize: 11, color: t3, whiteSpace: "nowrap" }}>Clear all?</span>
+                  <button
+                    type="button"
+                    onClick={clearAllMessages}
+                    disabled={clearBusy}
+                    style={{ padding: "2px 8px", borderRadius: 6, border: "none", background: "#dc2626", color: "#fff", fontSize: 11, fontWeight: 700, cursor: clearBusy ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 4 }}
+                  >
+                    {clearBusy ? <Loader2 size={10} style={{ animation: "spin360 .7s linear infinite" }} /> : "Yes"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setClearConfirm(false)}
+                    style={{ padding: "2px 8px", borderRadius: 6, border: `1px solid ${b1}`, background: "var(--s2)", color: t3, fontSize: 11, fontWeight: 600, cursor: "pointer" }}
+                  >
+                    No
+                  </button>
+                </div>
+              )}
+              <button type="button" style={{ width: 26, height: 26, borderRadius: 8, border: panelBorder, background: "var(--s2)", color: "var(--p)", display: "grid", placeItems: "center", cursor: "not-allowed" }} disabled aria-label="New conversation">
+                <SquarePen size={13} />
+              </button>
+            </div>
           </div>
           <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "4px 6px 6px", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", touchAction: "pan-y" }}>
             {conversationItems
@@ -1435,7 +1512,75 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end", gap: 14, minHeight: "100%", maxWidth: 860, width: "100%", margin: "0 auto" }}>
-                {messages.map((m, idx) => {
+                {threadItems.map((item, idx) => {
+                  if (item.type === "videoCard") {
+                    const m = item.msg;
+                    const prevEntry = threadItems[idx - 1];
+                    const prevTs = prevEntry ? prevEntry.msg.created_at : null;
+                    const showDayBreak = !prevTs || !sameDay(prevTs, m.created_at);
+                    const msgDate = new Date(m.created_at);
+                    const isToday = msgDate.toDateString() === new Date().toDateString();
+                    const title =
+                      item.kind === "ready" ? "Video visit ready" : item.kind === "join" ? "Video visit active" : "Call ended";
+                    const visitTime = item.parsed?.windowStartIso
+                      ? new Date(item.parsed.windowStartIso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+                      : "";
+                    return (
+                      <div
+                        key={`vcard-${item.windowKey}-${item.kind}-${m.id}`}
+                        style={{ display: "flex", flexDirection: "column", width: "100%", alignItems: "center" }}
+                      >
+                        {showDayBreak ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "0 0 8px", width: "100%" }}>
+                            <span style={{ height: 1, background: b1, flex: 1 }} />
+                            <span style={{ fontSize: 11, color: t3, fontWeight: 600 }}>{isToday ? "Today" : msgDate.toLocaleDateString([], { month: "short", day: "numeric" })}</span>
+                            <span style={{ height: 1, background: b1, flex: 1 }} />
+                          </div>
+                        ) : null}
+                        <div
+                          style={{
+                            maxWidth: 340,
+                            width: "100%",
+                            padding: "12px 14px",
+                            borderRadius: 14,
+                            background: "var(--s2)",
+                            border: `1px solid ${item.kind === "ended" ? "rgba(148,163,184,.5)" : "rgba(37,99,235,.22)"}`,
+                            boxShadow: "0 2px 8px rgba(15,23,42,.06)",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                            <Video size={16} color={item.kind === "ended" ? t3 : "var(--p)"} />
+                            <p style={{ margin: 0, color: t1, fontSize: 13, fontWeight: 700 }}>{title}</p>
+                          </div>
+                          {visitTime ? <p style={{ margin: "0 0 8px", color: t3, fontSize: 11 }}>Visit window · {visitTime}</p> : null}
+                          {item.kind === "ended" ? (
+                            <p style={{ margin: 0, color: t3, fontSize: 12, lineHeight: 1.45 }}>Appointment completed</p>
+                          ) : null}
+                          {item.kind === "join" && item.showJoinButton ? (
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ width: "100%", marginTop: 8, fontWeight: 600 }}
+                              onClick={() => {
+                                const u = joinUrlForVideoCard(item.parsed);
+                                if (u && typeof window !== "undefined") window.open(u, "_blank", "noopener,noreferrer");
+                              }}
+                            >
+                              Join call
+                            </button>
+                          ) : null}
+                          {item.kind === "join" && !item.showJoinButton ? (
+                            <p style={{ margin: "8px 0 0", color: t3, fontSize: 11 }}>This visit has ended — join is no longer available.</p>
+                          ) : null}
+                          {item.kind === "ready" ? (
+                            <p style={{ margin: "6px 0 0", color: t3, fontSize: 11, lineHeight: 1.45 }}>Your doctor will start the video when ready.</p>
+                          ) : null}
+                          <p style={{ margin: "10px 0 0", fontSize: 10, color: t3 }}>{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+                        </div>
+                      </div>
+                    );
+                  }
+                  const m = item.msg;
                   const mine = m.sender_id === userId;
                   const bodyText = (m.body || "").trim();
                   const proto = getProtocolChatDisplay(bodyText, { role: "patient", isMine: mine });
@@ -1445,8 +1590,9 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                   const pendingUp = m._pendingUpload === true;
                   const isImg = !!(attUrl && (m.attachment_mime || "").startsWith("image/"));
                   const showBubble = !!(attUrl || (textToShow && String(textToShow).trim()) || (pendingUp && m.attachment_name));
-                  const prev = messages[idx - 1];
-                  const showDayBreak = !prev || !sameDay(prev.created_at, m.created_at);
+                  const prevEntry = threadItems[idx - 1];
+                  const prevTs = prevEntry ? prevEntry.msg.created_at : null;
+                  const showDayBreak = !prevTs || !sameDay(prevTs, m.created_at);
                   const msgDate = new Date(m.created_at);
                   const isToday = msgDate.toDateString() === new Date().toDateString();
                   return (

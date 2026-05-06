@@ -26,6 +26,15 @@ export const VIDEO_WAITING_CHECKIN_PREFIX = "VIDEO_WAITING_CHECKIN";
 /** Doctor removes patient from the virtual waiting list (without ending an active visit). */
 export const VIDEO_WAITING_DISMISSED_PREFIX = "VIDEO_WAITING_DISMISSED";
 export const VIDEO_WAITING_ROOM_EARLY_JOIN_MS = 30 * 60 * 1000;
+
+/**
+ * Returns true if the message body is a video/system protocol string that should
+ * never count as an unread chat message or appear in the messages badge count.
+ */
+export function isVideoProtocolBody(body) {
+  if (!body || typeof body !== "string") return false;
+  return /^VIDEO_[A-Z_]+\|/.test(body.trimStart());
+}
 export const VIDEO_VISIT_LATE_JOIN_MS = 50 * 60 * 1000;
 /** After windowEndMs, keep visit in portals / reconnect for this long (strict message windows unchanged). */
 export const VIDEO_VISIT_PORTAL_TAIL_MS = 6 * 60 * 60 * 1000;

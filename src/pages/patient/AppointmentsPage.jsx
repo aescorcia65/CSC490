@@ -167,6 +167,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const selfBookedIdsRef = useRef(new Set());
   /** Debounced full refetch so realtime + doctor-created rows always match Supabase (partial payloads). */
   const appointmentsRefreshTimerRef = useRef(null);
+  /** Tracks in-person appointment IDs already auto-completed to avoid duplicate DB writes. */
+  const expiredInPersonRef = useRef(new Set());
 
   const [patientProfile, setPatientProfile] = useState(null);
   const [preVisitModalOpen, setPreVisitModalOpen] = useState(false);
@@ -196,6 +198,13 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
   useEffect(() => {
     const t = setInterval(() => setVideoUiTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  /** Low-frequency clock (30 s) used to re-evaluate time-based filters without excessive renders. */
+  const [nowMinute, setNowMinute] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMinute(Date.now()), 30000);
     return () => clearInterval(t);
   }, []);
 
@@ -586,6 +595,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const pastList = [];
     const cancelledList = [];
     const requestList = [];
+    const nowMs = nowMinute;
 
     for (const a of allAppts) {
       if (a.status === "cancelled") {
@@ -596,13 +606,21 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         pastList.push(a);
         continue;
       }
-      if (a.status === "scheduled" && a.date < todayStr) {
+      if ((a.status === "scheduled" || a.status === "rescheduled") && a.date < todayStr) {
         pastList.push(a);
         continue;
       }
-      if (a.status === "rescheduled" && a.date < todayStr) {
-        pastList.push(a);
-        continue;
+      // For today's in-person appointments, check if end window (start + 60 min) has passed
+      if (
+        (a.status === "scheduled" || a.status === "rescheduled") &&
+        a.date === todayStr &&
+        !isVideoStyleVisitType(a)
+      ) {
+        const apptMs = Date.parse(`${a.date}T${normTime(a.time || "00:00")}`);
+        if (!Number.isNaN(apptMs) && apptMs + 60 * 60 * 1000 <= nowMs) {
+          pastList.push(a);
+          continue;
+        }
       }
       if (hasActiveRescheduleRequest(a) && a.date >= todayStr) {
         requestList.push(a);
@@ -637,25 +655,33 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         cancelled: cancelledList.length,
       },
     };
-  }, [allAppts, todayStr, videoVisitRequests]);
+  }, [allAppts, todayStr, videoVisitRequests, nowMinute]);
 
   const primaryAppt = upcomingConfirmed[0] || null;
   const primaryDoc = primaryAppt ? doctorProfiles[primaryAppt.doctor_id] : null;
   const primaryBooking = primaryDoc ? parseBookingAvailability(primaryDoc.booking_availability) : { timezone: "America/New_York", slots: {} };
 
   const linkedDoctors = useMemo(() => {
+    const nowMs = nowMinute;
     return Object.values(doctorProfiles)
       .map((doc) => {
         const booking = parseBookingAvailability(doc.booking_availability);
         const slotCount = Object.entries(booking.slots || {}).reduce((sum, [dateKey, arr]) => {
           if (dateKey < todayStr) return sum;
-          return sum + (Array.isArray(arr) ? arr.length : 0);
+          if (!Array.isArray(arr)) return sum;
+          if (dateKey > todayStr) return sum + arr.length;
+          // For today, count only future times
+          return sum + arr.filter((tm) => {
+            const ms = Date.parse(`${dateKey}T${normTime(tm)}`);
+            return !Number.isNaN(ms) && ms > nowMs;
+          }).length;
         }, 0);
         return { ...doc, slotCount };
       });
-  }, [doctorProfiles, todayStr]);
+  }, [doctorProfiles, todayStr, nowMinute]);
   const doctorsWithSlots = useMemo(() => linkedDoctors.filter((doc) => doc.slotCount > 0), [linkedDoctors]);
   const slotsPreviewByDoctor = useMemo(() => {
+    const nowMs = nowMinute;
     return linkedDoctors
       .map((doc) => {
         const booking = parseBookingAvailability(doc.booking_availability);
@@ -665,11 +691,16 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           .sort()
           .forEach((dateKey) => {
             const times = Array.isArray(booking.slots[dateKey]) ? booking.slots[dateKey] : [];
-            times.forEach((tm) => preview.push({ date: dateKey, time: normTime(tm) }));
+            times.forEach((tm) => {
+              const ms = Date.parse(`${dateKey}T${normTime(tm)}`);
+              // Skip today's times that have already passed
+              if (dateKey === todayStr && !Number.isNaN(ms) && ms <= nowMs) return;
+              preview.push({ date: dateKey, time: normTime(tm) });
+            });
           });
         return { doctor: doc, slots: preview.slice(0, 8), slotCount: doc.slotCount || 0 };
       });
-  }, [linkedDoctors, todayStr]);
+  }, [linkedDoctors, todayStr, nowMinute]);
 
   useEffect(() => {
     if (!bookOpen) return;
@@ -690,16 +721,34 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const activeDoctor = rescheduleAppt ? rescheduleDoc : primaryDoc;
 
   const slotDateKeys = useMemo(() => {
-    const keys = Object.keys(activeBooking.slots || {}).filter((d) => d >= todayStr && Array.isArray(activeBooking.slots[d]) && activeBooking.slots[d].length > 0);
+    const nowMs = nowMinute;
+    const keys = Object.keys(activeBooking.slots || {}).filter((d) => {
+      if (!Array.isArray(activeBooking.slots[d]) || !activeBooking.slots[d].length) return false;
+      if (d < todayStr) return false;
+      if (d > todayStr) return true;
+      return activeBooking.slots[d].some((tm) => {
+        const ms = Date.parse(`${d}T${normTime(tm)}`);
+        return !Number.isNaN(ms) && ms > nowMs;
+      });
+    });
     keys.sort();
     return keys;
-  }, [activeBooking.slots, todayStr]);
+  }, [activeBooking.slots, todayStr, nowMinute]);
 
   const bookSlotDateKeys = useMemo(() => {
-    const keys = Object.keys(bookBooking.slots || {}).filter((d) => d >= todayStr && Array.isArray(bookBooking.slots[d]) && bookBooking.slots[d].length > 0);
+    const nowMs = nowMinute;
+    const keys = Object.keys(bookBooking.slots || {}).filter((d) => {
+      if (!Array.isArray(bookBooking.slots[d]) || !bookBooking.slots[d].length) return false;
+      if (d < todayStr) return false;
+      if (d > todayStr) return true;
+      return bookBooking.slots[d].some((tm) => {
+        const ms = Date.parse(`${d}T${normTime(tm)}`);
+        return !Number.isNaN(ms) && ms > nowMs;
+      });
+    });
     keys.sort();
     return keys;
-  }, [bookBooking.slots, todayStr]);
+  }, [bookBooking.slots, todayStr, nowMinute]);
 
   useEffect(() => {
     if (!rescheduleForId) return;
@@ -901,6 +950,37 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       setSelectedSlot(null);
     }
   }
+
+  // Auto-mark in-person appointments as completed once their window (start + 60 min) passes
+  useEffect(() => {
+    if (!userId) return;
+    const nowMs = nowMinute;
+    const todayDate = localDateKey(new Date(nowMs));
+    const expiredIds = allAppts
+      .filter((a) => {
+        if (a.status !== "scheduled" && a.status !== "rescheduled") return false;
+        if (isVideoStyleVisitType(a)) return false;
+        if (!a.date || !a.time) return false;
+        if (a.date > todayDate) return false;
+        if (expiredInPersonRef.current.has(a.id)) return false;
+        const apptMs = Date.parse(`${a.date}T${normTime(a.time)}`);
+        return !Number.isNaN(apptMs) && apptMs + 60 * 60 * 1000 <= nowMs;
+      })
+      .map((a) => a.id);
+    if (!expiredIds.length) return;
+    expiredIds.forEach((id) => expiredInPersonRef.current.add(id));
+    supabase
+      .from("appointments")
+      .update({ status: "completed", updated_at: new Date().toISOString() })
+      .in("id", expiredIds)
+      .then(({ error }) => {
+        if (!error) {
+          setAllAppts((prev) => prev.map((a) => (expiredIds.includes(a.id) ? { ...a, status: "completed" } : a)));
+        } else {
+          expiredIds.forEach((id) => expiredInPersonRef.current.delete(id));
+        }
+      });
+  }, [nowMinute, userId]); // allAppts intentionally omitted — ref guards against duplicate runs
 
   async function bookAppointment() {
     if (!userId || !bookingDoctorId || bookBusy) return;
@@ -1116,10 +1196,24 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const subtitle = panelOpts.subtitle || "Select one of your doctor's available times. You cannot pick a time outside this list.";
     const flatTop = panelOpts.flatTop === true;
     const doctorId = panelOpts.doctorId || null;
-    const keys = Object.keys(booking.slots || {}).filter((d) => Array.isArray(booking.slots[d]) && booking.slots[d].length > 0);
+    const panelNowMs = Date.now();
+    const panelTodayStr = localDateKey();
+    const keys = Object.keys(booking.slots || {}).filter((d) => {
+      if (!Array.isArray(booking.slots[d]) || !booking.slots[d].length) return false;
+      if (d < panelTodayStr) return false;
+      if (d > panelTodayStr) return true;
+      return booking.slots[d].some((tm) => {
+        const ms = Date.parse(`${d}T${normTime(tm)}`);
+        return !Number.isNaN(ms) && ms > panelNowMs;
+      });
+    });
     keys.sort();
     const activeDate = sel?.date && keys.includes(sel.date) ? sel.date : keys[0];
-    const times = activeDate ? booking.slots[activeDate] || [] : [];
+    const allTimes = activeDate ? booking.slots[activeDate] || [] : [];
+    // Filter out past times for today
+    const times = activeDate === panelTodayStr
+      ? allTimes.filter((tm) => { const ms = Date.parse(`${activeDate}T${normTime(tm)}`); return !Number.isNaN(ms) && ms > panelNowMs; })
+      : allTimes;
 
     return (
       <div style={flatTop ? { marginTop: 0, paddingTop: 0 } : { marginTop: 20, paddingTop: 20, borderTop: `1px solid ${BORDER}` }}>
