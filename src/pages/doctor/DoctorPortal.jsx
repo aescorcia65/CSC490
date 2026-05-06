@@ -682,6 +682,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       } else if(chatContactsRef.current.some(c=>c.id===chat.id)&&!patientChatContactsRef.current.some(c=>c.id===chat.id)){
         pollPatient=false;
       }
+      // Safe merge helper — never wipe realtime-delivered messages that beat the poll.
+      function safeMerge(prev, data){
+        const serverIdSet=new Set((data||[]).map(m=>m.id));
+        const pendingTemps=prev.filter(m=>String(m.id).startsWith("temp-")&&!serverIdSet.has(m.id));
+        const realtimeNotInBatch=prev.filter(m=>!String(m.id).startsWith("temp-")&&!serverIdSet.has(m.id));
+        const changed=(data||[]).some(m=>!prev.some(pm=>pm.id===m.id&&pm.read_at===m.read_at));
+        if(!changed&&pendingTemps.length===0&&realtimeNotInBatch.length===0) return prev;
+        return sortMsgs([...(data||[]),...pendingTemps,...realtimeNotInBatch]);
+      }
       if(pollPatient){
         const q=`and(sender_id.eq.${user.id},recipient_id.eq.${chat.id}),and(sender_id.eq.${chat.id},recipient_id.eq.${user.id})`;
         supabase.from("patient_messages").select("*").or(q).order("created_at",{ascending:true}).limit(200)
@@ -689,15 +698,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             if(!data) return;
             if(selChatRef.current?.id!==chat.id) return;
             setMessages(prev=>{
-              const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
-              const lastPrevId=realPrev[realPrev.length-1]?.id;
-              const lastNewId=data[data.length-1]?.id;
-              if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-              if(lastPrevId!==lastNewId&&data.length>0){
+              const next=safeMerge(prev,data);
+              if(next!==prev&&(data||[]).length>0){
                 const ts=data[data.length-1].created_at;
-                setPatientChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
+                setPatientChatContacts(p=>sortContacts(p.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
               }
-              return sortMsgs(data);
+              return next;
             });
           });
       } else {
@@ -708,19 +714,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             if(!data) return;
             if(selChatRef.current?.id!==chat.id) return;
             setMessages(prev=>{
-              const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
-              const lastPrevId=realPrev[realPrev.length-1]?.id;
-              const lastNewId=data[data.length-1]?.id;
-              if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-              if(lastPrevId!==lastNewId&&data.length>0){
+              const next=safeMerge(prev,data);
+              if(next!==prev&&(data||[]).length>0){
                 const ts=data[data.length-1].created_at;
-                setChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
+                setChatContacts(p=>sortContacts(p.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
               }
-              return sortMsgs(data);
+              return next;
             });
           });
       }
-    },2000);
+    },5000);
     return ()=>clearInterval(interval);
   },[page,selChat?.id,user?.id]);
   const [rtStatus,setRtStatus]=useState("connecting");
@@ -953,7 +956,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           setMsgInput(body);
           return;
         }
-        setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+        setMessages(prev=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); });
         notifyRecipientNewChatMessage({
           recipientId:selChat.id,
           senderName:`Dr. ${name}`,
@@ -980,7 +983,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         setMsgInput(body);
         return;
       }
-      setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+      setMessages(prev=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); });
       notifyRecipientNewChatMessage({
         recipientId:selChat.id,
         senderName:`Dr. ${name}`,
@@ -1227,7 +1230,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         throw error;
       }
       if(mirrorInOpenThread){
-        setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+        setMessages(prev=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); });
       }
       notifyRecipientNewChatMessage({
         recipientId:patientId,
@@ -1311,7 +1314,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         .insert({sender_id:user.id,recipient_id:patientId,body})
         .select("*").single();
       if(error) throw error;
-      if(shouldMirror){ setMessages((prev)=>sortMsgs(prev.map((m)=>m.id===tempId?msg:m))); }
+      if(shouldMirror){ setMessages((prev)=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); }); }
       notifyRecipientNewChatMessage({
         recipientId:patientId,
         senderName:`Dr. ${name}`,
@@ -1442,12 +1445,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     try{
       const{error}=await doctorClearPatientVirtualVisitCheckIn(pid);
       if(error) throw error;
-      await supabase.from("notifications").insert({
-        user_id:pid,
-        type:"general",
-        title:"Check-in form reset",
-        body:`Dr. ${name} cleared your saved virtual visit check-in. You'll need to complete it again before your visit.`,
-      }).catch(()=>{});
+      try {
+        await supabase.from("notifications").insert({
+          user_id:pid,
+          type:"general",
+          title:"Check-in form reset",
+          body:`Dr. ${name} cleared your saved virtual visit check-in. You'll need to complete it again before your visit.`,
+        });
+      } catch (_) {}
       setPatProfile(p=>(p?.id===pid?{...p,pre_visit_intake:null,allergies:[],medical_conditions:[]}:p));
       setVirtualCheckInPatientProfile(vp=>(vp?.id===pid?{...vp,pre_visit_intake:null,allergies:[],medical_conditions:[]}:vp));
       setCheckInClearAwaitingConfirmPatientId(null);

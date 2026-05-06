@@ -783,7 +783,10 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
     return () => {
       supabase.removeChannel(ch);
     };
-  }, [doctors, pharmacist?.id, pharmacist?.name, userId]);
+  // Only depend on userId — the handlers use refs for activePeer so they don't need
+  // doctors/pharmacist in the closure. Keeping those out prevents tearing down the
+  // subscription on every re-render that touches doctors/pharmacist state.
+  }, [userId]);
 
   useEffect(() => {
     if (!userId || !activePeer?.id || bootLoading) return;
@@ -792,18 +795,21 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
       const q = `and(sender_id.eq.${userId},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${userId})`;
       const { data, error } = await supabase.from("patient_messages").select("*").or(q).order("created_at", { ascending: true }).limit(200);
       if (error || !data) return;
+      // Safe merge: never throw away messages that realtime already delivered but
+      // weren't in this poll batch (race: poll started before DB committed the row).
       setMessages((prev) => {
-        const temps = prev.filter((m) => String(m.id).startsWith("temp-"));
-        const realPrev = prev.filter((m) => !String(m.id).startsWith("temp-"));
-        const lastPrevId = realPrev[realPrev.length - 1]?.id;
-        const lastNewId = data[data.length - 1]?.id;
-        if (lastPrevId === lastNewId && realPrev.length === data.length) return prev;
-        const serverIds = new Set(data.map((m) => m.id));
-        const pendingTemps = temps.filter((t) => t.id && !serverIds.has(t.id));
-        return sortMsgs([...data, ...pendingTemps]);
+        const serverIdSet = new Set(data.map((m) => m.id));
+        // Optimistic temps not yet confirmed by server
+        const pendingTemps = prev.filter((m) => String(m.id).startsWith("temp-") && !serverIdSet.has(m.id));
+        // Real messages delivered by realtime but not yet in this poll batch
+        const realtimeNotInBatch = prev.filter((m) => !String(m.id).startsWith("temp-") && !serverIdSet.has(m.id));
+        // Skip update entirely if nothing changed
+        const newFromServer = data.filter((m) => !prev.some((pm) => pm.id === m.id && pm.read_at === m.read_at));
+        if (newFromServer.length === 0 && pendingTemps.length === 0 && realtimeNotInBatch.length === 0) return prev;
+        return sortMsgs([...data, ...pendingTemps, ...realtimeNotInBatch]);
       });
     };
-    const id = setInterval(poll, 2000);
+    const id = setInterval(poll, 5000);
     return () => clearInterval(id);
   }, [userId, activePeer?.id, bootLoading]);
 
