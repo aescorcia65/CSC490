@@ -7,6 +7,9 @@ export const VS = Object.freeze({
   CHECKED_IN: "checked_in",
   WAITING_FOR_DOCTOR: "waiting_for_doctor",
   VIDEO_STARTED: "video_started",
+  // WebRTC in-app call statuses
+  CALL_STARTED: "call_started",  // doctor opened the call, patient can join
+  CALL_ENDED: "call_ended",      // call finished — never show Join Call again
   COMPLETED: "completed",
   DENIED: "denied",
   CANCELLED: "cancelled",

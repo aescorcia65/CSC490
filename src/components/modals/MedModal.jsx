@@ -8,6 +8,8 @@ import { MedAutocomplete, DosageSelector, FrequencySelect } from "../common/Medi
 import TimePicker from "../common/TimePicker";
 import ErrBanner from "../common/ErrBanner";
 
+const MED_NOT_FOUND_MSG = "Medication not found. Please select a valid medication.";
+
 function buildForm(existing) {
   if (!existing) {
     return {
@@ -73,6 +75,11 @@ export default function MedModal({ onClose, onSave, existing, userId }) {
   async function handleSave() {
     const dosageStr = dosageDisplayString();
     if (!f.name?.trim() || !dosageStr || !f.freq?.trim()) return;
+    // Validate against the medication database only for NEW medications, not edits
+    if (!isEdit && !findMedication(f.name.trim())) {
+      setErr(MED_NOT_FOUND_MSG);
+      return;
+    }
     setBusy(true); setErr("");
     const med = {
       name: f.name.trim(),
@@ -104,7 +111,8 @@ export default function MedModal({ onClose, onSave, existing, userId }) {
     } finally { setBusy(false); }
   }
 
-  const canSave = !!(f.name?.trim() && dosageDisplayString() && f.freq?.trim());
+  // Edits to existing medications don't require re-validating against the database
+  const canSave = !!(f.name?.trim() && dosageDisplayString() && f.freq?.trim() && (isEdit || findMedication(f.name.trim())));
 
   return (
     <motion.div className="ov" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose}>
@@ -167,7 +175,11 @@ export default function MedModal({ onClose, onSave, existing, userId }) {
           </div>
         </div>
         <AnimatePresence>
-          {err && <div style={{ marginTop: 14 }}><ErrBanner msg={err} /></div>}
+          {err ? (
+            <div style={{ marginTop: 14 }}>
+              <ErrBanner msg={err} />
+            </div>
+          ) : null}
         </AnimatePresence>
         <div style={{ display: "flex", gap: 9, marginTop: 22 }}>
           <button type="button" className="bto" style={{ flex: 1 }} onClick={onClose}>Cancel</button>

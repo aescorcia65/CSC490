@@ -1,9 +1,4 @@
-import {
-  VIDEO_CALL_STARTED_PREFIX,
-  VIDEO_VISIT_ENDED_PREFIX,
-  parseVideoApprovalMessageBody,
-  buildVideoCallUrlFromRoom,
-} from "./videoCall";
+import { VIDEO_VISIT_ENDED_PREFIX, VIDEO_CALL_STARTED_PREFIX } from "./videoCall";
 
 /**
  * System protocol strings (VIDEO_*) are stored for sync/real-time; most are hidden in chat UI.
@@ -19,18 +14,9 @@ export function getProtocolChatDisplay(rawBody, { role, isMine }) {
   const s = String(rawBody || "").trimStart();
   if (!s) return { kind: "plain", line: "" };
 
+  // All VIDEO_* protocol rows are used only for appointment/realtime sync.
+  // They must never appear in the chat thread for any role.
   if (/^VIDEO_[A-Z_]+\|/.test(s)) {
-    if (
-      role === "patient" &&
-      !isMine &&
-      s.startsWith(`${VIDEO_CALL_STARTED_PREFIX}|`)
-    ) {
-      const parsed = parseVideoApprovalMessageBody(s);
-      if (parsed?.eventType === "started" && parsed.roomId) {
-        const joinUrl = buildVideoCallUrlFromRoom(parsed.roomId);
-        if (joinUrl) return { kind: "video_started_invite", line: "", joinUrl };
-      }
-    }
     return { kind: "hidden", line: "" };
   }
 

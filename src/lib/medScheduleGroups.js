@@ -167,9 +167,16 @@ export const DAY_PERIOD_DEFS = [
 
 export function groupMedicationsByDayPeriod(meds) {
   const flat = [];
+  const seenByName = new Set();
+  const seenById = new Set();
   for (const med of meds) {
     const slots = expandDoseTimesForToday(med);
     for (const slotTime of slots) {
+      const nameKey = `${String(med.name || "").toLowerCase().trim()}|${slotTime}`;
+      const idKey = `${String(med.id || "").trim()}|${slotTime}`;
+      if (seenByName.has(nameKey) || seenById.has(idKey)) continue;
+      seenByName.add(nameKey);
+      seenById.add(idKey);
       flat.push({ med, slotTime });
     }
   }

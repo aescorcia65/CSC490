@@ -238,12 +238,19 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
   const curMins = now.getHours() * 60 + now.getMinutes();
   const overdueDoseRows = useMemo(() => {
     const rows = [];
+    const seenByName = new Set();
+    const seenById = new Set();
     for (const m of meds) {
       const slots = expandDoseTimesForToday(m);
       const past = slots
         .filter((s) => timeHMToMins(s) < curMins && !doseRowLogged(m, s))
         .sort((a, b) => timeHMToMins(a) - timeHMToMins(b));
       for (const slotTime of past) {
+        const nameKey = `${String(m.name || "").toLowerCase().trim()}|${slotTime}`;
+        const idKey = `${String(m.id || "").trim()}|${slotTime}`;
+        if (seenByName.has(nameKey) || seenById.has(idKey)) continue;
+        seenByName.add(nameKey);
+        seenById.add(idKey);
         rows.push({ med: m, slotTime });
       }
     }
@@ -288,7 +295,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
     (async () => {
       try {
         const [rxRes, profRes] = await Promise.all([
-          supabase.from("prescriptions").select("id,status,created_at,notes,doctor_id,pharmacist_id").eq("patient_id", userId).order("created_at", { ascending: false }).limit(20),
+          supabase.from("prescriptions").select("id,status,created_at,notes,doctor_id,pharmacist_id,review_status,pharmacist_review_note").eq("patient_id", userId).order("created_at", { ascending: false }).limit(20),
           supabase.from("profiles").select("primary_pharmacist_id,first_name,last_name").eq("id", userId).maybeSingle(),
         ]);
         setPrescriptions(rxRes.data || []);
@@ -299,6 +306,30 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
         setRxLoading(false);
       }
     })();
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId) return undefined;
+    const reload = () => {
+      void supabase
+        .from("prescriptions")
+        .select("id,status,created_at,notes,doctor_id,pharmacist_id,review_status,pharmacist_review_note")
+        .eq("patient_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(20)
+        .then(({ data }) => {
+          if (data) setPrescriptions(data);
+        });
+    };
+    const ch = supabase
+      .channel(`mt-pt-med-rx-${userId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "prescriptions", filter: `patient_id=eq.${userId}` }, () => {
+        reload();
+      })
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(ch);
+    };
   }, [userId]);
 
   useEffect(() => {

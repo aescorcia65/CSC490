@@ -23,3 +23,11 @@ export const PRESCRIPTION_STATUS_LABELS = {
   filled: "Filled",
   picked_up: "Picked up",
 };
+
+/** Pharmacist safety review gate (column `review_status` on prescriptions). */
+export const PRESCRIPTION_REVIEW_STATUS_LABELS = {
+  pending_review: "Pending safety review",
+  approved: "Safety approved",
+  rejected: "Rejected — needs update",
+  needs_changes: "Needs changes",
+};

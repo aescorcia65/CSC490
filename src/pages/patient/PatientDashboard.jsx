@@ -131,6 +131,7 @@ export default function PatientDashboard() {
   const [focusMedicationId, setFocusMedicationId] = useState(null);
   const [messagesPeer, setMessagesPeer] = useState(null);
   const [headerAlertCount, setHeaderAlertCount] = useState(0);
+  const [msgUnreadCount, setMsgUnreadCount] = useState(0);
   const pageRestoreDoneRef = useRef(false);
   const isMob = useIsMobile();
   const saveName = (n) => { setDisplayName(n); };
@@ -178,8 +179,13 @@ export default function PatientDashboard() {
     if (!user?.id) return;
     Promise.all([
       supabase.from("notifications").select("id", { count: "exact", head: true }).eq("user_id", user.id).is("read_at", null),
-      supabase.from("patient_messages").select("id", { count: "exact", head: true }).eq("recipient_id", user.id).is("read_at", null),
-    ]).then(([a, b]) => setHeaderAlertCount((a.count || 0) + (b.count || 0)));
+      supabase.from("patient_messages").select("id", { count: "exact", head: true }).eq("recipient_id", user.id).is("read_at", null).not("body", "ilike", "VIDEO_%"),
+    ]).then(([a, b]) => {
+      const notifCount = a.count || 0;
+      const msgCount = b.count || 0;
+      setHeaderAlertCount(notifCount + msgCount);
+      setMsgUnreadCount(msgCount);
+    });
   }, [user?.id]);
 
   useEffect(() => {
@@ -212,8 +218,14 @@ export default function PatientDashboard() {
     setSettingsExpand(opts.settingsExpand ?? null);
     if (pageId === "medications") setFocusMedicationId(opts.medicationId || null);
     else setFocusMedicationId(null);
-    if (pageId === "messages") setMessagesPeer(opts.messagesPeer ?? null);
-    else setMessagesPeer(null);
+    if (pageId === "messages") {
+      setMessagesPeer(opts.messagesPeer ?? null);
+      // Optimistically clear message badge when navigating to messages
+      // (PatientMessagesPage marks messages as read, which triggers DB update → refreshHeaderAlerts)
+      setMsgUnreadCount(0);
+    } else {
+      setMessagesPeer(null);
+    }
     setMobMenu(false);
   }, []);
 
@@ -271,10 +283,16 @@ export default function PatientDashboard() {
               {PATIENT_MAIN_NAV.map((item) => {
                 const Icon = item.Icon;
                 const on = activeNavId === item.id;
+                const badge = item.id === "messages" && msgUnreadCount > 0 ? msgUnreadCount : 0;
                 return (
                   <button key={item.id} type="button" className={`patient-nav-link ${on ? "on" : ""}`} onClick={() => selectNavItem(item)}>
                     <span className="patient-nav-icon" aria-hidden><Icon size={18} strokeWidth={on ? 2.2 : 2} /></span>
                     <span className="patient-nav-label">{item.label}</span>
+                    {badge > 0 && (
+                      <span style={{ marginLeft: "auto", background: "var(--ro, #ef4444)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 700, padding: "1px 7px", minWidth: 18, textAlign: "center" }}>
+                        {badge > 99 ? "99+" : badge}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -343,8 +361,13 @@ export default function PatientDashboard() {
                 <span style={{ position: "absolute", top: -4, right: -4, minWidth: 18, height: 18, borderRadius: 99, background: "#ef4444", color: "#fff", fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px" }}>{headerAlertCount > 9 ? "9+" : headerAlertCount}</span>
               )}
             </button>
-            <button type="button" onClick={() => goToPage("messages", "messages")} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 13px", borderRadius: 99, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", fontSize: 12, fontWeight: 500, color: t2 }}>
+            <button type="button" onClick={() => goToPage("messages", "messages")} style={{ position: "relative", display: "flex", alignItems: "center", gap: 6, padding: "6px 13px", borderRadius: 99, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", fontSize: 12, fontWeight: 500, color: t2 }}>
               <MessageSquare size={13} color="var(--gr)" />{!isMob && " Messages"}
+              {msgUnreadCount > 0 && (
+                <span style={{ position: "absolute", top: -4, right: -4, minWidth: 18, height: 18, borderRadius: 99, background: "#ef4444", color: "#fff", fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px" }}>
+                  {msgUnreadCount > 9 ? "9+" : msgUnreadCount}
+                </span>
+              )}
             </button>
             <button type="button" onClick={() => setLight(!light)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 13px", borderRadius: 99, border: `1px solid ${b1}`, background: "var(--s1)", cursor: "pointer", fontSize: 12, fontWeight: 500, color: t2 }}>
               {light ? <Moon size={13} color="var(--p)" /> : <Sun size={13} color="var(--am)" />}{!isMob && (light ? " Dark" : " Light")}
@@ -421,9 +444,20 @@ export default function PatientDashboard() {
         </div>
         {isMob && (
           <nav className="btabs" style={{ gridTemplateColumns: `repeat(${MOBILE_TABS.length}, 1fr)` }}>
-            {MOBILE_TABS.map((t) => (
-              <button key={t.id} type="button" className={`bt ${page === t.page ? "on" : ""}`} onClick={() => selectMobileTab(t)}><t.I size={17} />{t.l}</button>
-            ))}
+            {MOBILE_TABS.map((t) => {
+              const tabBadge = t.id === "messages" && msgUnreadCount > 0 ? msgUnreadCount : 0;
+              return (
+                <button key={t.id} type="button" className={`bt ${page === t.page ? "on" : ""}`} onClick={() => selectMobileTab(t)} style={{ position: "relative" }}>
+                  <t.I size={17} />
+                  {tabBadge > 0 && (
+                    <span style={{ position: "absolute", top: 4, right: "calc(50% - 18px)", minWidth: 16, height: 16, borderRadius: 99, background: "#ef4444", color: "#fff", fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", lineHeight: 1 }}>
+                      {tabBadge > 9 ? "9+" : tabBadge}
+                    </span>
+                  )}
+                  {t.l}
+                </button>
+              );
+            })}
           </nav>
         )}
       </div>
@@ -447,10 +481,16 @@ export default function PatientDashboard() {
                   {PATIENT_MAIN_NAV.map((item) => {
                     const Icon = item.Icon;
                     const on = activeNavId === item.id;
+                    const badge = item.id === "messages" && msgUnreadCount > 0 ? msgUnreadCount : 0;
                     return (
                       <button key={item.id} type="button" className={`patient-nav-link ${on ? "on" : ""}`} onClick={() => selectNavItem(item)}>
                         <span className="patient-nav-icon" aria-hidden><Icon size={18} strokeWidth={on ? 2.2 : 2} /></span>
                         <span className="patient-nav-label">{item.label}</span>
+                        {badge > 0 && (
+                          <span style={{ marginLeft: "auto", background: "var(--ro, #ef4444)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 700, padding: "1px 7px", minWidth: 18, textAlign: "center" }}>
+                            {badge > 99 ? "99+" : badge}
+                          </span>
+                        )}
                       </button>
                     );
                   })}

@@ -1060,3 +1060,11 @@ body:not(.light) .ov {
 
 .auth-blink { animation: blinkDot 1.8s ease-in-out infinite; }
 .auth-spin  { animation: spin360 .7s linear infinite; }
+
+/* Force all framer-motion children visible on mobile dedicated auth */
+.auth-mobile-visible,
+.auth-mobile-visible * {
+  opacity: 1 !important;
+  transform: none !important;
+  visibility: visible !important;
+}

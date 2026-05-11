@@ -1,0 +1,1 @@
+function a(t){if(t)try{localStorage.removeItem(`mt_patient_last_page_${t}`),localStorage.removeItem(`mt_doctor_last_page_${t}`),localStorage.removeItem(`mt_pharmacist_last_page_${t}`)}catch{}}export{a as c};

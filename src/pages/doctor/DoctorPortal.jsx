@@ -6,7 +6,7 @@ import {
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
   Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip, MoreHorizontal, Video,
   PhoneOff,
-  Sparkles, ChevronRight
+  Sparkles, ChevronRight, Settings
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib/portalWebAudio";
@@ -15,9 +15,9 @@ import { signOutClearPresence } from "../../lib/signOutClearPresence";
 import { notificationSuggestsPrescription, notificationSuggestsChat, notificationTextBlob } from "../../lib/notificationNavigation";
 import { getProtocolChatDisplay, formatChatNotificationPreview } from "../../lib/chatMessageDisplay";
 import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
-import { VIDEO_CALL_STARTED_PREFIX, VIDEO_VISIT_ENDED_PREFIX, VIDEO_VISIT_PORTAL_TAIL_MS, VIDEO_VISIT_LATE_JOIN_MS, VIDEO_WAITING_ROOM_EARLY_JOIN_MS, VIDEO_WAITING_CHECKIN_PREFIX, VIDEO_WAITING_DISMISSED_PREFIX, buildVideoCallUrlFromRoom, buildVideoRoomId, createVideoSessionMessageBody, createVideoSessionEndedMessageBody, createVideoWaitingDismissedMessageBody, getAppointmentVideoWindow, isVideoStyleVisitType, parseVideoApprovalMessageBody, parseVideoWaitingCheckinMessageBody, parseVideoWaitingDismissedMessageBody } from "../../lib/videoCall";
+import { VIDEO_CALL_STARTED_PREFIX, VIDEO_VISIT_ENDED_PREFIX, VIDEO_VISIT_PORTAL_TAIL_MS, VIDEO_VISIT_LATE_JOIN_MS, VIDEO_WAITING_ROOM_EARLY_JOIN_MS, VIDEO_WAITING_CHECKIN_PREFIX, VIDEO_WAITING_DISMISSED_PREFIX, buildVideoCallUrlFromRoom, buildVideoRoomId, createVideoSessionMessageBody, createVideoSessionEndedMessageBody, createVideoWaitingDismissedMessageBody, getAppointmentVideoWindow, isVideoProtocolBody, isVideoStyleVisitType, parseVideoApprovalMessageBody, parseVideoWaitingCheckinMessageBody, parseVideoWaitingDismissedMessageBody } from "../../lib/videoCall";
 import { buildDoctorCounterPayload, buildPatientRescheduleRequestPayload, hasActiveRescheduleRequest, normalizeRescheduleRequest } from "../../lib/rescheduleRequest";
-import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
+import { COLS, PRESCRIPTION_STATUS_LABELS, PRESCRIPTION_REVIEW_STATUS_LABELS } from "../../lib/constants";
 import { to12h } from "../../lib/utils";
 import { formatProfileFullName } from "../../lib/profileName";
 import { useIsMobile } from "../../hooks/useIsMobile";
@@ -25,13 +25,59 @@ import { usePresenceOnlineMap } from "../../hooks/usePresenceOnlineMap";
 import { doctorRequestCheckInRefill, downloadVirtualVisitCheckInPdf, doctorClearPatientVirtualVisitCheckIn } from "../../lib/virtualVisitCheckIn";
 import { findVirtualAppointmentForDoctorVideoStart, findVirtualAppointmentForDoctorVideoEnd, getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
 import DoctorVirtualCheckInReadout from "../../components/appointments/DoctorVirtualCheckInReadout";
+import VideoCallPanel from "../../components/video/VideoCallPanel";
 import ErrBanner from "../../components/common/ErrBanner";
 import OkBanner from "../../components/common/OkBanner";
 import NicknameModal from "../../components/modals/NicknameModal";
 import PrescribeModal from "../../components/modals/PrescribeModal";
 import RescheduleRequestRow from "../../components/appointments/RescheduleRequestRow";
 const DOCTOR_PAGE_STORAGE_KEY="mt_doctor_last_page";
-const DOCTOR_ALLOWED_PAGES=new Set(["dashboard","patients","messages","availability","virtual"]);
+const DOCTOR_ALLOWED_PAGES=new Set(["dashboard","patients","messages","availability","virtual","settings"]);
+
+function VitalField({label,value,placeholder,unit,onChange}){
+  return (
+    <div className="min-w-0">
+      <label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:"var(--t3)",marginBottom:5}}>{label}</label>
+      <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+        <input className="inp min-w-0 flex-1" value={value} placeholder={placeholder} onChange={onChange} style={{borderRadius:11,fontSize:16,padding:"9px 12px"}}/>
+        {unit&&<span style={{color:"var(--t3)",fontSize:12,flexShrink:0}}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
+function DoctorNameField({currentName,onSave,userId,DocAC}){
+  const [val,setVal]=useState(currentName||"");
+  const [busy,setBusy]=useState(false);
+  const [saved,setSaved]=useState(false);
+  async function save(){
+    const n=val.trim();
+    if(!n)return;
+    setBusy(true);
+    try{
+      const parts=n.split(" ");
+      const first=parts[0];
+      const last=parts.slice(1).join(" ")||null;
+      if(userId){
+        await supabase.from("profiles").update({first_name:first,last_name:last,updated_at:new Date().toISOString()}).eq("id",userId);
+      }
+      onSave(n);
+      setSaved(true);
+      setTimeout(()=>setSaved(false),2500);
+    }catch(e){
+      console.error("Save doctor name:",e);
+      onSave(n);
+    }finally{setBusy(false);}
+  }
+  return (
+    <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
+      <input className="inp flex-1 min-w-0" value={val} placeholder="Your display name" onChange={e=>setVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&val.trim()&&save()} style={{borderRadius:11,fontSize:16,padding:"10px 13px",minWidth:180}}/>
+      <motion.button type="button" whileHover={{scale:1.02}} whileTap={{scale:.97}} disabled={!val.trim()||busy||val.trim()===currentName} onClick={save} style={{padding:"10px 20px",borderRadius:11,border:"none",background:DocAC||"var(--doc-p)",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:700,display:"flex",alignItems:"center",gap:7,flexShrink:0}}>
+        {busy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:saved?<><Check size={13}/> Saved</>:"Save"}
+      </motion.button>
+    </div>
+  );
+}
 
 /** Used when doctor taps "video" from Messages — prefer an in-window virtual booking; otherwise anchor defaults so VIDEO_CALL_STARTED parses. */
 function resolveDoctorPatientInviteWindowMs(allAppointments, patientId, nowMs) {
@@ -121,6 +167,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [noteSaved,setNoteSaved]=useState(false);
   const [loading,setLoading]=useState(false);
   const [showPrescribe,setShowPrescribe]=useState(false);
+  const [prescribeEditRx,setPrescribeEditRx]=useState(null);
+  const virtualApptElRefs=useRef({});
+  const [virtualScrollApptId,setVirtualScrollApptId]=useState(null);
   const [deleteConfirm,setDeleteConfirm]=useState(null);
   const [deleteBusy,setDeleteBusy]=useState(false);
   const [patRx,setPatRx]=useState([]);
@@ -159,6 +208,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [videoApprovalBusy,setVideoApprovalBusy]=useState(false);
   const [videoStartTargetId,setVideoStartTargetId]=useState(null);
   const [videoEndBusy,setVideoEndBusy]=useState(false);
+  const [activeCallApptId,setActiveCallApptId]=useState(null);
+  const [activeCallPeerId,setActiveCallPeerId]=useState(null);
   const [videoNowMs,setVideoNowMs]=useState(()=>Date.now());
   const [videoEventRows,setVideoEventRows]=useState([]);
   const [unreadCount,setUnreadCount]=useState(0);
@@ -168,6 +219,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const [unreadPatientCount,setUnreadPatientCount]=useState(0);
   const [unreadPerPatient,setUnreadPerPatient]=useState({});
   const onlineUsers = usePresenceOnlineMap(user?.id);
+  useLayoutEffect(()=>{
+    if(!virtualScrollApptId) return;
+    const el=virtualApptElRefs.current[virtualScrollApptId];
+    if(el) el.scrollIntoView({behavior:"smooth",block:"center"});
+    setVirtualScrollApptId(null);
+  },[virtualScrollApptId]);
   const [chatSearchEmail,setChatSearchEmail]=useState("");
   const [chatSearchBusy,setChatSearchBusy]=useState(false);
   const [chatSearchMsg,setChatSearchMsg]=useState(null);
@@ -217,6 +274,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
   const loadMessagesSeqRef=useRef(0);
   const typingTimeoutRef=useRef(null);
   const typingBroadcastRef=useRef(null);
+  const expiredInPersonCompletedRef=useRef(new Set());
   const announcedInboundMsgAlertIdsRef=useRef(new Set());
   const announcedNotifAlertIdsRef=useRef(new Set());
   const selPatRef=useRef(selPat);
@@ -402,15 +460,40 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       },{}),
     };
   }
-  const availabilityDateKeys=useMemo(()=>Object.keys(bookingAvailability.slots||{}).sort(),[bookingAvailability.slots]);
-  const availabilitySlotCount=useMemo(()=>availabilityDateKeys.reduce((sum,date)=>sum+(bookingAvailability.slots?.[date]?.length||0),0),[availabilityDateKeys,bookingAvailability.slots]);
+  const availabilityDateKeys=useMemo(()=>{
+    const todayDate=new Date(videoNowMs).toISOString().slice(0,10);
+    return Object.keys(bookingAvailability.slots||{})
+      .filter(date=>{
+        if(date<todayDate) return false;
+        if(date>todayDate) return true;
+        // For today, only show the date if there are still future times
+        const times=bookingAvailability.slots[date];
+        return Array.isArray(times)&&times.some(tm=>{
+          const ms=Date.parse(`${date}T${normTimeValue(tm)}`);
+          return !Number.isNaN(ms)&&ms>videoNowMs;
+        });
+      })
+      .sort();
+  },[bookingAvailability.slots,videoNowMs]);
+  const availabilitySlotCount=useMemo(()=>{
+    const todayDate=new Date(videoNowMs).toISOString().slice(0,10);
+    return availabilityDateKeys.reduce((sum,date)=>{
+      const times=bookingAvailability.slots?.[date];
+      if(!Array.isArray(times)) return sum;
+      if(date>todayDate) return sum+times.length;
+      return sum+times.filter(tm=>{
+        const ms=Date.parse(`${date}T${normTimeValue(tm)}`);
+        return !Number.isNaN(ms)&&ms>videoNowMs;
+      }).length;
+    },0);
+  },[availabilityDateKeys,bookingAvailability.slots,videoNowMs]);
   useEffect(()=>{
     if(!user?.id) return;
     (async()=>{
       try{
         const[dpData,apptData,pharmData]=await Promise.all([
           supabase.from("doctor_patients").select("patient_id, profiles!doctor_patients_patient_id_fkey(id,first_name,last_name,email,dob,blood_type,allergies,medical_conditions)").eq("doctor_id",user.id),
-          supabase.from("appointments").select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status").eq("doctor_id",user.id).neq("status","cancelled").order("date",{ascending:true}),
+          supabase.from("appointments").select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status,checked_in_at").eq("doctor_id",user.id).neq("status","cancelled").order("date",{ascending:true}),
           supabase.from("profiles").select("id,first_name,last_name,email,pharmacy_name").eq("role","pharmacist"),
         ]);
         const pRows=(dpData.data||[]).map(r=>r.profiles).filter(Boolean);
@@ -422,7 +505,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         if(patientIds.length){
           const patientIdSet=new Set(patientIds);
           const{data:pmAll}=await supabase.from("patient_messages")
-            .select("sender_id,recipient_id,created_at,read_at")
+            .select("sender_id,recipient_id,created_at,read_at,body")
             .or(`sender_id.eq.${user.id},recipient_id.eq.${user.id}`)
             .order("created_at",{ascending:false})
             .limit(800);
@@ -431,7 +514,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             const other=m.sender_id===user.id?m.recipient_id:m.sender_id;
             if(!patientIdSet.has(other)) return;
             if(!seenLatest[other]){ seenLatest[other]=true; lastByPatient[other]=m.created_at; }
-            if(m.recipient_id===user.id&&!m.read_at){
+            if(m.recipient_id===user.id&&!m.read_at&&!isVideoProtocolBody(m.body)){
               unreadPt+=1;
               unreadMap[other]=(unreadMap[other]||0)+1;
             }
@@ -523,8 +606,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const channels=[];
     channels.push(
       supabase.channel(`doc-appt-${user.id}`)
-        .on("postgres_changes",{event:"*",schema:"public",table:"appointments",filter:`doctor_id=eq.${user.id}`},(payload)=>{
+        // No server-side filter — without REPLICA IDENTITY FULL, column filters on UPDATE
+        // events are silently dropped. Filter by doctor_id client-side instead.
+        .on("postgres_changes",{event:"*",schema:"public",table:"appointments"},(payload)=>{
           if(payload.eventType==="INSERT"){
+            if(payload.new.doctor_id!==user.id) return;
             if(payload.new.status!=="cancelled"){
               setAllAppointments(prev=>prev.some(a=>a.id===payload.new.id)?prev:[...prev,payload.new]);
               setAppointments(prev=>{
@@ -536,8 +622,9 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           } else if(payload.eventType==="UPDATE"){
             const updater=a=>a.id===payload.new.id?{...a,...payload.new}:a;
             setAllAppointments(prev=>{
-              if(payload.new.status==="cancelled") return prev.filter(a=>a.id!==payload.new.id);
               const hasRow=prev.some(a=>a.id===payload.new.id);
+              if(!hasRow&&payload.new.doctor_id!==user.id) return prev;
+              if(payload.new.status==="cancelled") return prev.filter(a=>a.id!==payload.new.id);
               return hasRow?prev.map(updater):[...prev,payload.new];
             });
             setAppointments(prev=>{
@@ -675,6 +762,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       } else if(chatContactsRef.current.some(c=>c.id===chat.id)&&!patientChatContactsRef.current.some(c=>c.id===chat.id)){
         pollPatient=false;
       }
+      // Safe merge helper — never wipe realtime-delivered messages that beat the poll.
+      function safeMerge(prev, data){
+        const serverIdSet=new Set((data||[]).map(m=>m.id));
+        const pendingTemps=prev.filter(m=>String(m.id).startsWith("temp-")&&!serverIdSet.has(m.id));
+        const realtimeNotInBatch=prev.filter(m=>!String(m.id).startsWith("temp-")&&!serverIdSet.has(m.id));
+        const changed=(data||[]).some(m=>!prev.some(pm=>pm.id===m.id&&pm.read_at===m.read_at));
+        if(!changed&&pendingTemps.length===0&&realtimeNotInBatch.length===0) return prev;
+        return sortMsgs([...(data||[]),...pendingTemps,...realtimeNotInBatch]);
+      }
       if(pollPatient){
         const q=`and(sender_id.eq.${user.id},recipient_id.eq.${chat.id}),and(sender_id.eq.${chat.id},recipient_id.eq.${user.id})`;
         supabase.from("patient_messages").select("*").or(q).order("created_at",{ascending:true}).limit(200)
@@ -682,15 +778,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             if(!data) return;
             if(selChatRef.current?.id!==chat.id) return;
             setMessages(prev=>{
-              const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
-              const lastPrevId=realPrev[realPrev.length-1]?.id;
-              const lastNewId=data[data.length-1]?.id;
-              if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-              if(lastPrevId!==lastNewId&&data.length>0){
+              const next=safeMerge(prev,data);
+              if(next!==prev&&(data||[]).length>0){
                 const ts=data[data.length-1].created_at;
-                setPatientChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
+                setPatientChatContacts(p=>sortContacts(p.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
               }
-              return sortMsgs(data);
+              return next;
             });
           });
       } else {
@@ -701,19 +794,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             if(!data) return;
             if(selChatRef.current?.id!==chat.id) return;
             setMessages(prev=>{
-              const realPrev=prev.filter(m=>!String(m.id).startsWith("temp-"));
-              const lastPrevId=realPrev[realPrev.length-1]?.id;
-              const lastNewId=data[data.length-1]?.id;
-              if(lastPrevId===lastNewId&&realPrev.length===data.length) return prev;
-              if(lastPrevId!==lastNewId&&data.length>0){
+              const next=safeMerge(prev,data);
+              if(next!==prev&&(data||[]).length>0){
                 const ts=data[data.length-1].created_at;
-                setChatContacts(prev=>sortContacts(prev.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
+                setChatContacts(p=>sortContacts(p.map(c=>c.id===chat.id?{...c,lastMessageAt:ts}:c)));
               }
-              return sortMsgs(data);
+              return next;
             });
           });
       }
-    },2000);
+    },5000);
     return ()=>clearInterval(interval);
   },[page,selChat?.id,user?.id]);
   const [rtStatus,setRtStatus]=useState("connecting");
@@ -798,6 +888,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           try{ window.alert(`${senderName}: ${formatChatNotificationPreview(b)||"sent you a message"}`); }catch{}
         }
       }
+      const isProtocol=isVideoProtocolBody(msg.body);
+      // Auto-mark video/system protocol messages as read — they are sync events, not real chat messages
+      if(isProtocol&&msg.recipient_id===user.id&&!msg.read_at){
+        supabase.from("patient_messages").update({read_at:new Date().toISOString()}).eq("id",msg.id).then(()=>{});
+      }
       if(mode==="patients"&&currentChat&&currentChat.id===other){
         const pair=new Set([msg.sender_id,msg.recipient_id]);
         if(pair.has(user.id)&&pair.has(other)){
@@ -807,16 +902,18 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           });
           if(msg.recipient_id===user.id&&!msg.read_at){
             supabase.from("patient_messages").update({read_at:new Date().toISOString()}).eq("id",msg.id).then(()=>{});
-            setUnreadPatientCount(prev=>Math.max(0,prev-1));
-            setUnreadPerPatient(prev=>{
-              const n={...prev};
-              if(n[other]) n[other]=Math.max(0,n[other]-1);
-              if(!n[other]) delete n[other];
-              return n;
-            });
+            if(!isProtocol){
+              setUnreadPatientCount(prev=>Math.max(0,prev-1));
+              setUnreadPerPatient(prev=>{
+                const n={...prev};
+                if(n[other]) n[other]=Math.max(0,n[other]-1);
+                if(!n[other]) delete n[other];
+                return n;
+              });
+            }
           }
         }
-      } else if(msg.recipient_id===user.id&&!msg.read_at&&msg.sender_id!==user.id){
+      } else if(msg.recipient_id===user.id&&!msg.read_at&&msg.sender_id!==user.id&&!isProtocol){
         setUnreadPatientCount(prev=>prev+1);
         setUnreadPerPatient(prev=>({...prev,[other]:(prev[other]||0)+1}));
       }
@@ -888,9 +985,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           setPatientChatContacts(prev=>sortContacts([...prev].map(c=>c.id===peerId?{...c,lastMessageAt:ts}:c)));
         }
         const unreadIds=(data||[]).filter(m=>m.recipient_id===user.id&&m.sender_id===peerId&&!m.read_at).map(m=>m.id);
+        // Only count real (non-protocol) unread messages toward the badge
+        const realUnreadCount=(data||[]).filter(m=>m.recipient_id===user.id&&m.sender_id===peerId&&!m.read_at&&!isVideoProtocolBody(m.body)).length;
         if(unreadIds.length>0){
           supabase.from("patient_messages").update({read_at:new Date().toISOString()}).in("id",unreadIds).then(()=>{});
-          setUnreadPatientCount(prev=>Math.max(0,prev-unreadIds.length));
+          setUnreadPatientCount(prev=>Math.max(0,prev-realUnreadCount));
         }
         return;
       }
@@ -946,7 +1045,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
           setMsgInput(body);
           return;
         }
-        setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+        setMessages(prev=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); });
         notifyRecipientNewChatMessage({
           recipientId:selChat.id,
           senderName:`Dr. ${name}`,
@@ -973,7 +1072,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         setMsgInput(body);
         return;
       }
-      setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+      setMessages(prev=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); });
       notifyRecipientNewChatMessage({
         recipientId:selChat.id,
         senderName:`Dr. ${name}`,
@@ -1220,7 +1319,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         throw error;
       }
       if(mirrorInOpenThread){
-        setMessages(prev=>sortMsgs(prev.map(m=>m.id===tempId?msg:m)));
+        setMessages(prev=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); });
       }
       notifyRecipientNewChatMessage({
         recipientId:patientId,
@@ -1304,7 +1403,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         .insert({sender_id:user.id,recipient_id:patientId,body})
         .select("*").single();
       if(error) throw error;
-      if(shouldMirror){ setMessages((prev)=>sortMsgs(prev.map((m)=>m.id===tempId?msg:m))); }
+      if(shouldMirror){ setMessages((prev)=>{ const rest=prev.filter(m=>m.id!==tempId&&m.id!==msg.id); return sortMsgs([...rest,msg]); }); }
       notifyRecipientNewChatMessage({
         recipientId:patientId,
         senderName:`Dr. ${name}`,
@@ -1414,7 +1513,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         supabase.from("profiles").select("*").eq("id",pat.id).single(),
         supabase.from("user_medications").select("*").eq("user_id",pat.id),
         supabase.from("doctor_notes").select("*").eq("doctor_id",user.id).eq("patient_id",pat.id).order("created_at",{ascending:false}),
-        supabase.from("prescriptions").select("id,status,notes,created_at,pharmacist_id,patient_id,doctor_id").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
+        supabase.from("prescriptions").select("id,status,notes,created_at,pharmacist_id,patient_id,doctor_id,review_status,pharmacist_review_note,safety_review_issues,prescription_medications(id,medication_name,dosage,frequency,instructions)").eq("patient_id",pat.id).eq("doctor_id",user.id).order("created_at",{ascending:false}),
         supabase.from("appointments").select("*").eq("patient_id",pat.id).eq("doctor_id",user.id).order("date",{ascending:true}),
       ]);
       setPatProfile(profRes.data||{});
@@ -1428,6 +1527,15 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     }catch(e){}finally{setLoading(false);}
   }
 
+  async function refreshPatPrescriptions(){
+    if(!selPat?.id||!user?.id) return;
+    try{
+      const { data, error } = await supabase.from("prescriptions").select("id,status,notes,created_at,pharmacist_id,patient_id,doctor_id,review_status,pharmacist_review_note,safety_review_issues,prescription_medications(id,medication_name,dosage,frequency,instructions)").eq("patient_id",selPat.id).eq("doctor_id",user.id).order("created_at",{ascending:false});
+      if(error) throw error;
+      if(data) setPatRx(data);
+    }catch(e){ console.error("refreshPatPrescriptions:", e); }
+  }
+
   async function confirmClearPatientVirtualCheckIn(){
     if(!checkInClearAwaitingConfirmPatientId||clearCheckInBusy) return;
     const pid=checkInClearAwaitingConfirmPatientId;
@@ -1435,12 +1543,14 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     try{
       const{error}=await doctorClearPatientVirtualVisitCheckIn(pid);
       if(error) throw error;
-      await supabase.from("notifications").insert({
-        user_id:pid,
-        type:"general",
-        title:"Check-in form reset",
-        body:`Dr. ${name} cleared your saved virtual visit check-in. You'll need to complete it again before your visit.`,
-      }).catch(()=>{});
+      try {
+        await supabase.from("notifications").insert({
+          user_id:pid,
+          type:"general",
+          title:"Check-in form reset",
+          body:`Dr. ${name} cleared your saved virtual visit check-in. You'll need to complete it again before your visit.`,
+        });
+      } catch (_) {}
       setPatProfile(p=>(p?.id===pid?{...p,pre_visit_intake:null,allergies:[],medical_conditions:[]}:p));
       setVirtualCheckInPatientProfile(vp=>(vp?.id===pid?{...vp,pre_visit_intake:null,allergies:[],medical_conditions:[]}:vp));
       setCheckInClearAwaitingConfirmPatientId(null);
@@ -1466,7 +1576,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       }
       const { data: allA } = await supabase
         .from("appointments")
-        .select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status")
+        .select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status,checked_in_at")
         .eq("doctor_id", user.id)
         .neq("status", "cancelled")
         .order("date", { ascending: true });
@@ -1694,7 +1804,22 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     setAvailBusy(true); setAvailMsg(null);
     try{
       const clean=parseDocBookingAvailability(bookingAvailability);
-      const payload={timezone:clean.timezone||"America/New_York",slots:clean.slots||{}};
+      // Prune past slots before saving so patients never see expired times
+      const nowSaveMs=Date.now();
+      const todaySave=new Date(nowSaveMs).toISOString().slice(0,10);
+      const prunedSlots=Object.entries(clean.slots||{}).reduce((acc,[date,times])=>{
+        if(date<todaySave) return acc;
+        let kept=times;
+        if(date===todaySave){
+          kept=times.filter(tm=>{
+            const ms=Date.parse(`${date}T${normTimeValue(tm)}`);
+            return !Number.isNaN(ms)&&ms>nowSaveMs;
+          });
+        }
+        if(kept.length) acc[date]=kept;
+        return acc;
+      },{});
+      const payload={timezone:clean.timezone||"America/New_York",slots:prunedSlots};
       const { data, error }=await supabase
         .from("profiles")
         .update({booking_availability:payload})
@@ -2018,8 +2143,62 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
         const pe=row.window.portalEndMs ?? row.window.windowEndMs;
         return videoNowMs<=pe;
       })
-      .sort((x,y)=>x.window.startMs-y.window.startMs);
+      .sort((x,y)=>{
+        // Checked-in patients float to the top
+        const xEvs=getEffectiveVirtualVisitStatus(x.appt);
+        const yEvs=getEffectiveVirtualVisitStatus(y.appt);
+        const xChecked=xEvs===VS.WAITING_FOR_DOCTOR||xEvs===VS.CHECKED_IN?0:1;
+        const yChecked=yEvs===VS.WAITING_FOR_DOCTOR||yEvs===VS.CHECKED_IN?0:1;
+        if(xChecked!==yChecked) return xChecked-yChecked;
+        return x.window.startMs-y.window.startMs;
+      });
   },[allAppointments,videoNowMs]);
+  const inPersonAppointments=useMemo(()=>{
+    const todayDate=new Date(videoNowMs).toISOString().slice(0,10);
+    return (allAppointments||[])
+      .filter(a=>{
+        if(!["scheduled","rescheduled"].includes(String(a?.status||""))) return false;
+        if(isVideoStyleVisitType(a)) return false;
+        if(!a?.date) return false;
+        if(a.date>todayDate) return true;
+        if(a.date<todayDate) return false;
+        // For today: only show if the appointment end window (start + 60 min) hasn't passed
+        const apptMs=Date.parse(`${a.date}T${normTimeValue(a.time||"00:00:00")}`);
+        return !Number.isNaN(apptMs)&&apptMs+60*60*1000>videoNowMs;
+      })
+      .sort((x,y)=>(`${x.date}T${x.time}`).localeCompare(`${y.date}T${y.time}`));
+  },[allAppointments,videoNowMs]);
+  // Auto-complete in-person appointments whose end window (start + 60 min) has passed
+  useEffect(()=>{
+    if(!user?.id||!allAppointments.length) return;
+    const nowMs=videoNowMs;
+    const todayDate=new Date(nowMs).toISOString().slice(0,10);
+    const expiredIds=allAppointments
+      .filter(a=>{
+        if(!["scheduled","rescheduled"].includes(String(a?.status||""))) return false;
+        if(isVideoStyleVisitType(a)) return false;
+        if(!a?.date||!a?.time) return false;
+        if(a.date>todayDate) return false;
+        if(expiredInPersonCompletedRef.current.has(a.id)) return false;
+        const apptMs=Date.parse(`${a.date}T${normTimeValue(a.time)}`);
+        return !Number.isNaN(apptMs)&&apptMs+60*60*1000<=nowMs;
+      })
+      .map(a=>a.id);
+    if(!expiredIds.length) return;
+    expiredIds.forEach(id=>expiredInPersonCompletedRef.current.add(id));
+    supabase.from("appointments")
+      .update({status:"completed",updated_at:new Date().toISOString()})
+      .in("id",expiredIds)
+      .then(({error})=>{
+        if(!error){
+          const mergeW=a=>expiredIds.includes(a.id)?{...a,status:"completed"}:a;
+          setAllAppointments(prev=>prev.map(mergeW));
+          setAppointments(prev=>prev.map(mergeW));
+        }else{
+          expiredIds.forEach(id=>expiredInPersonCompletedRef.current.delete(id));
+        }
+      });
+  },[videoNowMs,user?.id,allAppointments]);
   const waitingRoomList=useMemo(()=>{
     const list=[];
     Object.keys(videoSessionByWindowKey).forEach((k)=>{
@@ -2042,17 +2221,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     });
     const haveKey=new Set(list.map(w=>`${w.patientId}|${w.windowStartMs}|${w.windowEndMs}`));
     (virtualAppointments||[]).forEach(({appt,window})=>{
-      if(getEffectiveVirtualVisitStatus(appt)!==VS.WAITING_FOR_DOCTOR) return;
+      const evs=getEffectiveVirtualVisitStatus(appt);
+      if(evs!==VS.WAITING_FOR_DOCTOR && evs!==VS.CHECKED_IN) return;
       const k=`${appt.patient_id}|${window.windowStartMs}|${window.windowEndMs}`;
       if(haveKey.has(k)) return;
-      const portalEndMs=window.windowEndMs + VIDEO_VISIT_PORTAL_TAIL_MS;
-      if(videoNowMs > portalEndMs) return;
       haveKey.add(k);
       list.push({
         patientId:appt.patient_id,
         windowStartMs:window.windowStartMs,
         windowEndMs:window.windowEndMs,
-        checkedInAt:appt.updated_at || new Date().toISOString(),
+        checkedInAt:appt.checked_in_at || appt.updated_at || new Date().toISOString(),
       });
     });
     const byPatient={};
@@ -2085,6 +2263,27 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
     const pe=row.window.portalEndMs ?? row.window.windowEndMs;
     return videoNowMs>=row.window.windowStartMs && videoNowMs<=pe;
   }).length,[videoNowMs,virtualAppointments]);
+
+  function goToVirtualAppointmentFromWaiting(w){
+    if(!w) return;
+    const pid=String(w.patientId);
+    const match=(virtualAppointments||[]).find((r)=>
+      String(r.appt.patient_id)===pid&&
+      r.window.windowStartMs===w.windowStartMs&&
+      r.window.windowEndMs===w.windowEndMs
+    );
+    let apptId=match?.appt?.id||null;
+    if(!apptId){
+      const loose=(allAppointments||[]).find((a)=>{
+        if(String(a.patient_id)!==pid||!isVideoStyleVisitType(a)) return false;
+        const win=getAppointmentVideoWindow(a);
+        return win&&win.windowStartMs===w.windowStartMs&&win.windowEndMs===w.windowEndMs;
+      });
+      apptId=loose?.id||null;
+    }
+    if(apptId){ setPage("virtual"); setVirtualScrollApptId(apptId); }
+  }
+
   const greetHour=new Date().getHours();
   const docGreet=greetHour<12?"Good morning":greetHour<17?"Good afternoon":"Good evening";
   const patientChatFilter=chatSearchEmail.trim().toLowerCase();
@@ -2098,15 +2297,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       style={{padding:isMob?"7px 14px":"8px 18px",borderRadius:99,border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:isMob?11.5:12.5,fontWeight:700,transition:"all .18s",background:activeTab===id?DocAC:"var(--s2)",color:activeTab===id?"#fff":t3,boxShadow:activeTab===id?"0 4px 14px rgba(14,116,144,.3)":"none",display:"flex",alignItems:"center",gap:6}}>
       {label}{count!==undefined&&<span style={{background:activeTab===id?"rgba(255,255,255,.3)":"var(--b1)",borderRadius:99,padding:"1px 7px",fontSize:10.5,fontWeight:800}}>{count}</span>}
     </motion.button>
-  );
-  const VitalField=({label,value,field,placeholder,unit})=>(
-    <div className="min-w-0">
-      <label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:t3,marginBottom:5}}>{label}</label>
-      <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
-        <input className="inp min-w-0 flex-1" value={value} placeholder={placeholder} onChange={e=>setVitals(v=>({...v,[field]:e.target.value}))} style={{borderRadius:11,fontSize:16,padding:"9px 12px"}}/>
-        {unit&&<span style={{color:t3,fontSize:12,flexShrink:0}}>{unit}</span>}
-      </div>
-    </div>
   );
   return (
     <div style={{display:"flex",height:"100dvh",overflow:"hidden",background:"var(--bg)"}}>
@@ -2124,7 +2314,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             <p style={{color:DocAC,fontSize:26,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>{patients.length}</p>
           </div>
           <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:2}}>
-            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Virtual Visits",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare],["settings","Settings",Settings]].map(([id,l,I])=>(
               <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
                 <I size={15}/>{l}
                 {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
@@ -2246,7 +2436,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             <div style={{position:"absolute",bottom:1,right:1,width:9,height:9,borderRadius:"50%",background:isOnline?"#22c55e":"var(--b1)",border:"2px solid var(--s1)",transition:"background .4s"}}/>
                           </div>
                           <div style={{flex:1,minWidth:0}}>
-                            <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                            <div style={{display:"flex",alignItems:"center",gap:5}}>
+                              <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                              <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,background:"rgba(124,58,237,.13)",color:"#7c3aed",letterSpacing:".03em",textTransform:"uppercase",flexShrink:0}}>Pharmacist</span>
+                            </div>
                             <p style={{color:unread>0?DocAC:t3,fontSize:11,margin:"2px 0 0",fontWeight:unread>0?700:400}}>
                               {isOnline?"Online now":contact.lastMessageAt?new Date(contact.lastMessageAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):contact.pharmacy}
                             </p>
@@ -2278,7 +2471,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             <div style={{position:"absolute",bottom:1,right:1,width:9,height:9,borderRadius:"50%",background:isOnline?"#22c55e":"var(--b1)",border:"2px solid var(--s1)",transition:"background .4s"}}/>
                           </div>
                           <div style={{flex:1,minWidth:0}}>
-                            <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                            <div style={{display:"flex",alignItems:"center",gap:5}}>
+                              <p style={{color:t1,fontSize:13,fontWeight:unread>0?800:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contact.name}</p>
+                              <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,background:"rgba(6,182,212,.13)",color:"#0e7490",letterSpacing:".03em",textTransform:"uppercase",flexShrink:0}}>Patient</span>
+                            </div>
                             <p style={{color:unread>0?DocAC:t3,fontSize:11,margin:"2px 0 0",fontWeight:unread>0?700:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                               {isOnline?"Online now":contact.lastMessageAt?new Date(contact.lastMessageAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):(contact.email||"Patient")}
                             </p>
@@ -2320,54 +2516,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         </div>
                       </div>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-                        {peerIsPatient&&(
-                        <div style={{display:"flex",alignItems:"center",gap:6}}>
-                        <button
-                          type="button"
-                          onClick={openVideoVisit}
-                          disabled={videoApprovalBusy||videoEndBusy}
-                          title="Start video visit"
-                          style={{
-                            width:isMob?44:40,
-                            height:isMob?44:40,
-                            borderRadius:10,
-                            border:`1px solid ${b1}`,
-                            background:"var(--s1)",
-                            color:DocAC,
-                            display:"grid",
-                            placeItems:"center",
-                            cursor:(videoApprovalBusy||videoEndBusy)?"not-allowed":"pointer",
-                            opacity:(videoApprovalBusy||videoEndBusy)?0.55:1,
-                            fontFamily:"inherit",
-                          }}
-                          aria-label="Start video call"
-                        >
-                          {videoApprovalBusy?<Loader2 size={18} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={18}/>}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={endVideoVisitForPatient}
-                          disabled={videoApprovalBusy||videoEndBusy}
-                          title="End video visit — patient can no longer join until you start again"
-                          style={{
-                            width:isMob?44:40,
-                            height:isMob?44:40,
-                            borderRadius:10,
-                            border:`1px solid rgba(185,28,28,.3)`,
-                            background:"var(--s1)",
-                            color:"var(--ro)",
-                            display:"grid",
-                            placeItems:"center",
-                            cursor:(videoApprovalBusy||videoEndBusy)?"not-allowed":"pointer",
-                            opacity:(videoApprovalBusy||videoEndBusy)?0.55:1,
-                            fontFamily:"inherit",
-                          }}
-                          aria-label="End video visit"
-                        >
-                          {videoEndBusy?<Loader2 size={18} style={{animation:"spin360 .7s linear infinite"}}/>:<PhoneOff size={17}/>}
-                        </button>
-                        </div>
-                        )}
                         <button
                           type="button"
                           onClick={()=>{setShowSoundSettings(p=>!p);setShowPatPicker(false);}}
@@ -2477,7 +2625,12 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                 )}
                               </div>
                               <div style={{maxWidth:isMob?"88%":"72%",minWidth:0,display:"flex",flexDirection:"column",alignItems:isMe?"flex-end":"flex-start"}}>
-                                {groupTop&&!isMe&&<p style={{color:t3,fontSize:10,marginBottom:4,fontWeight:600,paddingLeft:2}}>{selChat.name}</p>}
+                                {groupTop&&!isMe&&(
+                                  <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:4,paddingLeft:2}}>
+                                    <span style={{color:t2,fontSize:11,fontWeight:700}}>{selChat.name}</span>
+                                    <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,letterSpacing:".03em",textTransform:"uppercase",background:peerIsPatient?"rgba(6,182,212,.13)":"rgba(124,58,237,.13)",color:peerIsPatient?"#0e7490":"#7c3aed"}}>{peerIsPatient?"Patient":"Pharmacist"}</span>
+                                  </div>
+                                )}
                                 {(isPatRef||isNewPatRef)&&patCard&&(
                                   <div style={{marginBottom:6,width:"100%",background:"var(--s1)",border:"1.5px solid rgba(14,116,144,.25)",borderRadius:12,overflow:"hidden",boxShadow:"0 2px 8px rgba(14,116,144,.08)"}}>
                                     <div style={{padding:"7px 12px",background:"rgba(14,116,144,.08)",borderBottom:"1px solid rgba(14,116,144,.15)",display:"flex",alignItems:"center",gap:6}}>
@@ -2803,7 +2956,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(66px + env(safe-area-inset-bottom,0px))":0}}>
               <div className="w-full min-w-0 max-w-[960px] mx-auto" style={{padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
                 <motion.div className="au" style={{marginBottom:isMob?18:22}}>
-                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Virtual Visits</h2>
+                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Appointments</h2>
                 </motion.div>
                 {doctorVideoVisitRequests.filter((r)=>r.status==="pending").length>0&&(
                 <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)",marginBottom:12}}>
@@ -2842,6 +2995,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     </div>
                 </motion.div>
                 )}
+                <p style={{margin:"0 0 10px",color:t1,fontSize:15,fontWeight:700,fontFamily:"inherit"}}>Virtual</p>
                 <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
                   <div style={{marginBottom:12,padding:"10px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}>
                     <p style={{margin:0,color:t1,fontSize:12.5,fontWeight:700}}>Waiting room list ({waitingRoomList.length})</p>
@@ -2850,62 +3004,20 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                     ):(
                       <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:8}}>
                         {waitingRoomList.slice(0,8).map((w)=>(
-                          <div key={`${w.patientId}-${w.windowStartMs}`} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",padding:"7px 8px",borderRadius:9,background:"var(--s1)",border:`1px solid ${b1}`}}>
-                            <div>
+                          <div
+                            key={`${w.patientId}-${w.windowStartMs}`}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e)=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); goToVirtualAppointmentFromWaiting(w);} }}
+                            onClick={()=>goToVirtualAppointmentFromWaiting(w)}
+                            style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",padding:"10px 10px",borderRadius:9,background:"var(--s1)",border:`1px solid ${b1}`,cursor:"pointer"}}
+                          >
+                            <div style={{minWidth:0,flex:1}}>
                               <p style={{margin:0,color:t1,fontSize:11.5,fontWeight:700}}>{patientNameById?.[w.patientId]||"Patient"}</p>
-                              <p style={{margin:"2px 0 0",color:DocAC,fontSize:10.5,fontWeight:700}}>Patient checked in · waiting.</p>
+                              <p style={{margin:"2px 0 0",color:DocAC,fontSize:10.5,fontWeight:700}}>Checked in · in waiting room</p>
+                              <p style={{margin:"4px 0 0",color:t3,fontSize:10.5}}>Checked in {new Date(w.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · Tap to open in Appointments</p>
                             </div>
-                            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                              <p style={{margin:0,color:t3,fontSize:11}}>
-                                Checked in {new Date(w.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-                              </p>
-                              <button
-                                type="button"
-                                onClick={()=>void startVideoVisitForPatient({patientId:w.patientId,windowStartMs:w.windowStartMs,windowEndMs:w.windowEndMs})}
-                                disabled={videoApprovalBusy&&(videoStartTargetId===w.patientId)}
-                                style={{
-                                  padding:"7px 10px",
-                                  borderRadius:9,
-                                  border:"none",
-                                  background:DocAC,
-                                  color:"#fff",
-                                  cursor:(videoApprovalBusy&&(videoStartTargetId===w.patientId))?"wait":"pointer",
-                                  fontFamily:"inherit",
-                                  fontSize:11,
-                                  fontWeight:700,
-                                  display:"inline-flex",
-                                  alignItems:"center",
-                                  gap:5,
-                                  opacity:(videoApprovalBusy&&(videoStartTargetId===w.patientId))?0.75:1,
-                                }}
-                              >
-                                {videoApprovalBusy&&(videoStartTargetId===w.patientId)?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={13}/>}
-                                {(videoApprovalBusy&&(videoStartTargetId===w.patientId))?"Starting...":"Start video"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={()=>void endVideoVisitForPatientContext({patientId:w.patientId,windowStartMs:w.windowStartMs,windowEndMs:w.windowEndMs,mirrorInOpenThread:false})}
-                                disabled={videoEndBusy}
-                                style={{
-                                  padding:"7px 10px",
-                                  borderRadius:9,
-                                  border:`1px solid ${b1}`,
-                                  background:"var(--s1)",
-                                  color:t1,
-                                  cursor:videoEndBusy?"not-allowed":"pointer",
-                                  fontFamily:"inherit",
-                                  fontSize:11,
-                                  fontWeight:700,
-                                  display:"inline-flex",
-                                  alignItems:"center",
-                                  gap:5,
-                                  opacity:videoEndBusy?0.75:1,
-                                }}
-                              >
-                                {videoEndBusy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:<PhoneOff size={13}/>}
-                                {videoEndBusy?"Ending...":"End video"}
-                              </button>
-                            </div>
+                            <ChevronRight size={18} color={t3} style={{flexShrink:0,opacity:0.7}} />
                           </div>
                         ))}
                       </div>
@@ -2934,39 +3046,47 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         const inNominalWindow=videoNowMs>=window.windowStartMs&&videoNowMs<=window.windowEndMs;
                         const lateReconnect=inPortal&&!beforeNominalStart&&!inNominalWindow;
                         const evs=getEffectiveVirtualVisitStatus(appt);
-                        const checkedInReady=!!checkedInRow||evs===VS.WAITING_FOR_DOCTOR;
+                        const checkedInReady=!!checkedInRow||evs===VS.WAITING_FOR_DOCTOR||evs===VS.CHECKED_IN;
+                        const checkedInTime=appt.checked_in_at||(checkedInRow?.checkedInAt)||appt.updated_at;
                         const statusText=beforeNominalStart
                           ?(inDoctorVideoWindow&&checkedInReady
-                              ?"Early start — you can start video up to 30 min before the visit time."
+                              ?"Patient checked in — you can start the call."
                               :`Opens in ${opensIn} min`)
                           :lateReconnect
                             ?"Reconnect window · you can still start video"
                           :inVisit
                             ?"In visit"
                             :checkedInReady
-                              ?"Patient waiting."
-                              :"Ready to start";
-                        const canStart=inDoctorVideoWindow&&inVisit===false&&!videoApprovalBusy&&checkedInReady;
+                              ?"Patient checked in — ready."
+                              :"Waiting for patient to check in.";
+                        const canStart=inVisit===false&&checkedInReady;
                         return (
-                          <div key={appt.id} style={{padding:isMob?"10px 10px":"12px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)",display:"flex",alignItems:isMob?"flex-start":"center",justifyContent:"space-between",gap:10,flexDirection:isMob?"column":"row"}}>
+                          <div key={appt.id} ref={(el)=>{ virtualApptElRefs.current[appt.id]=el; }} style={{padding:isMob?"10px 10px":"12px 12px",borderRadius:12,border:`1px solid ${checkedInReady?"#22c55e55":b1}`,background:checkedInReady?"rgba(34,197,94,.04)":"var(--s2)",display:"flex",alignItems:isMob?"flex-start":"center",justifyContent:"space-between",gap:10,flexDirection:isMob?"column":"row"}}>
                             <div style={{minWidth:0,flex:1}}>
-                              <p className="truncate" style={{margin:0,color:t1,fontSize:13,fontWeight:700}}>{patientName}</p>
+                              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                                <p className="truncate" style={{margin:0,color:t1,fontSize:13,fontWeight:700}}>{patientName}</p>
+                                {checkedInReady&&<span style={{padding:"2px 8px",borderRadius:20,background:"rgba(34,197,94,.15)",color:"#16a34a",fontSize:10,fontWeight:700}}>✓ Checked In</span>}
+                              </div>
                               <p className="truncate" style={{margin:"4px 0 0",color:t3,fontSize:12}}>{visitLabel}</p>
-                              <p style={{margin:"5px 0 0",color:(beforeNominalStart&&inDoctorVideoWindow||(inNominalWindow&&!beforeNominalStart)||lateReconnect)?"var(--gr)":t3,fontSize:11.5,fontWeight:600}}>{statusText}</p>
-                              {checkedInRow&&inVisit===false&&(
-                                <p style={{margin:"3px 0 0",color:DocAC,fontSize:11,fontWeight:700}}>Checked in at {new Date(checkedInRow.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</p>
+                              <p style={{margin:"5px 0 0",color:checkedInReady?"#16a34a":t3,fontSize:11.5,fontWeight:600}}>{statusText}</p>
+                              {checkedInReady&&checkedInTime&&inVisit===false&&(
+                                <p style={{margin:"3px 0 0",color:DocAC,fontSize:11,fontWeight:700}}>Checked in at {new Date(checkedInTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</p>
                               )}
                             </div>
                             <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:isMob?"stretch":"flex-end",alignItems:"center",width:isMob?"100%":"auto"}}>
+                            {canStart?(
                             <button
                               type="button"
-                              onClick={()=>void startVideoVisitForPatient({patientId:appt.patient_id,windowStartMs:window.windowStartMs,windowEndMs:window.windowEndMs})}
-                              disabled={!canStart}
-                              style={{padding:"9px 12px",borderRadius:10,border:"none",background:canStart?DocAC:"var(--b1)",color:"#fff",cursor:canStart?"pointer":"not-allowed",fontFamily:"inherit",fontSize:12,fontWeight:700,minWidth:isMob?"100%":0,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,opacity:videoApprovalBusy&&videoStartTargetId===appt.patient_id?0.75:1}}
+                              onClick={()=>{setActiveCallApptId(appt.id);setActiveCallPeerId(appt.patient_id);}}
+                              style={{padding:"9px 12px",borderRadius:10,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700,minWidth:isMob?"100%":0,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}
                             >
-                              {videoApprovalBusy&&videoStartTargetId===appt.patient_id?<Loader2 size={14} style={{animation:"spin360 .7s linear infinite"}}/>:<Video size={14}/>}
-                              {videoApprovalBusy&&videoStartTargetId===appt.patient_id?"Starting...":"Start video"}
+                              <Video size={14}/> Start Call
                             </button>
+                            ):(
+                            <div style={{padding:"9px 12px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",color:t3,fontFamily:"inherit",fontSize:11,fontWeight:600,display:"inline-flex",alignItems:"center",gap:5}}>
+                              Waiting for check-in
+                            </div>
+                            )}
                             <button
                               type="button"
                               onClick={async()=>{
@@ -2986,6 +3106,33 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                 style={{padding:"9px 10px",borderRadius:10,border:"1px solid rgba(5,150,105,.35)",background:"rgba(5,150,105,.08)",color:"var(--gr)",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600}}>End video</button>
                             ):null}
                             </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </motion.div>
+                <p style={{margin:"22px 0 10px",color:t1,fontSize:15,fontWeight:700,fontFamily:"inherit"}}>In-person</p>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"18px 20px",boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
+                  {inPersonAppointments.length===0?(
+                    <div style={{padding:isMob?"16px 8px":"24px 6px",textAlign:"center"}}>
+                      <Calendar size={26} color={t3} style={{opacity:.25,margin:"0 auto 10px",display:"block"}}/>
+                      <p style={{color:t3,fontSize:13,margin:0}}>No upcoming in-person appointments.</p>
+                    </div>
+                  ):(
+                    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                      {inPersonAppointments.map((appt)=>{
+                        const patName=patientNameById?.[appt.patient_id]||"Patient";
+                        const apptDate=new Date(`${appt.date}T12:00:00`);
+                        const dateLabel=apptDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+                        const timeLabel=to12h(appt.time);
+                        return (
+                          <div key={appt.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap",padding:isMob?"10px 10px":"12px 12px",borderRadius:12,border:`1px solid ${b1}`,background:"var(--s2)"}}>
+                            <div style={{minWidth:0,flex:1}}>
+                              <p className="truncate" style={{margin:0,color:t1,fontSize:13,fontWeight:700}}>{patName}</p>
+                              <p className="truncate" style={{margin:"4px 0 0",color:t3,fontSize:12}}>{appt.type||"In-person Visit"} · {dateLabel} at {timeLabel}</p>
+                            </div>
+                            <span style={{padding:"4px 10px",borderRadius:99,background:"rgba(14,116,144,.1)",color:DocAC,fontSize:11,fontWeight:700,flexShrink:0}}>{appt.status}</span>
                           </div>
                         );
                       })}
@@ -3018,7 +3165,10 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                           <p style={{margin:"2px 0 0",color:t1,fontSize:14,fontWeight:700}}>{new Date(`${date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</p>
                         </div>
                         <div style={{display:"flex",flexWrap:"wrap",gap:6,minWidth:0}}>
-                          {(bookingAvailability.slots[date]||[]).map(tm=>(
+                          {(bookingAvailability.slots[date]||[]).filter(tm=>{
+                            const ms=Date.parse(`${date}T${normTimeValue(tm)}`);
+                            return Number.isNaN(ms)||ms>videoNowMs||date>new Date(videoNowMs).toISOString().slice(0,10);
+                          }).map(tm=>(
                             <button key={`${date}-${tm}`} type="button" onClick={()=>removeAvailabilitySlot(date,tm)} style={{padding:"6px 10px",borderRadius:10,border:`1px solid ${b1}`,background:"var(--s1)",color:t2,cursor:"pointer",fontFamily:"inherit",fontSize:11.5,fontWeight:600}}>
                               {new Date(`2000-01-01T${tm}`).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})} ×
                             </button>
@@ -3040,7 +3190,37 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
             </div>
           )}
-          {}
+          {page==="settings"&&(
+            <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(66px + env(safe-area-inset-bottom,0px))":0}}>
+              <div className="w-full min-w-0 max-w-[600px] mx-auto" style={{padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
+                <motion.div className="au" style={{marginBottom:isMob?18:24}}>
+                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Settings</h2>
+                  <p style={{color:t3,fontSize:13,marginTop:4}}>Manage your profile and preferences.</p>
+                </motion.div>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"16px":"22px 24px",marginBottom:16}}>
+                  <h4 style={{color:t1,fontSize:13,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",marginBottom:16,display:"flex",alignItems:"center",gap:8}}><User size={14} color={DocAC}/> Profile</h4>
+                  <label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:t3,marginBottom:6}}>Display name</label>
+                  <p style={{color:t3,fontSize:12,margin:"0 0 10px"}}>This is how your name appears to patients and throughout the portal.</p>
+                  <DoctorNameField currentName={name} onSave={saveName} userId={user?.id} DocAC={DocAC}/>
+                </motion.div>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{delay:.05}} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"16px":"22px 24px",marginBottom:16}}>
+                  <h4 style={{color:t1,fontSize:13,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",marginBottom:16,display:"flex",alignItems:"center",gap:8}}>{light?<Sun size={14} color="var(--am)"/>:<Moon size={14}/>} Appearance</h4>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <div>
+                      <p style={{color:t1,fontSize:14,fontWeight:600,margin:0}}>{light?"Light mode":"Dark mode"}</p>
+                      <p style={{color:t3,fontSize:12,margin:"3px 0 0"}}>Choose your preferred theme.</p>
+                    </div>
+                    <div className={`sw ${!light?"on":""}`} onClick={()=>setLight(!light)}/>
+                  </div>
+                </motion.div>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{delay:.1}} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"16px":"22px 24px"}}>
+                  <h4 style={{color:t1,fontSize:13,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",marginBottom:16,display:"flex",alignItems:"center",gap:8}}><LogOut size={14} color="var(--ro)"/> Account</h4>
+                  <p style={{color:t3,fontSize:12,margin:"0 0 14px"}}>{user?.email}</p>
+                  <button onClick={handleSignOut} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 18px",borderRadius:11,border:"1px solid rgba(220,38,38,.25)",background:"rgba(220,38,38,.06)",cursor:"pointer",color:"var(--ro)",fontFamily:"inherit",fontSize:13,fontWeight:600}} onMouseEnter={e=>e.currentTarget.style.background="rgba(220,38,38,.12)"} onMouseLeave={e=>e.currentTarget.style.background="rgba(220,38,38,.06)"}><LogOut size={14}/> Sign Out</button>
+                </motion.div>
+              </div>
+            </div>
+          )}
           {page==="patients"&&(
             <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(56px + env(safe-area-inset-bottom,0px))":0}}>
             <div className="w-full min-w-0 max-w-[1020px] mx-auto" style={{padding:isMob?"16px 14px":"32px 22px 48px"}}>
@@ -3124,7 +3304,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                             </div>
                           </div>
                           <div className={`flex gap-2 ${isMob?"w-full flex-col":"flex-wrap items-start justify-end"}`}>
-                            <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={`btn-doc ${isMob?"w-full justify-center py-2.5":""}`} onClick={()=>setShowPrescribe(true)} style={{display:"flex",alignItems:"center",gap:7,padding:isMob?"10px 14px":"10px 18px",fontSize:isMob?12.5:13,borderRadius:12}}><Pill size={14}/> Prescribe</motion.button>
+                            <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={`btn-doc ${isMob?"w-full justify-center py-2.5":""}`} onClick={()=>{setPrescribeEditRx(null);setShowPrescribe(true);}} style={{display:"flex",alignItems:"center",gap:7,padding:isMob?"10px 14px":"10px 18px",fontSize:isMob?12.5:13,borderRadius:12}}><Pill size={14}/> Prescribe</motion.button>
                             <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={isMob?"w-full justify-center py-2.5":""} onClick={()=>{setShowSendToPharmacy(true);setSendToPharmacyDone(false);}} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:isMob?"10px 14px":"10px 16px",borderRadius:12,border:"1px solid rgba(14,116,144,.3)",background:"rgba(14,116,144,.07)",color:DocAC,cursor:"pointer",fontFamily:"inherit",fontSize:isMob?12.5:13,fontWeight:600}}><Send size={13}/> Send to Pharmacy</motion.button>
                             <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={isMob?"w-full justify-center py-2.5":""} onClick={()=>setPage("messages")} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:isMob?"10px 14px":"10px 16px",borderRadius:12,border:"1px solid rgba(14,116,144,.3)",background:"transparent",color:DocAC,cursor:"pointer",fontFamily:"inherit",fontSize:isMob?12.5:13,fontWeight:600}}><MessageSquare size={13}/> Message</motion.button>
                             <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={isMob?"w-full justify-center py-2.5":""} onClick={()=>setDeleteConfirm(selPat.id)} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:isMob?"10px 14px":"10px 16px",borderRadius:12,border:"1px solid rgba(185,28,28,.25)",background:"rgba(185,28,28,.06)",color:"var(--ro)",cursor:"pointer",fontFamily:"inherit",fontSize:isMob?12.5:13,fontWeight:600}}><Trash2 size={13}/>{isMob?" Remove patient":" Remove"}</motion.button>
@@ -3178,11 +3358,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"22px 24px"}}>
                           <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:isMob?14:20}}>Record Vitals</h4>
                           <div style={{display:"grid",gridTemplateColumns:isMob?"1fr":"repeat(3, minmax(0, 1fr))",gap:isMob?12:14,marginBottom:18}}>
-                            <VitalField label="Blood Pressure" field="bp" value={vitals.bp} placeholder="120/80" unit="mmHg"/>
-                            <VitalField label="Heart Rate" field="hr" value={vitals.hr} placeholder="72" unit="bpm"/>
-                            <VitalField label="Temperature" field="temp" value={vitals.temp} placeholder="98.6" unit="°F"/>
-                            <VitalField label="Weight" field="weight" value={vitals.weight} placeholder="165" unit="lbs"/>
-                            <VitalField label="O2 Saturation" field="o2" value={vitals.o2} placeholder="98" unit="%"/>
+                            <VitalField label="Blood Pressure" value={vitals.bp} placeholder="120/80" unit="mmHg" onChange={e=>setVitals(v=>({...v,bp:e.target.value}))}/>
+                            <VitalField label="Heart Rate" value={vitals.hr} placeholder="72" unit="bpm" onChange={e=>setVitals(v=>({...v,hr:e.target.value}))}/>
+                            <VitalField label="Temperature" value={vitals.temp} placeholder="98.6" unit="°F" onChange={e=>setVitals(v=>({...v,temp:e.target.value}))}/>
+                            <VitalField label="Weight" value={vitals.weight} placeholder="165" unit="lbs" onChange={e=>setVitals(v=>({...v,weight:e.target.value}))}/>
+                            <VitalField label="O2 Saturation" value={vitals.o2} placeholder="98" unit="%" onChange={e=>setVitals(v=>({...v,o2:e.target.value}))}/>
                           </div>
                           <div style={{marginBottom:18}}><label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:t3,marginBottom:5}}>Visit Notes</label><textarea className="inp w-full min-w-0" rows={isMob?4:3} value={vitals.notes} onChange={e=>setVitals(v=>({...v,notes:e.target.value}))} placeholder="Notes from this visit..." style={{borderRadius:13,fontSize:16}}/></div>
                           <AnimatePresence>{vitalsSaved&&<div style={{marginBottom:12}}><OkBanner msg="Vitals saved."/></div>}</AnimatePresence>
@@ -3252,7 +3432,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"20px 22px"}}>
                           <div className={`mb-4 flex gap-3 ${isMob?"flex-col":"flex-row items-center justify-between"}`}>
                             <h4 style={{color:t1,fontSize:14,fontWeight:700,margin:0}}>Prescriptions</h4>
-                            <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={`btn-doc shrink-0 ${isMob?"w-full justify-center py-2":""}`} onClick={()=>setShowPrescribe(true)} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:"8px 16px",fontSize:12.5,borderRadius:11}}><Plus size={13}/> New prescription</motion.button>
+                            <motion.button type="button" whileHover={{scale:1.03}} whileTap={{scale:.97}} className={`btn-doc shrink-0 ${isMob?"w-full justify-center py-2":""}`} onClick={()=>{setPrescribeEditRx(null);setShowPrescribe(true);}} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:"8px 16px",fontSize:12.5,borderRadius:11}}><Plus size={13}/> New prescription</motion.button>
                           </div>
                           {patRx.length===0?<p style={{color:t3,fontSize:13}}>No prescriptions yet.</p>:(
                             <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -3260,17 +3440,38 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                                 const isOpen=selRxChat===rx.id;
                                 const statusColors={pending_pharmacist:{bg:"rgba(217,119,6,.1)",color:"var(--am)"},pending_fill:{bg:"rgba(14,116,144,.1)",color:DocAC},ready:{bg:"rgba(5,150,105,.1)",color:"var(--gr)"},filled:{bg:"rgba(5,150,105,.1)",color:"var(--gr)"},picked_up:{bg:"rgba(5,150,105,.08)",color:"var(--gr)"}};
                                 const sc=statusColors[rx.status]||{bg:"var(--s2)",color:t3};
+                                const rev=rx.review_status||"approved";
+                                const revLabel=PRESCRIPTION_REVIEW_STATUS_LABELS[rev]||rev;
                                 return(
                                   <div key={rx.id} className="min-w-0" style={{border:`1px solid ${b1}`,borderRadius:14,overflow:"hidden"}}>
-                                    <div style={{padding:"12px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"var(--s2)"}}>
+                                    <div style={{padding:"12px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"var(--s2)",flexWrap:"wrap"}}>
                                       <div style={{flex:1,minWidth:0}}>
-                                        <span style={{color:t2,fontSize:12,fontWeight:600}}>{new Date(rx.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span>
+                                        {rx.prescription_medications?.length>0&&(
+                                          <p className="break-words" style={{margin:"0 0 2px",color:t1,fontSize:13,fontWeight:700}}>
+                                            {rx.prescription_medications.map((m)=>{
+                                              const dose=m.dosage||(m.dosage_amount?`${m.dosage_amount} ${m.dosage_unit||""}`.trim():"");
+                                              return `${m.medication_name}${dose?` ${dose}`:""}`;
+                                            }).join(", ")}
+                                          </p>
+                                        )}
+                                        <span style={{color:t3,fontSize:11,fontWeight:500}}>{new Date(rx.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span>
                                         {rx.notes&&<p style={{color:t3,fontSize:11,margin:"3px 0 0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rx.notes}</p>}
+                                        {rev!=="approved"&&(
+                                          <p style={{margin:"6px 0 0",color:rev==="rejected"?"var(--ro)":DocAC,fontSize:11,fontWeight:600}}>{revLabel}</p>
+                                        )}
+                                        {rev==="rejected"&&rx.pharmacist_review_note&&(
+                                          <p className="break-words" style={{margin:"4px 0 0",color:t2,fontSize:11,lineHeight:1.45}}><strong>Pharmacist:</strong> {rx.pharmacist_review_note}</p>
+                                        )}
                                       </div>
-                                      <span style={{padding:"3px 10px",borderRadius:99,fontSize:11,fontWeight:700,background:sc.bg,color:sc.color,flexShrink:0}}>{PRESCRIPTION_STATUS_LABELS[rx.status]||rx.status}</span>
-                                      <button onClick={()=>{setSelRxChat(isOpen?null:rx.id);}} style={{padding:"4px 10px",borderRadius:8,border:`1px solid ${b1}`,background:isOpen?DocAC:"transparent",color:isOpen?"#fff":t3,cursor:"pointer",fontSize:11,fontWeight:600,fontFamily:"inherit",flexShrink:0}}>
-                                        {isOpen?"Close":"Chat"}
-                                      </button>
+                                      <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
+                                        <span style={{padding:"3px 10px",borderRadius:99,fontSize:11,fontWeight:700,background:sc.bg,color:sc.color}}>{PRESCRIPTION_STATUS_LABELS[rx.status]||rx.status}</span>
+                                        {rev==="rejected"&&(
+                                          <button type="button" onClick={()=>{ setPrescribeEditRx(rx); setShowPrescribe(true); }} style={{padding:"5px 10px",borderRadius:8,border:`1px solid ${DocAC}`,background:"var(--doc-pd)",color:DocAC,cursor:"pointer",fontSize:10.5,fontWeight:700,fontFamily:"inherit"}}>Update &amp; resubmit</button>
+                                        )}
+                                        <button onClick={()=>{setSelRxChat(isOpen?null:rx.id);}} style={{padding:"4px 10px",borderRadius:8,border:`1px solid ${b1}`,background:isOpen?DocAC:"transparent",color:isOpen?"#fff":t3,cursor:"pointer",fontSize:11,fontWeight:600,fontFamily:"inherit"}}>
+                                          {isOpen?"Close":"Chat"}
+                                        </button>
+                                      </div>
                                     </div>
                                     {isOpen&&(
                                       <div style={{borderTop:`1px solid ${b1}`,display:"flex",flexDirection:"column",height:280}}>
@@ -3375,8 +3576,33 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             </motion.div>
           </motion.div>
         )}
-        {showPrescribe&&selPat&&(<PrescribeModal patient={selPat} patientProfile={patProfile} doctor={user} onClose={()=>setShowPrescribe(false)} onSuccess={()=>setShowPrescribe(false)}/>)}
+        {showPrescribe&&selPat&&(
+          <PrescribeModal
+            patient={selPat}
+            patientProfile={patProfile}
+            doctor={user}
+            editPrescription={prescribeEditRx}
+            editMedicationLines={prescribeEditRx?.prescription_medications}
+            onClose={()=>{setShowPrescribe(false);setPrescribeEditRx(null);}}
+            onSuccess={()=>{void refreshPatPrescriptions();setShowPrescribe(false);setPrescribeEditRx(null);}}
+          />
+        )}
       </AnimatePresence>
+      {/* WebRTC video call overlay */}
+      {activeCallApptId&&(
+        <VideoCallPanel
+          appointmentId={activeCallApptId}
+          userId={user.id}
+          peerId={activeCallPeerId}
+          role="doctor"
+          onEnd={()=>{
+            setActiveCallApptId(null);
+            setActiveCallPeerId(null);
+            setAllAppointments(prev=>prev.map(a=>a.id===activeCallApptId?{...a,virtual_visit_status:"call_ended"}:a));
+            setAppointments(prev=>prev.map(a=>a.id===activeCallApptId?{...a,virtual_visit_status:"call_ended"}:a));
+          }}
+        />
+      )}
       <AnimatePresence>{showNickname&&<NicknameModal currentName={name} onSave={saveName} onClose={()=>setShowNickname(false)} userId={user?.id}/>}</AnimatePresence>
 
       {/* Notification panel */}
@@ -3555,7 +3781,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
               <div style={{height:1,background:"var(--b0)",margin:"0 12px 8px"}}/>
               <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:1}}>
-                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Virtual Visits",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare],["settings","Settings",Settings]].map(([id,l,I])=>(
                   <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);setMobMenu(false);}}>
                     <I size={15}/>{l}
                     {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}

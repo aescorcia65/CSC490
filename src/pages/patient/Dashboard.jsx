@@ -108,8 +108,15 @@ function sameMedIdSet(a, b) {
 
 function buildTodaysDoseRows(meds) {
   const rows = [];
+  const seenByName = new Set();
+  const seenById = new Set();
   for (const m of meds) {
     for (const slotTime of expandDoseTimesForToday(m)) {
+      const nameKey = `${String(m.name || "").toLowerCase().trim()}|${slotTime}`;
+      const idKey = `${String(m.id || "").trim()}|${slotTime}`;
+      if (seenByName.has(nameKey) || seenById.has(idKey)) continue;
+      seenByName.add(nameKey);
+      seenById.add(idKey);
       rows.push({ med: m, slotTime });
     }
   }
@@ -162,12 +169,19 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
 
   const overdueDoseRows = useMemo(() => {
     const rows = [];
+    const seenByName = new Set();
+    const seenById = new Set();
     for (const m of medList) {
       const slots = expandDoseTimesForToday(m);
       const past = slots
         .filter((s) => timeHMToMins(s) < curMins && !doseRowLogged(m, s))
         .sort((a, b) => timeHMToMins(a) - timeHMToMins(b));
       for (const slotTime of past) {
+        const nameKey = `${String(m.name || "").toLowerCase().trim()}|${slotTime}`;
+        const idKey = `${String(m.id || "").trim()}|${slotTime}`;
+        if (seenByName.has(nameKey) || seenById.has(idKey)) continue;
+        seenByName.add(nameKey);
+        seenById.add(idKey);
         rows.push({ med: m, slotTime });
       }
     }
@@ -266,8 +280,12 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
     const slotSec = (hm) => timeHMToMins(hm) * 60;
     const allRows = buildTodaysDoseRows(medList);
     const untakenRows = allRows.filter((r) => !doseRowLogged(r.med, r.slotTime));
+    // Only future (non-overdue) untaken rows drive the next-dose countdown.
+    // Overdue doses remain visible in the schedule list but should not control the timer.
+    const futureUntakenRows = untakenRows.filter((r) => slotSec(r.slotTime) > cur);
 
-    if (!untakenRows.length) {
+    if (!futureUntakenRows.length) {
+      // All doses either taken or overdue — show next dose tomorrow (same schedule repeats).
       if (!medList.length) {
         return {
           ringLabel: "Next dose",
@@ -285,7 +303,11 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
         };
       }
       const sortedNextDay = [...allRows].sort((a, b) => slotSec(a.slotTime) - slotSec(b.slotTime));
-      const first = sortedNextDay[0];
+      // Prefer tomorrow's first dose whose slot time was NOT missed today.
+      // This prevents "Tomorrow at 12:00 AM" when midnight is a wrap-around dose
+      // from "Three times daily" but the user has morning/afternoon doses scheduled.
+      const missedSlotTimes = new Set(untakenRows.map((r) => r.slotTime));
+      const first = sortedNextDay.find((r) => !missedSlotTimes.has(r.slotTime)) || sortedNextDay[0];
       if (!first) {
         return {
           ringLabel: "Next dose",
@@ -312,34 +334,32 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
         centerMain: formatInApprox(secUntil),
         timeHint: `Tomorrow at ${to12h(first.slotTime)}`,
         nextUpNames: formatNextUpMedLine(sameSlotMeds),
-        statusLine: "All medications taken today",
+        // statusLine only renders when firstMed is null; shown as "all done" either way.
+        statusLine: untakenRows.length === 0 ? "All medications taken today" : "No more doses today",
         namesSummary: null,
         dueSoonNames: null,
         ringPct,
         firstMed: first.med,
         firstSlotTime: first.slotTime,
+        // Always true here: we are showing tomorrow's dose, not a same-day slot.
+        // The "Upcoming" card uses allComplete to decide whether to display timeHint ("Tomorrow at X").
         allComplete: true,
         secUntil,
       };
     }
 
-    const sorted = [...untakenRows].sort((a, b) => slotSec(a.slotTime) - slotSec(b.slotTime) || String(a.med.name).localeCompare(String(b.med.name), undefined, { sensitivity: "base", numeric: true }));
+    // Sort future untaken rows by time; these are all strictly after "now".
+    const sorted = [...futureUntakenRows].sort((a, b) => slotSec(a.slotTime) - slotSec(b.slotTime) || String(a.med.name).localeCompare(String(b.med.name), undefined, { sensitivity: "base", numeric: true }));
     const first = sorted[0];
     const tsec = slotSec(first.slotTime);
-    let secUntil;
-    if (tsec > cur) {
-      secUntil = tsec - cur;
-    } else {
-      secUntil = 86400 - cur + tsec;
-    }
+    const secUntil = tsec - cur; // Always positive: futureUntakenRows guarantees tsec > cur
     const ringMaxSec = ringMaxSecForMedSpacing(first.med, NEXT_DOSE_RING_FALLBACK_SEC);
     const ringPct = Math.min(100, Math.max(12, 100 - (secUntil / ringMaxSec) * 40));
-    const dayPart = tsec > cur ? "Today" : "Tomorrow";
 
     const primaryGroupMeds = sorted.filter((r) => r.slotTime === first.slotTime).map((r) => r.med);
     const nextUpNames = formatNextUpMedLine(primaryGroupMeds);
 
-    const dueSoonRows = doseRowsDueInNextHour(untakenRows, cur);
+    const dueSoonRows = doseRowsDueInNextHour(futureUntakenRows, cur);
     let dueSoonNames = dueSoonRows.length ? formatDueSoonNames(dueSoonRows.map((r) => r.med)) : null;
     if (dueSoonRows.length && sameMedIdSet(primaryGroupMeds, dueSoonRows.map((r) => r.med))) {
       dueSoonNames = null;
@@ -367,7 +387,7 @@ export default function Dashboard({ user, meds, setMeds, onAdd, displayName, onE
     return {
       ringLabel: "Next dose",
       centerMain: formatInApprox(secUntil),
-      timeHint: `${dayPart} at ${to12h(first.slotTime)}`,
+      timeHint: `Today at ${to12h(first.slotTime)}`,
       nextUpNames,
       statusLine: null,
       namesSummary,

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import MarketingLanding from "../components/auth/MarketingLanding";
@@ -36,15 +36,19 @@ const authedLoading = (
 /**
  * Marketing home for logged-out visitors. If a session exists (e.g. OAuth return to `/`),
  * send users to onboarding or their role home so signing back in always reaches the app (patients → `/dashboard`).
+ * On mobile, skip the marketing page and go straight to sign-in.
  */
 export default function HomePage() {
-  const { user, userRole, onboardingComplete } = useAuth();
+  const { user, userRole, onboardingComplete, profileLoaded } = useAuth();
   const navigate = useNavigate();
+  const [isMobile] = useState(() => window.innerWidth < 760);
 
   useEffect(() => {
     if (user === undefined) return;
-    if (!user) return;
-    if (userRole == null) return;
+    if (!user) {
+      return;
+    }
+    if (!profileLoaded) return;
     if (!onboardingComplete) {
       navigate("/onboarding", { replace: true });
       return;
@@ -58,10 +62,10 @@ export default function HomePage() {
       return;
     }
     navigate("/dashboard", { replace: true });
-  }, [user, userRole, onboardingComplete, navigate]);
+  }, [user, userRole, onboardingComplete, profileLoaded, navigate, isMobile]);
 
   if (user && user !== undefined) {
-    if (userRole == null) {
+    if (!profileLoaded) {
       return authedLoading;
     }
     return null;

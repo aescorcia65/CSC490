@@ -23,6 +23,7 @@ import { careTeamDoctorEntries } from "../../lib/careTeam";
 import { buildVideoCallUrlFromRoom, buildVideoRoomId, getAppointmentVideoWindow, isVideoStyleVisitType } from "../../lib/videoCall";
 import { buildPatientRescheduleRequestPayload, hasActiveRescheduleRequest, normalizeRescheduleRequest } from "../../lib/rescheduleRequest";
 import VirtualPreVisitModal from "../../components/appointments/VirtualPreVisitModal";
+import VideoCallPanel from "../../components/video/VideoCallPanel";
 import { isVirtualVisitCheckInComplete, patientEnterVirtualWaitingRoom } from "../../lib/virtualVisitCheckIn";
 import { getEffectiveVirtualVisitStatus, VS } from "../../lib/virtualVisitStatus";
 
@@ -37,7 +38,7 @@ const BORDER = "var(--b1)";
 const SHADOW = "var(--shadow-card)";
 const SHADOW_LG = "var(--shadow-card-hover)";
 
-const TAB = { UPCOMING: "upcoming", PAST: "past", CANCELLED: "cancelled", REQUESTS: "requests" };
+const TAB = { UPCOMING: "upcoming", VIRTUAL: "virtual", IN_PERSON: "in_person", PAST: "past", CANCELLED: "cancelled", REQUESTS: "requests" };
 
 /** @deprecated use normalizeRescheduleRequest — kept for a few call sites expecting { date, time } */
 function parseRescheduleRequest(raw) {
@@ -146,7 +147,11 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const [bookBusy, setBookBusy] = useState(false);
   const [bookErr, setBookErr] = useState("");
   const [bookNotice, setBookNotice] = useState("");
+  /** Toast shown when the doctor books/updates an appointment on the patient's behalf. */
+  const [apptToast, setApptToast] = useState(null);
   const [videoActionBusyId, setVideoActionBusyId] = useState(null);
+  const [activeCallApptId, setActiveCallApptId] = useState(null);
+  const [activeCallDoctorId, setActiveCallDoctorId] = useState(null);
   /** Bumps every 1s so visit-window UI (check-in, join) stays in sync with real time. */
   const [, setVideoUiTick] = useState(0);
 
@@ -154,8 +159,16 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => localDateKey());
   const [expandedRequestId, setExpandedRequestId] = useState(null);
   const autoExpandRescheduleRef = useRef(false);
+  /** Set to true after the initial appointments load — prevents the realtime INSERT handler
+   *  from firing a toast for rows that arrive during the first fetch. */
+  const initialLoadDoneRef = useRef(false);
+  /** Tracks appointment IDs the patient just booked themselves, so the realtime echo
+   *  does not double-show a toast for their own booking. */
+  const selfBookedIdsRef = useRef(new Set());
   /** Debounced full refetch so realtime + doctor-created rows always match Supabase (partial payloads). */
   const appointmentsRefreshTimerRef = useRef(null);
+  /** Tracks in-person appointment IDs already auto-completed to avoid duplicate DB writes. */
+  const expiredInPersonRef = useRef(new Set());
 
   const [patientProfile, setPatientProfile] = useState(null);
   const [preVisitModalOpen, setPreVisitModalOpen] = useState(false);
@@ -173,7 +186,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     if (!userId) return;
     const { data } = await supabase
       .from("appointments")
-      .select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status")
+      .select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status,checked_in_at")
       .eq("patient_id", userId)
       .order("date", { ascending: true });
     setAllAppts(data || []);
@@ -188,34 +201,49 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     return () => clearInterval(t);
   }, []);
 
+  /** Low-frequency clock (30 s) used to re-evaluate time-based filters without excessive renders. */
+  const [nowMinute, setNowMinute] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMinute(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Poll for appointment status changes (e.g. call_started) every 6 seconds
+  // so the Join Call button appears even if a realtime event was missed.
+  useEffect(() => {
+    if (!userId) return;
+    const t = setInterval(() => { refresh(); }, 6000);
+    return () => clearInterval(t);
+  }, [userId, refresh]);
+
   const performVirtualCheckIn = useCallback(
-    async (appt, videoWindow, videoRoomId, _waitingKey) => {
+    async (appt) => {
       if (!userId) throw new Error("You must be signed in to check in.");
       if (!appt?.doctor_id) throw new Error("This appointment is missing a doctor. Refresh and try again.");
-      if (!videoWindow) throw new Error("This is not a video visit or the time is invalid.");
-      if (!videoRoomId) throw new Error("Could not start check-in. Refresh the page and try again.");
       const st = String(appt.status || "");
-      if (st === "cancelled" || st === "completed") {
-        throw new Error("This appointment cannot be checked in.");
-      }
-      if (String(appt.date || "").slice(0, 10) < localDateKey()) {
-        throw new Error("Past appointments cannot be checked in.");
-      }
-      if (!isVideoStyleVisitType(appt)) {
-        throw new Error("Only video / virtual visits use online check-in.");
-      }
-      if (!isVirtualCheckInWindowOpen(appt, Date.now())) {
-        throw new Error("Check-in is only available during your visit window.");
-      }
+      if (st === "cancelled" || st === "completed") throw new Error("This appointment cannot be checked in.");
+      if (String(appt.date || "").slice(0, 10) < localDateKey()) throw new Error("Past appointments cannot be checked in.");
+      if (!isVideoStyleVisitType(appt)) throw new Error("Only virtual visits support check-in.");
       setVideoActionBusyId(appt.id);
       try {
-        const { error } = await patientEnterVirtualWaitingRoom({ userId, appt, videoWindow });
-        if (error) {
-          const msg = error.message || (typeof error === "string" ? error : "Could not complete check-in.");
-          throw new Error(msg);
-        }
+        const now = new Date().toISOString();
+        const { error } = await supabase
+          .from("appointments")
+          .update({ virtual_visit_status: VS.WAITING_FOR_DOCTOR, checked_in_at: now })
+          .eq("id", appt.id);
+        if (error) throw new Error(error.message || "Could not complete check-in.");
+        // Notify doctor (best-effort)
+        try {
+          await supabase.from("notifications").insert({
+            user_id: appt.doctor_id,
+            type: "general",
+            title: "Patient checked in",
+            body: "Patient has checked in and is waiting to be seen.",
+            related_id: appt.id,
+          });
+        } catch (_) {}
         setAllAppts((prev) =>
-          prev.map((a) => (a.id === appt.id ? { ...a, virtual_visit_status: VS.WAITING_FOR_DOCTOR } : a)),
+          prev.map((a) => (a.id === appt.id ? { ...a, virtual_visit_status: VS.WAITING_FOR_DOCTOR, checked_in_at: now } : a)),
         );
       } finally {
         setVideoActionBusyId(null);
@@ -252,7 +280,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         setPatientProfile(prof || null);
       });
     reloadLinkedDoctors();
-    refresh().finally(() => setLoading(false));
+    initialLoadDoneRef.current = false;
+    refresh().finally(() => {
+      setLoading(false);
+      // Allow a short grace window before treating incoming INSERTs as doctor-booked toasts.
+      setTimeout(() => { initialLoadDoneRef.current = true; }, 600);
+    });
 
     const scheduleAppointmentsFetch = () => {
       if (appointmentsRefreshTimerRef.current != null) {
@@ -266,20 +299,32 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
     const ch = supabase
       .channel(`appts-full-${userId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "appointments", filter: `patient_id=eq.${userId}` }, (payload) => {
+      // No server-side filter — without REPLICA IDENTITY FULL, column filters on UPDATE
+      // events are silently dropped. We filter by patient_id client-side instead.
+      .on("postgres_changes", { event: "*", schema: "public", table: "appointments" }, (payload) => {
         if (payload.eventType === "INSERT" && payload.new) {
           const row = payload.new;
+          if (row.patient_id !== userId) return;
           setAllAppts((prev) => {
             if (prev.some((a) => a.id === row.id)) return prev;
             return [...prev, row].sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
           });
+          // Show a toast only when: initial load is done AND the patient didn't book this themselves.
+          if (initialLoadDoneRef.current && !selfBookedIdsRef.current.has(row.id)) {
+            const dateStr = row.date ? new Date(row.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+            const timeStr = row.time ? format12hFromTime(row.time) : "";
+            const label = [dateStr, timeStr].filter(Boolean).join(" at ");
+            setApptToast(label ? `New appointment scheduled: ${label}` : "Your doctor has scheduled a new appointment for you.");
+          }
           scheduleAppointmentsFetch();
           return;
         }
         if (payload.eventType === "UPDATE" && payload.new?.id) {
           const row = payload.new;
+          // Only process rows that belong to this patient (client-side guard)
           setAllAppts((prev) => {
             const exists = prev.some((a) => a.id === row.id);
+            if (!exists && row.patient_id !== userId) return prev;
             const next = exists ? prev.map((a) => (a.id === row.id ? { ...a, ...row } : a)) : [...prev, row];
             return next.sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
           });
@@ -545,11 +590,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     [doctorTakenSlots],
   );
 
-  const { upcomingConfirmed, pastList, cancelledList, requestList, counts } = useMemo(() => {
+  const { upcomingConfirmed, virtualList, inPersonList, pastList, cancelledList, requestList, counts } = useMemo(() => {
     const upcomingConfirmed = [];
     const pastList = [];
     const cancelledList = [];
     const requestList = [];
+    const nowMs = nowMinute;
 
     for (const a of allAppts) {
       if (a.status === "cancelled") {
@@ -560,13 +606,21 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
         pastList.push(a);
         continue;
       }
-      if (a.status === "scheduled" && a.date < todayStr) {
+      if ((a.status === "scheduled" || a.status === "rescheduled") && a.date < todayStr) {
         pastList.push(a);
         continue;
       }
-      if (a.status === "rescheduled" && a.date < todayStr) {
-        pastList.push(a);
-        continue;
+      // For today's in-person appointments, check if end window (start + 60 min) has passed
+      if (
+        (a.status === "scheduled" || a.status === "rescheduled") &&
+        a.date === todayStr &&
+        !isVideoStyleVisitType(a)
+      ) {
+        const apptMs = Date.parse(`${a.date}T${normTime(a.time || "00:00")}`);
+        if (!Number.isNaN(apptMs) && apptMs + 60 * 60 * 1000 <= nowMs) {
+          pastList.push(a);
+          continue;
+        }
       }
       if (hasActiveRescheduleRequest(a) && a.date >= todayStr) {
         requestList.push(a);
@@ -581,38 +635,53 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     cancelledList.sort((x, y) => apptSortKey(y).localeCompare(apptSortKey(x)));
     requestList.sort((x, y) => apptSortKey(x).localeCompare(apptSortKey(y)));
 
+    const virtualList = upcomingConfirmed.filter((a) => isVideoStyleVisitType(a));
+    const inPersonList = upcomingConfirmed.filter((a) => !isVideoStyleVisitType(a));
+
     const pendingVisitReq = videoVisitRequests.filter((r) => String(r?.status || "") === "pending").length;
 
     return {
       upcomingConfirmed,
+      virtualList,
+      inPersonList,
       pastList,
       cancelledList,
       requestList,
       counts: {
         upcoming: upcomingConfirmed.length,
+        virtual: virtualList.length,
+        inPerson: inPersonList.length,
         pending: requestList.length + pendingVisitReq,
         cancelled: cancelledList.length,
       },
     };
-  }, [allAppts, todayStr, videoVisitRequests]);
+  }, [allAppts, todayStr, videoVisitRequests, nowMinute]);
 
   const primaryAppt = upcomingConfirmed[0] || null;
   const primaryDoc = primaryAppt ? doctorProfiles[primaryAppt.doctor_id] : null;
   const primaryBooking = primaryDoc ? parseBookingAvailability(primaryDoc.booking_availability) : { timezone: "America/New_York", slots: {} };
 
   const linkedDoctors = useMemo(() => {
+    const nowMs = nowMinute;
     return Object.values(doctorProfiles)
       .map((doc) => {
         const booking = parseBookingAvailability(doc.booking_availability);
         const slotCount = Object.entries(booking.slots || {}).reduce((sum, [dateKey, arr]) => {
           if (dateKey < todayStr) return sum;
-          return sum + (Array.isArray(arr) ? arr.length : 0);
+          if (!Array.isArray(arr)) return sum;
+          if (dateKey > todayStr) return sum + arr.length;
+          // For today, count only future times
+          return sum + arr.filter((tm) => {
+            const ms = Date.parse(`${dateKey}T${normTime(tm)}`);
+            return !Number.isNaN(ms) && ms > nowMs;
+          }).length;
         }, 0);
         return { ...doc, slotCount };
       });
-  }, [doctorProfiles, todayStr]);
+  }, [doctorProfiles, todayStr, nowMinute]);
   const doctorsWithSlots = useMemo(() => linkedDoctors.filter((doc) => doc.slotCount > 0), [linkedDoctors]);
   const slotsPreviewByDoctor = useMemo(() => {
+    const nowMs = nowMinute;
     return linkedDoctors
       .map((doc) => {
         const booking = parseBookingAvailability(doc.booking_availability);
@@ -622,11 +691,16 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           .sort()
           .forEach((dateKey) => {
             const times = Array.isArray(booking.slots[dateKey]) ? booking.slots[dateKey] : [];
-            times.forEach((tm) => preview.push({ date: dateKey, time: normTime(tm) }));
+            times.forEach((tm) => {
+              const ms = Date.parse(`${dateKey}T${normTime(tm)}`);
+              // Skip today's times that have already passed
+              if (dateKey === todayStr && !Number.isNaN(ms) && ms <= nowMs) return;
+              preview.push({ date: dateKey, time: normTime(tm) });
+            });
           });
         return { doctor: doc, slots: preview.slice(0, 8), slotCount: doc.slotCount || 0 };
       });
-  }, [linkedDoctors, todayStr]);
+  }, [linkedDoctors, todayStr, nowMinute]);
 
   useEffect(() => {
     if (!bookOpen) return;
@@ -647,16 +721,34 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
   const activeDoctor = rescheduleAppt ? rescheduleDoc : primaryDoc;
 
   const slotDateKeys = useMemo(() => {
-    const keys = Object.keys(activeBooking.slots || {}).filter((d) => d >= todayStr && Array.isArray(activeBooking.slots[d]) && activeBooking.slots[d].length > 0);
+    const nowMs = nowMinute;
+    const keys = Object.keys(activeBooking.slots || {}).filter((d) => {
+      if (!Array.isArray(activeBooking.slots[d]) || !activeBooking.slots[d].length) return false;
+      if (d < todayStr) return false;
+      if (d > todayStr) return true;
+      return activeBooking.slots[d].some((tm) => {
+        const ms = Date.parse(`${d}T${normTime(tm)}`);
+        return !Number.isNaN(ms) && ms > nowMs;
+      });
+    });
     keys.sort();
     return keys;
-  }, [activeBooking.slots, todayStr]);
+  }, [activeBooking.slots, todayStr, nowMinute]);
 
   const bookSlotDateKeys = useMemo(() => {
-    const keys = Object.keys(bookBooking.slots || {}).filter((d) => d >= todayStr && Array.isArray(bookBooking.slots[d]) && bookBooking.slots[d].length > 0);
+    const nowMs = nowMinute;
+    const keys = Object.keys(bookBooking.slots || {}).filter((d) => {
+      if (!Array.isArray(bookBooking.slots[d]) || !bookBooking.slots[d].length) return false;
+      if (d < todayStr) return false;
+      if (d > todayStr) return true;
+      return bookBooking.slots[d].some((tm) => {
+        const ms = Date.parse(`${d}T${normTime(tm)}`);
+        return !Number.isNaN(ms) && ms > nowMs;
+      });
+    });
     keys.sort();
     return keys;
-  }, [bookBooking.slots, todayStr]);
+  }, [bookBooking.slots, todayStr, nowMinute]);
 
   useEffect(() => {
     if (!rescheduleForId) return;
@@ -703,6 +795,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const t = setTimeout(() => setBookNotice(""), 8000);
     return () => clearTimeout(t);
   }, [bookNotice]);
+
+  useEffect(() => {
+    if (!apptToast) return;
+    const t = setTimeout(() => setApptToast(null), 8000);
+    return () => clearTimeout(t);
+  }, [apptToast]);
 
   useEffect(() => {
     if (loading || autoExpandRescheduleRef.current || tab !== TAB.UPCOMING) return;
@@ -853,6 +951,37 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     }
   }
 
+  // Auto-mark in-person appointments as completed once their window (start + 60 min) passes
+  useEffect(() => {
+    if (!userId) return;
+    const nowMs = nowMinute;
+    const todayDate = localDateKey(new Date(nowMs));
+    const expiredIds = allAppts
+      .filter((a) => {
+        if (a.status !== "scheduled" && a.status !== "rescheduled") return false;
+        if (isVideoStyleVisitType(a)) return false;
+        if (!a.date || !a.time) return false;
+        if (a.date > todayDate) return false;
+        if (expiredInPersonRef.current.has(a.id)) return false;
+        const apptMs = Date.parse(`${a.date}T${normTime(a.time)}`);
+        return !Number.isNaN(apptMs) && apptMs + 60 * 60 * 1000 <= nowMs;
+      })
+      .map((a) => a.id);
+    if (!expiredIds.length) return;
+    expiredIds.forEach((id) => expiredInPersonRef.current.add(id));
+    supabase
+      .from("appointments")
+      .update({ status: "completed", updated_at: new Date().toISOString() })
+      .in("id", expiredIds)
+      .then(({ error }) => {
+        if (!error) {
+          setAllAppts((prev) => prev.map((a) => (expiredIds.includes(a.id) ? { ...a, status: "completed" } : a)));
+        } else {
+          expiredIds.forEach((id) => expiredInPersonRef.current.delete(id));
+        }
+      });
+  }, [nowMinute, userId]); // allAppts intentionally omitted — ref guards against duplicate runs
+
   async function bookAppointment() {
     if (!userId || !bookingDoctorId || bookBusy) return;
     if (!bookSelected?.date || !bookSelected?.time) {
@@ -878,7 +1007,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
       status: "scheduled",
       ...(visitType === "Virtual Visit" ? { virtual_visit_status: VS.PENDING } : {}),
     };
-    const { data: createdAppt, error } = await supabase.from("appointments").insert(insertRow).select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status").single();
+    const { data: createdAppt, error } = await supabase.from("appointments").insert(insertRow).select("id,patient_id,doctor_id,date,time,type,notes,status,reschedule_request,virtual_visit_status,checked_in_at").single();
     setBookBusy(false);
     if (error) {
       setBookErr(error.message || "Could not book. Check your care team in Settings.");
@@ -911,6 +1040,9 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     setBookSelected(null);
     setBookVisitMode("in_person");
     if (createdAppt) {
+      // Mark this ID so the realtime echo doesn't re-show a "doctor booked" toast.
+      selfBookedIdsRef.current.add(createdAppt.id);
+      setTimeout(() => selfBookedIdsRef.current.delete(createdAppt.id), 10000);
       setAllAppts((prev) => (prev.some((a) => a.id === createdAppt.id) ? prev : [...prev, createdAppt]));
     }
     setBookNotice(`Successfully booked for ${apptLabel}.`);
@@ -996,6 +1128,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     <div style={{ display: "flex", alignItems: "center", gap: 0, borderBottom: `1px solid ${BORDER}`, marginBottom: 20, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       {[
         { id: TAB.UPCOMING, label: "Upcoming" },
+        { id: TAB.VIRTUAL, label: "Virtual" },
+        { id: TAB.IN_PERSON, label: "In-person" },
         { id: TAB.PAST, label: "Past" },
         { id: TAB.CANCELLED, label: "Cancelled" },
         { id: TAB.REQUESTS, label: "Requests", badge: counts.pending },
@@ -1062,10 +1196,24 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const subtitle = panelOpts.subtitle || "Select one of your doctor's available times. You cannot pick a time outside this list.";
     const flatTop = panelOpts.flatTop === true;
     const doctorId = panelOpts.doctorId || null;
-    const keys = Object.keys(booking.slots || {}).filter((d) => Array.isArray(booking.slots[d]) && booking.slots[d].length > 0);
+    const panelNowMs = Date.now();
+    const panelTodayStr = localDateKey();
+    const keys = Object.keys(booking.slots || {}).filter((d) => {
+      if (!Array.isArray(booking.slots[d]) || !booking.slots[d].length) return false;
+      if (d < panelTodayStr) return false;
+      if (d > panelTodayStr) return true;
+      return booking.slots[d].some((tm) => {
+        const ms = Date.parse(`${d}T${normTime(tm)}`);
+        return !Number.isNaN(ms) && ms > panelNowMs;
+      });
+    });
     keys.sort();
     const activeDate = sel?.date && keys.includes(sel.date) ? sel.date : keys[0];
-    const times = activeDate ? booking.slots[activeDate] || [] : [];
+    const allTimes = activeDate ? booking.slots[activeDate] || [] : [];
+    // Filter out past times for today
+    const times = activeDate === panelTodayStr
+      ? allTimes.filter((tm) => { const ms = Date.parse(`${activeDate}T${normTime(tm)}`); return !Number.isNaN(ms) && ms > panelNowMs; })
+      : allTimes;
 
     return (
       <div style={flatTop ? { marginTop: 0, paddingTop: 0 } : { marginTop: 20, paddingTop: 20, borderTop: `1px solid ${BORDER}` }}>
@@ -1192,6 +1340,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
     const videoUrl = videoRoomId ? buildVideoCallUrlFromRoom(videoRoomId) : "";
     const waitingKey = videoWindow ? `${appt.id}:${videoWindow.windowStartMs}` : "";
     const evs = getEffectiveVirtualVisitStatus(appt);
+    const isCallStarted = evs === VS.CALL_STARTED;  // WebRTC: doctor opened call
+    const isCallEnded = evs === VS.CALL_ENDED;       // WebRTC: call finished
     const isInWaitingRoom = evs === VS.WAITING_FOR_DOCTOR || evs === VS.VIDEO_STARTED;
     const isDoctorVideoStartedDb = evs === VS.VIDEO_STARTED;
     const isStarted = isDoctorVideoStartedDb;
@@ -1205,33 +1355,15 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           : isStarted
             ? "doctor_started"
             : "waiting";
-    const waitingForDoctorLocked = videoState === "waiting" && isCheckedIn && !isStarted;
+    const waitingForDoctorLocked = isCheckedIn && !isStarted;
     const needsPreVisitComplete = !!(videoWindow && !isVirtualVisitCheckInComplete(patientProfile));
+    // Show check-in button for all upcoming virtual appointments that aren't checked in yet
+    const isVirtualAppt = isVideoStyleVisitType(appt);
+    const showCheckInBtn = isVirtualAppt && !isCheckedIn && !isCallStarted && !isCallEnded && !needsPreVisitComplete;
+    const showPreVisitBtn = isVirtualAppt && needsPreVisitComplete && !isCheckedIn;
     const showPrimaryVideoBtn =
       !!videoWindow && videoState !== "doctor_started" && !waitingForDoctorLocked;
-    /** Pre-visit form only needs an appointment window + doctor — not Jitsi URL — so button stays clickable while profile loads. */
-    const virtualBtnDisabled =
-      !showPrimaryVideoBtn ||
-      (!needsPreVisitComplete && !videoUrl) ||
-      videoActionBusyId === appt.id ||
-      videoState === "expired" ||
-      (!needsPreVisitComplete && videoState === "too_early");
-
-    let virtualPrimaryLabel = "Video unavailable";
-    if (videoWindow) {
-      if (needsPreVisitComplete) {
-        virtualPrimaryLabel =
-          videoState === "too_early"
-            ? "Complete check-in (opens soon)"
-            : "Complete check-in";
-      } else if (videoState === "too_early") {
-        virtualPrimaryLabel = `Opens ${new Date(videoWindow.windowStartMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
-      } else if (videoState === "expired") {
-        virtualPrimaryLabel = "Visit ended";
-      } else {
-        virtualPrimaryLabel = "Check in for visit.";
-      }
-    }
+    const virtualBtnDisabled = videoActionBusyId === appt.id;
 
     const doc = doctorProfiles[appt.doctor_id];
     const dname = doctorDisplayName(doc);
@@ -1266,7 +1398,7 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
       if (!isCheckedIn) {
         try {
-          await performVirtualCheckIn(appt, videoWindow, videoRoomId, waitingKey);
+          await performVirtualCheckIn(appt);
         } catch (e) {
           const msg = e?.message || e?.error_description || "Check-in failed. Please try again.";
           if (typeof window !== "undefined") window.alert(msg);
@@ -1401,71 +1533,58 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           </div>
 
           <div style={{ display: "flex", flexDirection: isMob ? "row" : "column", gap: 10, flexShrink: 0, width: isMob ? "100%" : 132, justifyContent: "flex-start" }}>
-            {videoWindow && showPrimaryVideoBtn ? (
+            {/* WebRTC Join Call button — shown when doctor has opened the call */}
+            {isCallStarted ? (
               <button
                 type="button"
-                onClick={handleVirtualVisitClick}
-                disabled={virtualBtnDisabled}
+                onClick={() => { setActiveCallApptId(appt.id); setActiveCallDoctorId(appt.doctor_id); }}
                 style={{
                   flex: 1,
                   padding: "10px 14px",
                   borderRadius: 10,
-                  border: `2px solid ${PRIMARY}`,
-                  background: !virtualBtnDisabled ? PRIMARY : SURFACE,
-                  color: !virtualBtnDisabled ? "#fff" : PRIMARY,
+                  border: "none",
+                  background: "#059669",
+                  color: "#fff",
                   fontFamily: font,
                   fontSize: 13,
-                  fontWeight: 600,
-                  cursor: !virtualBtnDisabled ? "pointer" : "not-allowed",
+                  fontWeight: 700,
+                  cursor: "pointer",
                   display: "inline-flex",
                   alignItems: "center",
                   justifyContent: "center",
                   gap: 6,
-                  opacity: videoActionBusyId === appt.id ? 0.7 : 1,
+                  boxShadow: "0 0 0 3px rgba(5,150,105,.25)",
                 }}
               >
-                <Video size={14} /> {videoActionBusyId === appt.id ? "Working..." : virtualPrimaryLabel}
+                <Video size={14} /> Join Call
               </button>
-            ) : videoWindow ? (
-              <div
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: `1px solid ${BORDER}`,
-                  background: "var(--s1)",
-                  fontFamily: font,
-                  fontSize: 12.5,
-                  fontWeight: 600,
-                  color: TEXT,
-                  textAlign: "center",
-                  lineHeight: 1.4,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                }}
-              >
-                <span>{waitingForDoctorLocked ? "Checked in. Waiting for doctor to start the video." : "Your doctor has joined. Join video chat."}</span>
-                {!waitingForDoctorLocked && videoState === "doctor_started" ? (
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab?.("messages")}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 8,
-                      border: `2px solid ${PRIMARY}`,
-                      background: SURFACE,
-                      color: PRIMARY,
-                      fontFamily: font,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Open Messages to join
-                  </button>
-                ) : null}
+            ) : isCallEnded ? (
+              <div style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `1px solid ${BORDER}`, background: "var(--s2)", fontFamily: font, fontSize: 13, fontWeight: 600, color: "var(--b1, #94a3b8)", textAlign: "center" }}>
+                Call ended
               </div>
+            ) : waitingForDoctorLocked ? (
+              // Checked in — waiting for doctor to start
+              <div style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: `1px solid #22c55e44`, background: "rgba(34,197,94,.07)", fontFamily: font, fontSize: 12.5, fontWeight: 600, color: "#16a34a", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                ✓ Checked in · Waiting for doctor
+              </div>
+            ) : showPreVisitBtn ? (
+              <button
+                type="button"
+                onClick={handleVirtualVisitClick}
+                disabled={virtualBtnDisabled}
+                style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `2px solid ${PRIMARY}`, background: SURFACE, color: PRIMARY, fontFamily: font, fontSize: 13, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: virtualBtnDisabled ? 0.7 : 1 }}
+              >
+                <Video size={14} /> {virtualBtnDisabled ? "Working..." : "Complete pre-visit form"}
+              </button>
+            ) : showCheckInBtn ? (
+              <button
+                type="button"
+                onClick={() => { setVideoActionBusyId(appt.id); performVirtualCheckIn(appt).catch((e) => alert(e.message)).finally(() => setVideoActionBusyId(null)); }}
+                disabled={virtualBtnDisabled}
+                style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: "none", background: PRIMARY, color: "#fff", fontFamily: font, fontSize: 13, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: virtualBtnDisabled ? 0.7 : 1 }}
+              >
+                <Video size={14} /> {virtualBtnDisabled ? "Checking in..." : "Check In"}
+              </button>
             ) : null}
             <button
               type="button"
@@ -1871,20 +1990,11 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           <p style={{ margin: 0, fontSize: 14, color: TEXT_MUTED, fontFamily: font }}>{empty}</p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {rows.map((a) => {
-              const doc = doctorProfiles[a.doctor_id];
-              return (
-                <div key={a.id} style={{ padding: 14, borderRadius: 12, border: `1px solid ${BORDER}`, background: "var(--s2)" }}>
-                  <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: TEXT, fontFamily: font }}>{a.type}</p>
-                  <p style={{ margin: "6px 0 0", fontSize: 13, color: TEXT_MUTED, fontFamily: font }}>
-                    {a.date} · {format12hFromTime(a.time)} · Dr. {doctorDisplayName(doc)}
-                  </p>
-                  {a.status === "cancelled" ? (
-                    <span style={{ display: "inline-block", marginTop: 8, fontSize: 11, fontWeight: 700, color: "#94a3b8" }}>Cancelled</span>
-                  ) : null}
-                </div>
-              );
-            })}
+            {rows.map((a) => (
+              <div key={a.id}>
+                {appointmentMainCard(a)}
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -2014,6 +2124,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
             {bookNotice}
           </div>
         ) : null}
+        {apptToast ? (
+          <div style={{ marginBottom: 12, borderRadius: 10, padding: "10px 14px", background: "rgba(37,99,235,.1)", border: "1px solid rgba(37,99,235,.3)", color: "var(--pl)", fontSize: 13, fontWeight: 600, fontFamily: font, display: "flex", alignItems: "center", gap: 8 }}>
+            <Calendar size={15} style={{ flexShrink: 0 }} />
+            {apptToast}
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", gap: isMob ? 0 : 28, alignItems: "flex-start", flexDirection: isMob ? "column" : "row" }}>
           <main style={{ flex: 1, minWidth: 0 }}>
@@ -2052,6 +2168,8 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
                   </>
                 )}
 
+                {tab === TAB.VIRTUAL && listCard("Virtual appointments", virtualList, "No upcoming virtual appointments.")}
+                {tab === TAB.IN_PERSON && listCard("In-person appointments", inPersonList, "No upcoming in-person appointments.")}
                 {tab === TAB.PAST && listCard("Past appointments", pastList, "No past appointments yet.")}
                 {tab === TAB.CANCELLED && listCard("Cancelled appointments", cancelledList, "No cancelled appointments.")}
                 {tab === TAB.REQUESTS && (
@@ -2205,6 +2323,12 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
           {bookNotice}
         </div>
       ) : null}
+      {apptToast ? (
+        <div style={{ position: "fixed", top: "calc(56px + env(safe-area-inset-top,0px))", right: 12, zIndex: 200, borderRadius: 10, padding: "10px 14px", background: "rgba(37,99,235,.94)", color: "#fff", fontSize: 13, fontWeight: 700, boxShadow: "0 8px 20px rgba(37,99,235,.28)", maxWidth: isMob ? "92vw" : 420, display: "flex", alignItems: "center", gap: 8 }}>
+          <Calendar size={14} style={{ flexShrink: 0 }} />
+          {apptToast}
+        </div>
+      ) : null}
 
       <AnimatePresence>
         {bookOpen && (
@@ -2353,6 +2477,23 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
               }
         }
       />
+      {/* WebRTC video call overlay */}
+      {activeCallApptId && (
+        <VideoCallPanel
+          appointmentId={activeCallApptId}
+          userId={userId}
+          peerId={activeCallDoctorId}
+          role="patient"
+          onEnd={() => {
+            setActiveCallApptId(null);
+            setActiveCallDoctorId(null);
+            // Update local appointment state so the button shows "Call ended"
+            setAllAppts((prev) =>
+              prev.map((a) => a.id === activeCallApptId ? { ...a, virtual_visit_status: "call_ended" } : a)
+            );
+          }}
+        />
+      )}
     </div>
   );
 }

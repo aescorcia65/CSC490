@@ -11,7 +11,7 @@ import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib
 import { mergeNotificationRows } from "../../lib/notificationRealtimeMerge";
 import { notificationSuggestsPrescription, notificationSuggestsChat } from "../../lib/notificationNavigation";
 import { notifyRecipientNewChatMessage } from "../../lib/messageNotifications";
-import { PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
+import { PRESCRIPTION_STATUS_LABELS, PRESCRIPTION_REVIEW_STATUS_LABELS } from "../../lib/constants";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { usePresenceOnlineMap } from "../../hooks/usePresenceOnlineMap";
 import { formatProfileFullName } from "../../lib/profileName";
@@ -29,6 +29,10 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const [rxMeds, setRxMeds] = useState([]);
   const [loading, setLoading] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [safetyRejectNote, setSafetyRejectNote] = useState("");
+  useEffect(() => {
+    setSafetyRejectNote("");
+  }, [selRx?.id]);
   const [patSearchEmail, setPatSearchEmail] = useState("");
   const [patSearchBusy, setPatSearchBusy] = useState(false);
   const [patSearchMsg, setPatSearchMsg] = useState(null);
@@ -39,6 +43,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const [msgSending, setMsgSending] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [unreadPerContact, setUnreadPerContact] = useState({});
+  const [pendingRefillCount, setPendingRefillCount] = useState(0);
   const [msgMode, setMsgMode] = useState("doctors");
   const [patientChatContacts, setPatientChatContacts] = useState([]);
   const [unreadPatientCount, setUnreadPatientCount] = useState(0);
@@ -144,6 +149,20 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   const totalChatUnread = unreadCount + unreadPatientCount;
   const saveName = (n) => { setLocalName(n); if (setDisplayName) setDisplayName(n); };
 
+  // Real-time pending refill count for sidebar badge
+  useEffect(() => {
+    if (!user?.id) return;
+    const fetchPending = () => {
+      supabase.from("refill_requests").select("id", { count: "exact", head: true }).eq("status", "pending")
+        .then(({ count }) => setPendingRefillCount(count || 0));
+    };
+    fetchPending();
+    const ch = supabase.channel(`pha-refill-badge-${user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "refill_requests" }, fetchPending)
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [user?.id]);
+
   function sortContacts(list) {
     return [...list].sort((a, b) => (b.lastMessageAt || "").localeCompare(a.lastMessageAt || ""));
   }
@@ -199,11 +218,11 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
   async function loadPrescriptions() {
     try {
       const { data: mine } = await supabase.from("prescriptions")
-        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id")
+        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id,review_status,pharmacist_review_note,safety_review_issues")
         .eq("pharmacist_id", user.id)
         .order("created_at", { ascending: false });
       const { data: unassigned } = await supabase.from("prescriptions")
-        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id")
+        .select("id,patient_id,doctor_id,status,notes,created_at,pharmacist_id,review_status,pharmacist_review_note,safety_review_issues")
         .is("pharmacist_id", null)
         .eq("status", "pending_pharmacist")
         .order("created_at", { ascending: false });
@@ -849,6 +868,76 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     } catch (e) { console.error("updateStatus:", e); } finally { setActionBusy(false); }
   }
 
+  async function approveSafetyReview(rx) {
+    if (!rx?.id) return;
+    setActionBusy(true);
+    try {
+      await supabase
+        .from("prescriptions")
+        .update({ review_status: "approved", updated_at: new Date().toISOString() })
+        .eq("id", rx.id);
+      setSelRx((p) => (p?.id === rx.id ? { ...p, review_status: "approved" } : p));
+      setPrescriptions((prev) => prev.map((r) => (r.id === rx.id ? { ...r, review_status: "approved" } : r)));
+      loadPrescriptions();
+      const patName = patientNames[rx.patient_id] || "Patient";
+      if (rx.doctor_id) {
+        try {
+          await supabase.from("notifications").insert({
+            user_id: rx.doctor_id,
+            type: "general",
+            title: "Pharmacist approved safety review",
+            body: `${name} approved medication safety for ${patName}.`,
+            related_id: rx.id,
+          });
+        } catch {}
+      }
+    } catch (e) {
+      console.error("approveSafetyReview:", e);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function rejectSafetyReviewTarget(rx) {
+    if (!rx?.id) return;
+    const note = safetyRejectNote.trim();
+    if (!note) {
+      window.alert("Please enter a reason for the physician.");
+      return;
+    }
+    setActionBusy(true);
+    try {
+      await supabase
+        .from("prescriptions")
+        .update({
+          review_status: "rejected",
+          pharmacist_review_note: note,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", rx.id);
+      setSelRx((p) => (p?.id === rx.id ? { ...p, review_status: "rejected", pharmacist_review_note: note } : p));
+      setPrescriptions((prev) => prev.map((r) => (r.id === rx.id ? { ...r, review_status: "rejected", pharmacist_review_note: note } : r)));
+      setSafetyRejectNote("");
+      loadPrescriptions();
+      const patName = patientNames[rx.patient_id] || "Patient";
+      if (rx.doctor_id) {
+        try {
+          await supabase.from("notifications").insert({
+            user_id: rx.doctor_id,
+            type: "general",
+            title: "Pharmacist rejected prescription details",
+            body: `${name} rejected a medication for ${patName}: ${note}`,
+            related_id: rx.id,
+          });
+        } catch {}
+      }
+    } catch (e) {
+      console.error("rejectSafetyReviewTarget:", e);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (!user?.id) return;
     const load = () => supabase.from("notifications").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(40).then(({ data }) => setPhaNotifs(data || []));
@@ -899,6 +988,11 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
     if (!n?.id || !user?.id) return;
     if (!n.read_at) await markNotifRead(n.id);
     setShowNotifPanel(false);
+    // Refill requests must route to the Refill requests tab, not Prescriptions
+    if (n.type === "refill_upcoming" || /\brefill\b/i.test(`${n?.title || ""} ${n?.body || ""}`)) {
+      setPage("refills");
+      return;
+    }
     const rxId = n.related_id;
     if (rxId && notificationSuggestsPrescription(n)) {
       let rx = prescriptions.find(r => r.id === rxId);
@@ -992,7 +1086,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
       }).subscribe();
     return () => { clearInterval(poll); supabase.removeChannel(ch); };
   }, [selRx?.id]);
-  const pendingCount = prescriptions.filter(p => p.status === "pending_pharmacist" || p.status === "pending_fill").length;
+  const pendingCount = prescriptions.filter(p => p.status === "pending_pharmacist" || p.status === "pending_fill" || p.review_status === "pending_review").length;
   const readyCount = prescriptions.filter(p => p.status === "ready" || p.status === "filled" || p.status === "picked_up").length;
   const filtered = prescriptions.filter(p => !search || (patientNames[p.patient_id] || "").toLowerCase().includes(search.toLowerCase()));
   const patientChatFilter = patientChatSearchEmail.trim().toLowerCase();
@@ -1022,6 +1116,9 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
             {[["dashboard", "Dashboard", HeartPulse], ["refills", "Refill requests", ClipboardList], ["prescriptions", "Prescriptions", Pill], ["messages", "Messages", MessageSquare]].map(([id, l, I]) => (
               <div key={id} className={`nl ${page === id ? "pha-on" : ""}`} onClick={() => { setPage(id); setSelRx(null); }}>
                 <I size={15} />{l}
+                {id === "refills" && pendingRefillCount > 0 && (
+                  <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{pendingRefillCount > 99 ? "99+" : pendingRefillCount}</span>
+                )}
                 {id === "messages" && totalChatUnread > 0 && (
                   <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{totalChatUnread > 99 ? "99+" : totalChatUnread}</span>
                 )}
@@ -1192,7 +1289,10 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                               <div style={{ position: "absolute", bottom: 1, right: 1, width: 9, height: 9, borderRadius: "50%", background: isOnline ? "#22c55e" : "var(--b1)", border: "2px solid var(--s1)", transition: "background .4s" }} />
                             </div>
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <p className="truncate" style={{ color: t1, fontSize: 13, fontWeight: unread > 0 ? 800 : 700, margin: 0 }} title={`Dr. ${contact.name}`}>Dr. {contact.name}</p>
+                              <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                <p className="truncate" style={{ color: t1, fontSize: 13, fontWeight: unread > 0 ? 800 : 700, margin: 0 }} title={`Dr. ${contact.name}`}>Dr. {contact.name}</p>
+                                <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 99, background: "rgba(37,99,235,.13)", color: "var(--p, #2563eb)", letterSpacing: ".03em", textTransform: "uppercase", flexShrink: 0 }}>Doctor</span>
+                              </div>
                               <p style={{ color: unread > 0 ? PhAC : t3, fontSize: 11, margin: "2px 0 0", fontWeight: unread > 0 ? 700 : 400 }}>
                                 {isOnline ? "Online now" : contact.lastMessageAt ? new Date(contact.lastMessageAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : contact.specialty}
                               </p>
@@ -1225,7 +1325,10 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                             <div style={{ position: "absolute", bottom: 1, right: 1, width: 9, height: 9, borderRadius: "50%", background: isOnline ? "#22c55e" : "var(--b1)", border: "2px solid var(--s1)", transition: "background .4s" }} />
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <p className="truncate" style={{ color: t1, fontSize: 13, fontWeight: unread > 0 ? 800 : 700, margin: 0 }} title={contact.name}>{contact.name}</p>
+                            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                              <p className="truncate" style={{ color: t1, fontSize: 13, fontWeight: unread > 0 ? 800 : 700, margin: 0 }} title={contact.name}>{contact.name}</p>
+                              <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 99, background: "rgba(6,182,212,.13)", color: "#0e7490", letterSpacing: ".03em", textTransform: "uppercase", flexShrink: 0 }}>Patient</span>
+                            </div>
                             <p style={{ color: unread > 0 ? PhAC : t3, fontSize: 11, margin: "2px 0 0", fontWeight: unread > 0 ? 700 : 400 }}>
                               {isOnline ? "Online now" : contact.lastMessageAt ? new Date(contact.lastMessageAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Patient"}
                             </p>
@@ -1448,7 +1551,12 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                                 )}
                               </div>
                               <div style={{ maxWidth: isMob ? "88%" : "78%", minWidth: 0, display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
-                                {groupTop && !isMe && <p style={{ color: t3, fontSize: 10, marginBottom: 4, fontWeight: 600, paddingLeft: 2 }}>Dr. {selChat.name}</p>}
+                                {groupTop && !isMe && (
+                                  <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4, paddingLeft: 2 }}>
+                                    <span style={{ color: "var(--t2)", fontSize: 11, fontWeight: 700 }}>{peerIsPatient ? selChat.name : `Dr. ${selChat.name}`}</span>
+                                    <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 99, letterSpacing: ".03em", textTransform: "uppercase", background: peerIsPatient ? "rgba(6,182,212,.13)" : "rgba(37,99,235,.13)", color: peerIsPatient ? "#0e7490" : "#2563eb" }}>{peerIsPatient ? "Patient" : "Doctor"}</span>
+                                  </div>
+                                )}
                                 {isLegacyRef && legacyCard && (
                                   <div style={{ marginBottom: 6, width: "100%", background: "var(--s1)", border: `1.5px solid rgba(14,116,144,.25)`, borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(14,116,144,.08)" }}>
                                     <div style={{ padding: "7px 12px", background: "rgba(14,116,144,.08)", borderBottom: "1px solid rgba(14,116,144,.15)", display: "flex", alignItems: "center", gap: 6 }}>
@@ -1662,7 +1770,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                         <div style={{ width: isMob ? 36 : 40, height: isMob ? 36 : 40, borderRadius: 12, background: "var(--pha-pd)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Pill size={isMob ? 16 : 18} color={PhAC} /></div>
                         <div className="min-w-0 flex-1">
                           <p className="truncate" style={{ color: t1, fontSize: isMob ? 13 : 14, fontWeight: 600 }} title={patientNames[rx.patient_id] || "Patient"}>{patientNames[rx.patient_id] || "Patient"}</p>
-                          <p className="line-clamp-2 break-words" style={{ color: t3, fontSize: 12 }}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status} · {new Date(rx.created_at).toLocaleDateString()}</p>
+                          <p className="line-clamp-2 break-words" style={{ color: t3, fontSize: 12 }}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status}{rx.review_status === "pending_review" ? " · Safety review" : ""}{rx.review_status === "rejected" ? " · Rejected" : ""} · {new Date(rx.created_at).toLocaleDateString()}</p>
                         </div>
                         <ArrowRight size={14} color={t3} className="mt-0.5 shrink-0" />
                       </motion.div>
@@ -1680,12 +1788,62 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                       {}
+                      {selRx.review_status === "pending_review" && (
+                        <div className="card w-full min-w-0" style={{ padding: isMob ? 14 : 16, border: "1px solid rgba(245,158,11,.4)", background: "rgba(245,158,11,.07)" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                            <AlertTriangle size={16} color="var(--am)" />
+                            <h4 style={{ margin: 0, color: t1, fontSize: 13, fontWeight: 700 }}>Medication safety review</h4>
+                          </div>
+                          <p style={{ color: t3, fontSize: 12, lineHeight: 1.5, margin: "0 0 10px" }}>
+                            Confirm dosing, frequency, and duration look safe, or reject with a clear note to the physician.
+                          </p>
+                          {Array.isArray(selRx.safety_review_issues) && selRx.safety_review_issues.length > 0 && (
+                            <ul style={{ margin: "0 0 12px", paddingLeft: 18, color: t1, fontSize: 12, lineHeight: 1.45 }}>
+                              {selRx.safety_review_issues.map((issue, idx) => (
+                                <li key={idx}>{issue}</li>
+                              ))}
+                            </ul>
+                          )}
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                            <button type="button" className="btn-pha" disabled={actionBusy} onClick={() => void approveSafetyReview(selRx)}>
+                              {actionBusy ? <Loader2 size={14} className="auth-spin" /> : "Approve safety"}
+                            </button>
+                          </div>
+                          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: t3, marginBottom: 6 }}>Rejection message to physician</label>
+                          <textarea
+                            className="inp w-full min-w-0"
+                            rows={3}
+                            value={safetyRejectNote}
+                            onChange={(e) => setSafetyRejectNote(e.target.value)}
+                            placeholder="Explain what must change (dose, frequency, duration, etc.)"
+                            style={{ fontSize: 13, marginBottom: 10 }}
+                          />
+                          <button
+                            type="button"
+                            className="bto"
+                            disabled={actionBusy}
+                            onClick={() => void rejectSafetyReviewTarget(selRx)}
+                            style={{ borderColor: "var(--ro)", color: "var(--ro)" }}
+                          >
+                            {actionBusy ? <Loader2 size={14} className="auth-spin" /> : "Reject & notify physician"}
+                          </button>
+                        </div>
+                      )}
+                      {selRx.review_status === "rejected" && selRx.pharmacist_review_note && (
+                        <div className="card w-full min-w-0" style={{ padding: isMob ? 12 : 14, border: "1px solid rgba(185,28,28,.28)", background: "rgba(185,28,28,.06)" }}>
+                          <p style={{ color: t3, fontSize: 11, fontWeight: 700, margin: "0 0 6px" }}>Physician must update this prescription</p>
+                          <p className="break-words" style={{ color: t1, fontSize: 12, lineHeight: 1.55, margin: 0 }}>{selRx.pharmacist_review_note}</p>
+                        </div>
+                      )}
                       <motion.div className="au card w-full min-w-0 overflow-hidden" style={{ padding: isMob ? 14 : 20, display: "flex", flexDirection: isMob ? "column" : "row", alignItems: isMob ? "stretch" : "center", justifyContent: "space-between", flexWrap: "wrap", gap: isMob ? 12 : 14 }}>
                         <div className="flex min-w-0 items-center gap-3 sm:gap-3.5">
                           <div style={{ width: isMob ? 44 : 52, height: isMob ? 44 : 52, borderRadius: 16, background: "var(--pha-pd)", border: "1px solid rgba(124,58,237,.25)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><User size={isMob ? 20 : 24} color={PhAC} /></div>
                           <div className="min-w-0">
                             <h3 className="break-words" style={{ color: t1, fontSize: isMob ? 16 : 18, fontWeight: 700 }}>{patientNames[selRx.patient_id] || "Patient"}</h3>
-                            <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>{PRESCRIPTION_STATUS_LABELS[selRx.status] || selRx.status}</p>
+                            <p style={{ color: t3, fontSize: 12, marginTop: 2 }}>
+                              {PRESCRIPTION_STATUS_LABELS[selRx.status] || selRx.status}
+                              {selRx.review_status && selRx.review_status !== "approved" ? ` · ${PRESCRIPTION_REVIEW_STATUS_LABELS[selRx.review_status] || selRx.review_status}` : ""}
+                            </p>
                           </div>
                         </div>
                         <div className={`flex min-w-0 gap-2 ${isMob ? "w-full flex-col" : "flex-wrap"}`}>
@@ -1694,12 +1852,12 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                               {actionBusy ? <Loader2 size={14} className="auth-spin" /> : "Claim prescription"}
                             </button>
                           )}
-                          {selRx.pharmacist_id && selRx.status === "pending_pharmacist" && (
+                          {selRx.pharmacist_id && selRx.status === "pending_pharmacist" && (!selRx.review_status || selRx.review_status === "approved") && (
                             <button type="button" className={`btn-pha ${isMob ? "w-full justify-center py-2.5" : ""}`} disabled={actionBusy} onClick={() => updateStatus(selRx, "pending_fill")}>
                               {actionBusy ? <Loader2 size={14} className="auth-spin" /> : "Mark as fulfilling"}
                             </button>
                           )}
-                          {(selRx.status === "pending_pharmacist" || selRx.status === "pending_fill") && (
+                          {(selRx.status === "pending_pharmacist" || selRx.status === "pending_fill") && (!selRx.review_status || selRx.review_status === "approved") && (
                             <button type="button" className={`btn-pha ${isMob ? "w-full justify-center py-2.5" : ""}`} disabled={actionBusy} onClick={() => updateStatus(selRx, "ready")} style={{ background: "rgba(5,150,105,.2)", color: "var(--gr)", borderColor: "var(--gr)" }}>
                               {actionBusy ? <Loader2 size={14} className="auth-spin" /> : "Mark ready for pickup"}
                             </button>
@@ -1773,9 +1931,12 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
         <nav className="btabs">
           {[["dashboard", HeartPulse, "Home"], ["refills", ClipboardList, "Refills"], ["prescriptions", Pill, "Rx"], ["messages", MessageSquare, "Msgs"]].map(([id, I, l]) => (
             <button key={id} className={`bt ${page === id ? "pha-on" : ""}`}
-              style={{ color: page === id ? PhAC : undefined }}
+              style={{ color: page === id ? PhAC : undefined, position: "relative" }}
               onClick={() => { setPage(id); setSelRx(null); }}>
               <I size={19} />
+              {id === "refills" && pendingRefillCount > 0 && (
+                <span style={{ position: "absolute", top: 4, right: "calc(50% - 18px)", minWidth: 16, height: 16, borderRadius: 99, background: "var(--ro)", color: "#fff", fontSize: 8, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px" }}>{pendingRefillCount > 9 ? "9+" : pendingRefillCount}</span>
+              )}
               {id === "messages" && totalChatUnread > 0
                 ? <span style={{ position: "relative" }}>{l}<span style={{ position: "absolute", top: -6, right: -10, background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 8, fontWeight: 800, padding: "1px 4px" }}>{totalChatUnread > 99 ? "99+" : totalChatUnread}</span></span>
                 : l}
@@ -1858,6 +2019,7 @@ export default function PharmacistPortal({ user, light, setLight, userName, setD
                 {[["dashboard", "Dashboard", HeartPulse], ["refills", "Refill requests", ClipboardList], ["prescriptions", "Prescriptions", Pill], ["messages", "Messages", MessageSquare]].map(([id, l, I]) => (
                   <div key={id} className={`nl ${page === id ? "pha-on" : ""}`} onClick={() => { setPage(id); setSelRx(null); setMobMenu(false); }}>
                     <I size={15} />{l}
+                    {id === "refills" && pendingRefillCount > 0 && <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{pendingRefillCount > 99 ? "99+" : pendingRefillCount}</span>}
                     {id === "messages" && totalChatUnread > 0 && <span style={{ marginLeft: "auto", background: "var(--ro)", color: "#fff", borderRadius: 99, fontSize: 10, fontWeight: 800, padding: "1px 7px" }}>{totalChatUnread > 99 ? "99+" : totalChatUnread}</span>}
                   </div>
                 ))}

@@ -35,11 +35,12 @@ export async function patientEnterVirtualWaitingRoom({ userId, appt, videoWindow
   });
   if (msgErr) return { error: msgErr };
 
+  const now = new Date().toISOString();
   const { error: upErr } = await supabase
     .from("appointments")
     .update({
       virtual_visit_status: VS.WAITING_FOR_DOCTOR,
-      updated_at: new Date().toISOString(),
+      checked_in_at: now,
     })
     .eq("id", appt.id);
 
@@ -47,8 +48,8 @@ export async function patientEnterVirtualWaitingRoom({ userId, appt, videoWindow
     await supabase.from("notifications").insert({
       user_id: appt.doctor_id,
       type: "general",
-      title: "Patient waiting",
-      body: "Patient checked in and is waiting.",
+      title: "Patient checked in",
+      body: "Patient has checked in and is waiting to be seen.",
       related_id: appt.id,
     });
   }

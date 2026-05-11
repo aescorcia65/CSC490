@@ -1,17 +1,21 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import MarketingLanding from "../components/auth/MarketingLanding";
 import { clearStoredPortalLandingPage } from "../lib/clearStoredPortalLandingPage";
 
 export default function LoginPage() {
-  const { user, userRole, onboardingComplete } = useAuth();
+  const { user, userRole, onboardingComplete, profileLoaded } = useAuth();
   const navigate = useNavigate();
+  const [isMobile] = useState(() => window.innerWidth < 760);
 
   useEffect(() => {
     if (user === undefined) return;
-    if (!user) return;
-    if (userRole == null) return;
+    if (!user) {
+      if (isMobile) navigate("/signin", { replace: true });
+      return;
+    }
+    if (!profileLoaded) return;
     if (!onboardingComplete) {
       navigate("/onboarding", { replace: true });
       return;
@@ -26,10 +30,10 @@ export default function LoginPage() {
       return;
     }
     navigate("/dashboard", { replace: true });
-  }, [user, userRole, onboardingComplete, navigate]);
+  }, [user, userRole, onboardingComplete, profileLoaded, navigate, isMobile]);
 
   if (user && user !== undefined) {
-    if (userRole == null) {
+    if (!profileLoaded) {
       return (
         <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
           <div style={{ width: 52, height: 52, borderRadius: 16, background: "var(--pd)", border: "1px solid rgba(37,99,235,.3)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -41,6 +45,8 @@ export default function LoginPage() {
     }
     return null;
   }
+
+  if (isMobile) return null;
 
   return <MarketingLanding variant="full" />;
 }

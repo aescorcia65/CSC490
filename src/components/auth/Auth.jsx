@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useId, useMemo } from "react";
-import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { useState, useEffect, useLayoutEffect, useRef, useId, useMemo } from "react";
+import { motion, AnimatePresence, useReducedMotion, MotionConfig } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import {
   Mail, RefreshCw, ArrowRight, ArrowLeft, Loader2, Eye, EyeOff, KeyRound,
@@ -451,6 +451,7 @@ export default function Auth({ authMode = "landing" }) {
   const isDedicatedAuthMobile = (isSignupPage || isSigninPage) && isMob;
   const reducedMotionPref = useReducedMotion();
   const reducedMotion = reducedMotionPref === true;
+  console.log("[Auth] isMob=", isMob, "isDedicatedAuthMobile=", isDedicatedAuthMobile, "authMode=", authMode, "innerW=", window.innerWidth);
   const [signupPageVisible, setSignupPageVisible] = useState(
     () => typeof document !== "undefined" && document.visibilityState === "visible",
   );
@@ -485,6 +486,36 @@ export default function Auth({ authMode = "landing" }) {
   const pollRef    = useRef(null);
   const tickRef    = useRef(null);
   const formCardRef = useRef(null);
+  const formStepRef = useRef(null);
+
+  // On mobile dedicated auth, Framer Motion v11 uses WAAPI which sits above
+  // CSS !important in the cascade. Cancel those animations directly so the
+  // form is always fully visible without relying on CSS overrides.
+  useLayoutEffect(() => {
+    if (!isDedicatedAuthMobile) return;
+    const forceVisible = (el) => {
+      if (!el) return;
+      el.getAnimations().forEach(a => a.cancel());
+      el.style.opacity = "1";
+      el.style.transform = "none";
+      el.style.visibility = "visible";
+    };
+    forceVisible(formCardRef.current);
+    forceVisible(formStepRef.current);
+  });
+
+  useEffect(() => {
+    if (!isDedicatedAuthMobile) return;
+    const log = (name, el) => {
+      if (!el) { console.log(`[Diag] ${name}: null`); return; }
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      console.log(`[Diag] ${name}: x=${Math.round(r.x)} y=${Math.round(r.y)} w=${Math.round(r.width)} h=${Math.round(r.height)} opacity=${s.opacity} display=${s.display} visibility=${s.visibility}`);
+    };
+    log("formCard", formCardRef.current);
+    log("formStep", formStepRef.current);
+  });
+
   const scrollPortRef = useRef(null);
   const signupEcgUid = useId().replace(/:/g, "");
   const heroWordMeasureRef = useRef(null);
@@ -658,7 +689,6 @@ export default function Auth({ authMode = "landing" }) {
   const L=loginLight;
   const heroWord = HERO_ROTATING_WORDS[heroWordIdx];
   const heroWordWidth = heroWordWidths[heroWord] || 168;
-
   const rT1 = L?"#0f172a":"#f8fafc";
   const rT2 = L?"#64748b":"#94a3b8";
   const rT3 = L?"#64748b":"#a5b4fc";
@@ -719,6 +749,11 @@ export default function Auth({ authMode = "landing" }) {
     ? "linear-gradient(165deg,#eff6ff 0%,#e0f2fe 42%,#f0f9ff 100%)"
     : "linear-gradient(165deg,#0f172a 0%,#1e3a5f 50%,#020617 100%)";
 
+  // On mobile dedicated auth, use plain divs so Framer Motion's WAAPI
+  // animation engine never touches opacity/transform on these elements.
+  const FormCardEl = isDedicatedAuthMobile ? "div" : motion.div;
+  const FormStepEl = isDedicatedAuthMobile ? "div" : motion.div;
+
   return (
     <div
       ref={scrollPortRef}
@@ -742,15 +777,15 @@ export default function Auth({ authMode = "landing" }) {
       </div>
     ) : null}
     <div style={{
-      minHeight: "100dvh",
-      maxHeight: isSignupPage || isSigninPage ? (isMob ? "none" : "100dvh") : "none",
+      minHeight: isDedicatedAuthMobile ? "auto" : "100dvh",
+      maxHeight: "none",
       display: "flex",
       flexDirection: isMob ? "column" : "row",
       alignItems: isMob ? "stretch" : (isSignupPage || isSigninPage ? "stretch" : "flex-start"),
       width: "100%",
       position: "relative",
       background: pageBg,
-      overflow: isSignupPage || isSigninPage ? (isMob ? "visible" : "hidden") : "visible",
+      overflow: "visible",
       boxSizing: "border-box",
     }}>
       {isSignupPage ? (
@@ -806,7 +841,15 @@ export default function Auth({ authMode = "landing" }) {
       `}</style>
 
       {/* ── Hero ── */}
-      <div style={{flex:1,position:"relative",zIndex:isSignupPage||isSigninPage?1:undefined,overflow:isSignupPage||isSigninPage?"visible":"hidden",display:"flex",alignSelf:isMob?"auto":"stretch"}} id="auth-lp">
+      {/* On mobile dedicated auth pages, collapse hero to just show top branding, no dead space */}
+      <div style={{
+        flex: isDedicatedAuthMobile ? "0 0 auto" : 1,
+        position:"relative",
+        zIndex:isSignupPage||isSigninPage?1:undefined,
+        overflow:isSignupPage||isSigninPage?"visible":"hidden",
+        display: isDedicatedAuthMobile ? "none" : "flex",
+        alignSelf:isMob?"auto":"stretch",
+      }} id="auth-lp">
         <style>{`
           #auth-lp::before{
             content:"";
@@ -1263,23 +1306,23 @@ export default function Auth({ authMode = "landing" }) {
       </div>
 
       {/* ── Form column ── */}
-      <div style={{
+      <div className={isDedicatedAuthMobile ? "auth-mobile-visible" : undefined} style={{
         width:"100%",
         maxWidth: isMob ? "100%" : isTab ? "100%" : (isSignupPage || isSigninPage ? signupCardMaxW : 480),
         flexShrink:0,
         flex: isSignupPage || isSigninPage ? "1 1 0" : undefined,
-        minHeight: isSignupPage || isSigninPage ? 0 : "100dvh",
-        maxHeight: (isSignupPage || isSigninPage) && !isMob ? "100dvh" : undefined,
+        minHeight: isDedicatedAuthMobile ? 0 : (isSignupPage || isSigninPage ? 0 : "100dvh"),
+        maxHeight: (isSignupPage || isSigninPage) && !isMob ? "100dvh" : "none",
         display:"flex",
         flexDirection:"column",
         alignItems:"stretch",
         paddingLeft: isSignupPage || isSigninPage ? (isMob ? 14 : isTab ? 20 : 24) : (isMob ? 18 : isTab ? 28 : 32),
         paddingRight: isSignupPage || isSigninPage ? (isMob ? 14 : isTab ? 20 : 24) : (isMob ? 18 : isTab ? 28 : 32),
-        paddingBottom: isMob ? "max(24px, env(safe-area-inset-bottom))" : 32,
+        paddingBottom: isMob ? "max(32px, env(safe-area-inset-bottom))" : 32,
         position:"relative",
         zIndex: isSignupPage || isSigninPage ? 1 : undefined,
         overflowX: "hidden",
-        overflowY: isSignupPage || isSigninPage ? (isMob ? "visible" : "hidden") : (isMob ? "visible" : "hidden"),
+        overflowY: "visible",
       }}>
         <div aria-hidden style={{
           position:"absolute",width:320,height:320,top:"-60px",right:"-40px",borderRadius:"50%",pointerEvents:"none",
@@ -1296,11 +1339,13 @@ export default function Auth({ authMode = "landing" }) {
           filter:isSignupPage||isSigninPage?"blur(22px)":"blur(44px)",zIndex:0,
         }}/>
 
+        {/* Mobile-only compact logo bar (hero is hidden on mobile dedicated auth) */}
+
         <div style={{
           position:"relative",zIndex:30,flexShrink:0,
           display:"flex",justifyContent:isDedicatedAuthPage?"center":"flex-end",alignItems:"center",gap:10,
           width:"100%",
-          paddingTop:isSignupPage||isSigninPage?"max(26px, calc(12px + env(safe-area-inset-top)))":"max(14px, env(safe-area-inset-top))",
+          paddingTop:isSignupPage||isSigninPage?(isDedicatedAuthMobile?"max(20px, calc(10px + env(safe-area-inset-top)))":"max(26px, calc(12px + env(safe-area-inset-top)))"):"max(14px, env(safe-area-inset-top))",
           paddingBottom:10,
         }}>
           {isDedicatedAuthPage ? (
@@ -1385,11 +1430,14 @@ export default function Auth({ authMode = "landing" }) {
             </p>
           </div>
         ) : (
-        <motion.div
+        <MotionConfig reducedMotion={isDedicatedAuthMobile ? "always" : "never"}>
+        <FormCardEl
           ref={formCardRef}
-          initial={isSignupPage || isSigninPage ? (reducedMotion ? false : { opacity: 0, y: 20 }) : false}
-          animate={isSignupPage || isSigninPage ? { opacity: 1, y: 0 } : undefined}
-          transition={{ duration: 0.55, ease: [0.4, 0, 0.2, 1] }}
+          {...(!isDedicatedAuthMobile && {
+            initial: isSignupPage || isSigninPage ? (reducedMotion ? false : { opacity: 0, y: 20 }) : false,
+            animate: isSignupPage || isSigninPage ? { opacity: 1, y: 0 } : undefined,
+            transition: { duration: 0.55, ease: [0.4, 0, 0.2, 1] },
+          })}
           style={{
           position:"relative",zIndex:2,width:"100%",maxWidth:isSignupPage||isSigninPage?signupCardMaxW:440,
           borderRadius: isSignupPage || isSigninPage ? 14 : (isMob ? 20 : 24),
@@ -1430,7 +1478,7 @@ export default function Auth({ authMode = "landing" }) {
           </div>
           ) : null}
 
-          <AnimatePresence mode="wait">
+          <AnimatePresence mode="wait" initial={false}>
             {step==="verify"&&(
               <motion.div key="verify" initial={{opacity:0,y:12}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-8}} transition={{duration:.2}}>
                 <div style={{width:56,height:56,borderRadius:16,background:"rgba(6,182,212,.12)",display:"flex",alignItems:"center",justifyContent:"center",marginBottom:20}}>
@@ -1504,12 +1552,15 @@ export default function Auth({ authMode = "landing" }) {
             )}
 
             {step==="form"&&(
-              <motion.div
+              <FormStepEl
                 key="form"
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: isSignupPage && tab === "signup" ? 0.42 : 0.2, ease: [0.4, 0, 0.2, 1] }}
+                ref={formStepRef}
+                {...(!isDedicatedAuthMobile && {
+                  initial: { opacity: 0, y: 12 },
+                  animate: { opacity: 1, y: 0 },
+                  exit: { opacity: 0, y: -8 },
+                  transition: { duration: isSignupPage && tab === "signup" ? 0.42 : 0.2, ease: [0.4, 0, 0.2, 1] },
+                })}
               >
                 {isSignupPage ? (
                   <div
@@ -1854,10 +1905,11 @@ export default function Auth({ authMode = "landing" }) {
                     ) : null
                   )}
                 </div>
-              </motion.div>
+              </FormStepEl>
             )}
           </AnimatePresence>
-        </motion.div>
+        </FormCardEl>
+        </MotionConfig>
         )}
         </div>
       </div>
