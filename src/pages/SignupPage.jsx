@@ -2,7 +2,10 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import Auth from "../components/auth/Auth";
+import MobileAuth from "../components/auth/MobileAuth";
 import { clearStoredPortalLandingPage } from "../lib/clearStoredPortalLandingPage";
+
+const isMobileDevice = () => window.innerWidth < 820;
 
 export default function SignupPage() {
   const { user, userRole, onboardingComplete } = useAuth();
@@ -42,5 +45,6 @@ export default function SignupPage() {
     return null;
   }
 
+  if (isMobileDevice()) return <MobileAuth defaultTab="signup" />;
   return <Auth authMode="signup" />;
 }

@@ -1227,7 +1227,7 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
               </button>
             </div>
           </div>
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "4px 6px 6px", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", touchAction: "pan-y" }}>
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "0", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", touchAction: "pan-y" }}>
             {conversationItems
               .filter((item) => item.type === peerTab)
               .map((item) => {
@@ -1616,6 +1616,18 @@ export default function PatientMessagesPage({ userId, senderDisplayName, initial
                             flexDirection: "column",
                           }}
                         >
+                        {!mine && showBubble && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3, paddingLeft: 2 }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: t1 }}>{activePeer?.name || (peerTab === "doctor" ? "Doctor" : "Pharmacist")}</span>
+                            <span style={{
+                              fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 99, letterSpacing: ".03em", textTransform: "uppercase",
+                              background: peerTab === "doctor" ? "rgba(37,99,235,.12)" : "rgba(124,58,237,.12)",
+                              color: peerTab === "doctor" ? "var(--p)" : "#7c3aed",
+                            }}>
+                              {peerTab === "doctor" ? "Doctor" : "Pharmacist"}
+                            </span>
+                          </div>
+                        )}
                         {showBubble && (
                         <div
                           style={{

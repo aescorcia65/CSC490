@@ -46,7 +46,6 @@ export default function HomePage() {
   useEffect(() => {
     if (user === undefined) return;
     if (!user) {
-      if (isMobile) navigate("/signin", { replace: true });
       return;
     }
     if (!profileLoaded) return;
@@ -71,8 +70,6 @@ export default function HomePage() {
     }
     return null;
   }
-
-  if (isMobile) return null;
 
   return <MarketingLanding />;
 }

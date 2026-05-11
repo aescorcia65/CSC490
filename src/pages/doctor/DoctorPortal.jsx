@@ -6,7 +6,7 @@ import {
   CheckCircle2, Pencil, Stethoscope, HeartPulse, MessageSquare, Trash2,
   Search, UserPlus, Volume1, Volume2, AlertTriangle, CheckCheck, FileText, Paperclip, MoreHorizontal, Video,
   PhoneOff,
-  Sparkles, ChevronRight
+  Sparkles, ChevronRight, Settings
 } from "lucide-react";
 import { supabase } from "../../supabase";
 import { ensurePortalAudioContext, playPortalNotificationSound } from "../../lib/portalWebAudio";
@@ -32,7 +32,52 @@ import NicknameModal from "../../components/modals/NicknameModal";
 import PrescribeModal from "../../components/modals/PrescribeModal";
 import RescheduleRequestRow from "../../components/appointments/RescheduleRequestRow";
 const DOCTOR_PAGE_STORAGE_KEY="mt_doctor_last_page";
-const DOCTOR_ALLOWED_PAGES=new Set(["dashboard","patients","messages","availability","virtual"]);
+const DOCTOR_ALLOWED_PAGES=new Set(["dashboard","patients","messages","availability","virtual","settings"]);
+
+function VitalField({label,value,placeholder,unit,onChange}){
+  return (
+    <div className="min-w-0">
+      <label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:"var(--t3)",marginBottom:5}}>{label}</label>
+      <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+        <input className="inp min-w-0 flex-1" value={value} placeholder={placeholder} onChange={onChange} style={{borderRadius:11,fontSize:16,padding:"9px 12px"}}/>
+        {unit&&<span style={{color:"var(--t3)",fontSize:12,flexShrink:0}}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
+function DoctorNameField({currentName,onSave,userId,DocAC}){
+  const [val,setVal]=useState(currentName||"");
+  const [busy,setBusy]=useState(false);
+  const [saved,setSaved]=useState(false);
+  async function save(){
+    const n=val.trim();
+    if(!n)return;
+    setBusy(true);
+    try{
+      const parts=n.split(" ");
+      const first=parts[0];
+      const last=parts.slice(1).join(" ")||null;
+      if(userId){
+        await supabase.from("profiles").update({first_name:first,last_name:last,updated_at:new Date().toISOString()}).eq("id",userId);
+      }
+      onSave(n);
+      setSaved(true);
+      setTimeout(()=>setSaved(false),2500);
+    }catch(e){
+      console.error("Save doctor name:",e);
+      onSave(n);
+    }finally{setBusy(false);}
+  }
+  return (
+    <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
+      <input className="inp flex-1 min-w-0" value={val} placeholder="Your display name" onChange={e=>setVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&val.trim()&&save()} style={{borderRadius:11,fontSize:16,padding:"10px 13px",minWidth:180}}/>
+      <motion.button type="button" whileHover={{scale:1.02}} whileTap={{scale:.97}} disabled={!val.trim()||busy||val.trim()===currentName} onClick={save} style={{padding:"10px 20px",borderRadius:11,border:"none",background:DocAC||"var(--doc-p)",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:700,display:"flex",alignItems:"center",gap:7,flexShrink:0}}>
+        {busy?<Loader2 size={13} style={{animation:"spin360 .7s linear infinite"}}/>:saved?<><Check size={13}/> Saved</>:"Save"}
+      </motion.button>
+    </div>
+  );
+}
 
 /** Used when doctor taps "video" from Messages — prefer an in-window virtual booking; otherwise anchor defaults so VIDEO_CALL_STARTED parses. */
 function resolveDoctorPatientInviteWindowMs(allAppointments, patientId, nowMs) {
@@ -2253,15 +2298,6 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       {label}{count!==undefined&&<span style={{background:activeTab===id?"rgba(255,255,255,.3)":"var(--b1)",borderRadius:99,padding:"1px 7px",fontSize:10.5,fontWeight:800}}>{count}</span>}
     </motion.button>
   );
-  const VitalField=({label,value,field,placeholder,unit})=>(
-    <div className="min-w-0">
-      <label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:t3,marginBottom:5}}>{label}</label>
-      <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
-        <input className="inp min-w-0 flex-1" value={value} placeholder={placeholder} onChange={e=>setVitals(v=>({...v,[field]:e.target.value}))} style={{borderRadius:11,fontSize:16,padding:"9px 12px"}}/>
-        {unit&&<span style={{color:t3,fontSize:12,flexShrink:0}}>{unit}</span>}
-      </div>
-    </div>
-  );
   return (
     <div style={{display:"flex",height:"100dvh",overflow:"hidden",background:"var(--bg)"}}>
       {!isMob&&(
@@ -2278,7 +2314,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
             <p style={{color:DocAC,fontSize:26,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>{patients.length}</p>
           </div>
           <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:2}}>
-            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+            {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare],["settings","Settings",Settings]].map(([id,l,I])=>(
               <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);}}>
                 <I size={15}/>{l}
                 {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
@@ -3154,7 +3190,37 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
             </div>
           )}
-          {}
+          {page==="settings"&&(
+            <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(66px + env(safe-area-inset-bottom,0px))":0}}>
+              <div className="w-full min-w-0 max-w-[600px] mx-auto" style={{padding:isMob?"16px 14px 56px":"32px 22px 48px"}}>
+                <motion.div className="au" style={{marginBottom:isMob?18:24}}>
+                  <h2 className="text-[22px] leading-tight sm:text-[26px]" style={{color:t1,fontFamily:"'Playfair Display',serif",fontStyle:"italic",fontWeight:700,margin:0}}>Settings</h2>
+                  <p style={{color:t3,fontSize:13,marginTop:4}}>Manage your profile and preferences.</p>
+                </motion.div>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"16px":"22px 24px",marginBottom:16}}>
+                  <h4 style={{color:t1,fontSize:13,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",marginBottom:16,display:"flex",alignItems:"center",gap:8}}><User size={14} color={DocAC}/> Profile</h4>
+                  <label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:t3,marginBottom:6}}>Display name</label>
+                  <p style={{color:t3,fontSize:12,margin:"0 0 10px"}}>This is how your name appears to patients and throughout the portal.</p>
+                  <DoctorNameField currentName={name} onSave={saveName} userId={user?.id} DocAC={DocAC}/>
+                </motion.div>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{delay:.05}} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"16px":"22px 24px",marginBottom:16}}>
+                  <h4 style={{color:t1,fontSize:13,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",marginBottom:16,display:"flex",alignItems:"center",gap:8}}>{light?<Sun size={14} color="var(--am)"/>:<Moon size={14}/>} Appearance</h4>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <div>
+                      <p style={{color:t1,fontSize:14,fontWeight:600,margin:0}}>{light?"Light mode":"Dark mode"}</p>
+                      <p style={{color:t3,fontSize:12,margin:"3px 0 0"}}>Choose your preferred theme.</p>
+                    </div>
+                    <div className={`sw ${!light?"on":""}`} onClick={()=>setLight(!light)}/>
+                  </div>
+                </motion.div>
+                <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{delay:.1}} style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"16px":"22px 24px"}}>
+                  <h4 style={{color:t1,fontSize:13,fontWeight:800,letterSpacing:".06em",textTransform:"uppercase",marginBottom:16,display:"flex",alignItems:"center",gap:8}}><LogOut size={14} color="var(--ro)"/> Account</h4>
+                  <p style={{color:t3,fontSize:12,margin:"0 0 14px"}}>{user?.email}</p>
+                  <button onClick={handleSignOut} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 18px",borderRadius:11,border:"1px solid rgba(220,38,38,.25)",background:"rgba(220,38,38,.06)",cursor:"pointer",color:"var(--ro)",fontFamily:"inherit",fontSize:13,fontWeight:600}} onMouseEnter={e=>e.currentTarget.style.background="rgba(220,38,38,.12)"} onMouseLeave={e=>e.currentTarget.style.background="rgba(220,38,38,.06)"}><LogOut size={14}/> Sign Out</button>
+                </motion.div>
+              </div>
+            </div>
+          )}
           {page==="patients"&&(
             <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch",paddingBottom:isMob?"calc(56px + env(safe-area-inset-bottom,0px))":0}}>
             <div className="w-full min-w-0 max-w-[1020px] mx-auto" style={{padding:isMob?"16px 14px":"32px 22px 48px"}}>
@@ -3292,11 +3358,11 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
                         <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} className="w-full min-w-0 overflow-hidden" style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:18,padding:isMob?"14px 14px":"22px 24px"}}>
                           <h4 style={{color:t1,fontSize:14,fontWeight:700,marginBottom:isMob?14:20}}>Record Vitals</h4>
                           <div style={{display:"grid",gridTemplateColumns:isMob?"1fr":"repeat(3, minmax(0, 1fr))",gap:isMob?12:14,marginBottom:18}}>
-                            <VitalField label="Blood Pressure" field="bp" value={vitals.bp} placeholder="120/80" unit="mmHg"/>
-                            <VitalField label="Heart Rate" field="hr" value={vitals.hr} placeholder="72" unit="bpm"/>
-                            <VitalField label="Temperature" field="temp" value={vitals.temp} placeholder="98.6" unit="°F"/>
-                            <VitalField label="Weight" field="weight" value={vitals.weight} placeholder="165" unit="lbs"/>
-                            <VitalField label="O2 Saturation" field="o2" value={vitals.o2} placeholder="98" unit="%"/>
+                            <VitalField label="Blood Pressure" value={vitals.bp} placeholder="120/80" unit="mmHg" onChange={e=>setVitals(v=>({...v,bp:e.target.value}))}/>
+                            <VitalField label="Heart Rate" value={vitals.hr} placeholder="72" unit="bpm" onChange={e=>setVitals(v=>({...v,hr:e.target.value}))}/>
+                            <VitalField label="Temperature" value={vitals.temp} placeholder="98.6" unit="°F" onChange={e=>setVitals(v=>({...v,temp:e.target.value}))}/>
+                            <VitalField label="Weight" value={vitals.weight} placeholder="165" unit="lbs" onChange={e=>setVitals(v=>({...v,weight:e.target.value}))}/>
+                            <VitalField label="O2 Saturation" value={vitals.o2} placeholder="98" unit="%" onChange={e=>setVitals(v=>({...v,o2:e.target.value}))}/>
                           </div>
                           <div style={{marginBottom:18}}><label style={{display:"block",fontSize:10,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",color:t3,marginBottom:5}}>Visit Notes</label><textarea className="inp w-full min-w-0" rows={isMob?4:3} value={vitals.notes} onChange={e=>setVitals(v=>({...v,notes:e.target.value}))} placeholder="Notes from this visit..." style={{borderRadius:13,fontSize:16}}/></div>
                           <AnimatePresence>{vitalsSaved&&<div style={{marginBottom:12}}><OkBanner msg="Vitals saved."/></div>}</AnimatePresence>
@@ -3715,7 +3781,7 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
               </div>
               <div style={{height:1,background:"var(--b0)",margin:"0 12px 8px"}}/>
               <nav style={{flex:1,padding:"0 7px",display:"flex",flexDirection:"column",gap:1}}>
-                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare]].map(([id,l,I])=>(
+                {[["dashboard","Dashboard",HeartPulse],["availability","Availability",Calendar],["virtual","Appointments",Video],["patients","Patients",User],["messages","Messages",MessageSquare],["settings","Settings",Settings]].map(([id,l,I])=>(
                   <div key={id} className={`nl ${page===id?"doc-on":""}`} onClick={()=>{setPage(id);setSelPat(null);setMobMenu(false);}}>
                     <I size={15}/>{l}
                     {id==="availability"&&availabilitySlotCount>0&&<span style={{marginLeft:"auto",background:DocAC,color:"#fff",borderRadius:99,fontSize:10,fontWeight:700,padding:"1px 7px"}}>{availabilitySlotCount}</span>}
