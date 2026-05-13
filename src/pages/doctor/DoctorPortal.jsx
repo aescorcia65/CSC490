@@ -601,6 +601,16 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       .subscribe();
     return ()=>{ supabase.removeChannel(vvrCh); };
   },[user?.id]);
+  // Poll allAppointments every 7 s so the doctor sees patient bookings and check-ins
+  // even when a realtime event is missed (no polling existed before — bugs 2).
+  useEffect(()=>{
+    if(!user?.id) return;
+    const poll=setInterval(async()=>{
+      const{data}=await supabase.from("appointments").select("id,patient_id,date,time,type,status,notes,reschedule_request,virtual_visit_status,checked_in_at").eq("doctor_id",user.id).neq("status","cancelled").order("date",{ascending:true});
+      if(data) setAllAppointments(data);
+    },7000);
+    return ()=>clearInterval(poll);
+  },[user?.id]);
   useEffect(()=>{
     if(!user?.id) return;
     const channels=[];
@@ -1806,7 +1816,8 @@ export default function DoctorPortal({ user, light, setLight, userName, setDispl
       const clean=parseDocBookingAvailability(bookingAvailability);
       // Prune past slots before saving so patients never see expired times
       const nowSaveMs=Date.now();
-      const todaySave=new Date(nowSaveMs).toISOString().slice(0,10);
+      const _d=new Date(nowSaveMs);
+      const todaySave=`${_d.getFullYear()}-${String(_d.getMonth()+1).padStart(2,"0")}-${String(_d.getDate()).padStart(2,"0")}`;
       const prunedSlots=Object.entries(clean.slots||{}).reduce((acc,[date,times])=>{
         if(date<todaySave) return acc;
         let kept=times;
