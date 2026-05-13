@@ -317,7 +317,7 @@ export default function MarketingLanding({ variant = "full" }) {
             : "max(6px, env(safe-area-inset-top, 0px)) 22px 26px",
         }}
       >
-        <MarketingSiteHeader marginBottom={isMob ? 8 : 6} marketingScroll />
+        <MarketingSiteHeader marginBottom={isMob ? 16 : 14} marketingScroll />
 
         <section
           id="top"
@@ -381,7 +381,7 @@ export default function MarketingLanding({ variant = "full" }) {
                   />
                 </div>
 
-              <h1 style={{ flex: 1, minWidth: 0, margin: "0 0 8px", color: T1, fontSize: isMob ? 38 : 45, lineHeight: 1.08, letterSpacing: "-.62px", fontWeight: 800, position: "relative" }}>
+              <h1 style={{ flex: 1, minWidth: 0, margin: "0 0 8px", color: T1, fontSize: isMob ? 36 : isTab ? 41 : 45, lineHeight: 1.08, letterSpacing: "-.62px", fontWeight: 800, position: "relative" }}>
                 <span
                   ref={heroWordMeasureRef}
                   aria-hidden
@@ -390,7 +390,7 @@ export default function MarketingLanding({ variant = "full" }) {
                     visibility: "hidden",
                     whiteSpace: "nowrap",
                     fontWeight: 800,
-                    fontSize: isMob ? 38 : 45,
+                    fontSize: isMob ? 36 : isTab ? 41 : 45,
                     lineHeight: 1.08,
                     letterSpacing: "-.62px",
                     pointerEvents: "none",
@@ -451,8 +451,8 @@ export default function MarketingLanding({ variant = "full" }) {
               </p>
 
               <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
-                <button type="button" onClick={() => navigate("/signup")} style={{ border: "none", borderRadius: 12, padding: "11px 18px", background: gradBtn, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer", boxShadow: "0 10px 24px rgba(37,99,235,.3)", display: "inline-flex", alignItems: "center", gap: 8 }}>Get Started <ArrowRight size={17} strokeWidth={2.5} aria-hidden /></button>
-                <button type="button" onClick={learnMore} style={{ border: `1px solid ${B1}`, borderRadius: 12, padding: "11px 16px", background: light ? "#fff" : "rgba(15,23,42,.7)", color: T1, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>Learn More</button>
+                <button type="button" onClick={() => navigate("/signup")} style={{ border: "none", borderRadius: 12, padding: "12px 18px", background: gradBtn, color: "#fff", fontFamily: font, fontWeight: 700, fontSize: 14, cursor: "pointer", boxShadow: "0 10px 24px rgba(37,99,235,.3)", display: "inline-flex", alignItems: "center", gap: 8 }}>Get Started <ArrowRight size={17} strokeWidth={2.5} aria-hidden /></button>
+                <button type="button" onClick={learnMore} style={{ border: `1px solid ${B1}`, borderRadius: 12, padding: "12px 16px", background: light ? "#fff" : "rgba(15,23,42,.7)", color: T1, fontFamily: font, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>Learn More</button>
               </div>
 
               {showFeatures ? (
@@ -699,7 +699,7 @@ export default function MarketingLanding({ variant = "full" }) {
         {showFeatures ? (
         <div
           style={{
-            marginTop: 16,
+            marginTop: isMob ? 20 : 28,
             borderRadius: 16,
             background: light ? "linear-gradient(180deg,#f8fbff 0%,#eef6ff 100%)" : "linear-gradient(180deg,#071427 0%,#0b1b32 100%)",
             border: `1px solid ${B1}`,
@@ -709,7 +709,7 @@ export default function MarketingLanding({ variant = "full" }) {
         >
           <section id="about" style={{ maxWidth: 1120, margin: "0 auto", padding: isMob ? "40px 16px 44px" : "52px 24px 60px" }}>
             <h2 style={{ margin: "0 0 10px", fontSize: isMob ? 28 : 34, color: T1, letterSpacing: "-.5px" }}>Guided Health Workflow</h2>
-            <p style={{ margin: "0 0 22px", color: T2, lineHeight: 1.65, maxWidth: 760 }}></p>
+
 
             <div
               style={{

@@ -6,7 +6,7 @@ import MarketingLanding from "../components/auth/MarketingLanding";
 const authedLoading = (
   <div
     style={{
-      minHeight: "100vh",
+      minHeight: "100dvh",
       background: "var(--bg)",
       display: "flex",
       alignItems: "center",

@@ -1,13 +1,14 @@
+# MedTrack (CSC 490)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+MedTrack is a medication adherence and care-coordination web app. Patients manage daily schedules, log doses, see analytics, and use light-weight health tools; doctors and pharmacists use separate portals tied to the same Supabase backend (prescriptions, appointments, messaging). The stack is React (Vite), Supabase (auth, Postgres, realtime), Tailwind for layout utilities, and Capacitor for optional iOS/Android builds.
 
-Currently, two official plugins are available:
+**Production:** [https://csc-490.vercel.app](https://csc-490.vercel.app)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Local development
 
+```bash
+npm install
+npm run dev
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Use `npm run build` before shipping changes. Environment variables for the client are documented in the project (e.g. `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY`). See `AGENTS.md` for repository conventions and architecture notes.
