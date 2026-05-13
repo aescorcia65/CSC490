@@ -299,43 +299,39 @@ export default function AppointmentsPage({ userId, onNavigateTab }) {
 
     const ch = supabase
       .channel(`appts-full-${userId}`)
-      // No server-side filter — without REPLICA IDENTITY FULL, column filters on UPDATE
-      // events are silently dropped. We filter by patient_id client-side instead.
-      .on("postgres_changes", { event: "*", schema: "public", table: "appointments" }, (payload) => {
-        if (payload.eventType === "INSERT" && payload.new) {
-          const row = payload.new;
-          if (row.patient_id !== userId) return;
-          setAllAppts((prev) => {
-            if (prev.some((a) => a.id === row.id)) return prev;
-            return [...prev, row].sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
-          });
-          // Show a toast only when: initial load is done AND the patient didn't book this themselves.
-          if (initialLoadDoneRef.current && !selfBookedIdsRef.current.has(row.id)) {
-            const dateStr = row.date ? new Date(row.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
-            const timeStr = row.time ? format12hFromTime(row.time) : "";
-            const label = [dateStr, timeStr].filter(Boolean).join(" at ");
-            setApptToast(label ? `New appointment scheduled: ${label}` : "Your doctor has scheduled a new appointment for you.");
-          }
-          scheduleAppointmentsFetch();
-          return;
+      // INSERT uses a server-side patient_id filter — reliable even without REPLICA IDENTITY FULL.
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "appointments", filter: `patient_id=eq.${userId}` }, (payload) => {
+        if (!payload.new) return;
+        const row = payload.new;
+        setAllAppts((prev) => {
+          if (prev.some((a) => a.id === row.id)) return prev;
+          return [...prev, row].sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
+        });
+        // Show a toast only when: initial load is done AND the patient didn't book this themselves.
+        if (initialLoadDoneRef.current && !selfBookedIdsRef.current.has(row.id)) {
+          const dateStr = row.date ? new Date(row.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+          const timeStr = row.time ? format12hFromTime(row.time) : "";
+          const label = [dateStr, timeStr].filter(Boolean).join(" at ");
+          setApptToast(label ? `New appointment scheduled: ${label}` : "Your doctor has scheduled a new appointment for you.");
         }
-        if (payload.eventType === "UPDATE" && payload.new?.id) {
-          const row = payload.new;
-          // Only process rows that belong to this patient (client-side guard)
-          setAllAppts((prev) => {
-            const exists = prev.some((a) => a.id === row.id);
-            if (!exists && row.patient_id !== userId) return prev;
-            const next = exists ? prev.map((a) => (a.id === row.id ? { ...a, ...row } : a)) : [...prev, row];
-            return next.sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
-          });
-          scheduleAppointmentsFetch();
-          return;
-        }
-        if (payload.eventType === "DELETE" && payload.old?.id) {
-          setAllAppts((prev) => prev.filter((a) => a.id !== payload.old.id));
-          scheduleAppointmentsFetch();
-          return;
-        }
+        scheduleAppointmentsFetch();
+      })
+      // UPDATE/DELETE — no server-side filter (column filters on UPDATE are unreliable without
+      // REPLICA IDENTITY FULL). Filter by patient_id client-side instead.
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "appointments" }, (payload) => {
+        if (!payload.new?.id) return;
+        const row = payload.new;
+        setAllAppts((prev) => {
+          const exists = prev.some((a) => a.id === row.id);
+          if (!exists && row.patient_id !== userId) return prev;
+          const next = exists ? prev.map((a) => (a.id === row.id ? { ...a, ...row } : a)) : [...prev, row];
+          return next.sort((a, b) => `${a.date}T${normTime(a.time)}`.localeCompare(`${b.date}T${normTime(b.time)}`));
+        });
+        scheduleAppointmentsFetch();
+      })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "appointments" }, (payload) => {
+        if (!payload.old?.id) return;
+        setAllAppts((prev) => prev.filter((a) => a.id !== payload.old.id));
         scheduleAppointmentsFetch();
       })
       .subscribe();
