@@ -19,7 +19,8 @@ function inferNavigateFromGeneralNotification(n) {
   if (/message|inbox|chat|joined the video visit|join video/.test(blob)) return { page: "messages" };
   if (/appointment|reschedule|scheduled|approved|denied/.test(blob)) return { page: "appointments" };
   if (/visit/.test(blob)) return { page: "messages" };
-  if (/prescription|refill|pharmacy|medication|dose|pill/.test(blob)) return { page: "medications" };
+  if (/deliver|shipped|out for delivery|tracking/.test(blob)) return { page: "medications" };
+  if (/prescription|refill|pharmacy|medication|dose|pill|pickup/.test(blob)) return { page: "medications" };
   return { page: "dashboard" };
 }
 

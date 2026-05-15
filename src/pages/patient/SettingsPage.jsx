@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Moon, Sun, LogOut, ChevronDown, Loader2, Pencil, Mail, Trash2, UserCircle2, BellRing, ShieldCheck, HeartPulse, Siren, Stethoscope, MessageSquare, ArrowRight, Volume2 } from "lucide-react";
+import { Moon, Sun, LogOut, ChevronDown, Loader2, Pencil, Mail, Trash2, UserCircle2, BellRing, ShieldCheck, HeartPulse, Siren, Stethoscope, MessageSquare, ArrowRight, Volume2, Truck } from "lucide-react";
 import { supabase } from "../../supabase";
 import { signOutClearPresence } from "../../lib/signOutClearPresence";
 import { useIsMobile } from "../../hooks/useIsMobile";
@@ -10,6 +10,85 @@ import HealthProfile from "./settings/HealthProfile";
 import EmergencyContact from "./settings/EmergencyContact";
 import PrimaryCareSection from "./settings/PrimaryCareSection";
 import SoundNotificationsSection from "./settings/SoundNotificationsSection";
+
+function DeliveryPreferences({ userId, t1, t2, t3 }) {
+  const [method, setMethod] = useState("pickup");
+  const [address, setAddress] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!userId) return;
+    supabase.from("patient_delivery_preferences").select("preferred_method,delivery_address").eq("patient_id", userId).maybeSingle()
+      .then(({ data }) => {
+        if (data) {
+          setMethod(data.preferred_method || "pickup");
+          setAddress(data.delivery_address || "");
+        }
+        setLoaded(true);
+      });
+  }, [userId]);
+
+  async function save() {
+    if (!userId || busy) return;
+    setBusy(true);
+    try {
+      const { error } = await supabase.from("patient_delivery_preferences").upsert({
+        patient_id: userId,
+        preferred_method: method,
+        delivery_address: method === "delivery" ? address.trim() : null,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "patient_id" });
+      if (error) throw error;
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      console.error("saveDeliveryPrefs:", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!loaded) return <div style={{ padding: "16px 18px", borderTop: "1px solid var(--b0)" }}><Loader2 size={16} style={{ animation: "spin360 .7s linear infinite", color: "var(--p)" }} /></div>;
+
+  return (
+    <div style={{ padding: "16px 18px 20px", borderTop: "1px solid var(--b0)" }}>
+      <p style={{ color: t3, fontSize: 12, lineHeight: 1.55, margin: "0 0 14px" }}>Choose how you&apos;d like to receive your refill orders. This will be the default for new refill requests.</p>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 16 }}>
+        {[
+          { id: "pickup", label: "Pharmacy pickup", desc: "Pick up at your pharmacy" },
+          { id: "delivery", label: "Home delivery", desc: "Delivered to your address" },
+        ].map((opt) => (
+          <button key={opt.id} type="button" onClick={() => setMethod(opt.id)} style={{ padding: 14, borderRadius: 13, cursor: "pointer", fontFamily: "inherit", transition: "all .18s", border: `1.5px solid ${method === opt.id ? "#0e7490" : "var(--b1)"}`, background: method === opt.id ? "rgba(14,116,144,.08)" : "var(--s2)", display: "flex", flexDirection: "column", alignItems: "center", gap: 6, textAlign: "center" }}>
+            <span style={{ color: method === opt.id ? "#0e7490" : t1, fontSize: 13, fontWeight: 600 }}>{opt.label}</span>
+            <span style={{ color: t3, fontSize: 11 }}>{opt.desc}</span>
+          </button>
+        ))}
+      </div>
+      <AnimatePresence>
+        {method === "delivery" && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} style={{ overflow: "hidden" }}>
+            <label className="lbl" style={{ marginBottom: 7 }}>Delivery address</label>
+            <textarea className="inp" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="123 Main St, Apt 4B, City, State ZIP" rows={3} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", minHeight: 72, marginBottom: 14, fontSize: 13 }} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {saved && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} style={{ overflow: "hidden", marginBottom: 10 }}>
+            <div style={{ padding: "8px 14px", borderRadius: 10, background: "rgba(16,185,129,.08)", border: "1px solid rgba(16,185,129,.2)" }}>
+              <p style={{ color: "var(--gr)", fontSize: 12, fontWeight: 600, margin: 0 }}>Delivery preferences saved.</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <button className="btn" style={{ width: "100%", padding: "11px" }} onClick={save} disabled={busy || (method === "delivery" && !address.trim())}>
+        {busy ? <Loader2 size={14} style={{ animation: "spin360 .7s linear infinite" }} /> : "Save Preferences"}
+      </button>
+    </div>
+  );
+}
 
 export default function SettingsPage({ light, setLight, user, displayName, onEditName, meds, onFeedback, expandSectionKey }) {
   const isMob = useIsMobile();
@@ -133,6 +212,7 @@ export default function SettingsPage({ light, setLight, user, displayName, onEdi
     },
     { key: "health", I: HeartPulse, label: "Health Profile", sub: "Personal health information and medical history", color: "rgba(239,68,68,.10)", iconColor: "var(--ro)", content: <HealthProfile userId={user?.id} t1={t1} t2={t2} t3={t3} /> },
     { key: "emergency", I: Siren, label: "Emergency Contact", sub: "Caregiver and emergency access", color: "rgba(245,158,11,.10)", iconColor: "var(--am)", content: <EmergencyContact userId={user?.id} t1={t1} t2={t2} t3={t3} /> },
+    { key: "delivery", I: Truck, label: "Delivery Preferences", sub: "Choose pickup or home delivery for refills", color: "rgba(14,116,144,.10)", iconColor: "#0e7490", content: <DeliveryPreferences userId={user?.id} t1={t1} t2={t2} t3={t3} /> },
     { key: "primarycare", I: Stethoscope, label: "Care team", sub: "Primary doctor, specialists, and pharmacist", color: "rgba(37,99,235,.12)", iconColor: "var(--p)", content: <PrimaryCareSection userId={user?.id} t1={t1} t2={t2} t3={t3} /> },
   ];
 

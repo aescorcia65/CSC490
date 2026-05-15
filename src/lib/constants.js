@@ -19,9 +19,11 @@ export const TIPS = [
 export const PRESCRIPTION_STATUS_LABELS = {
   pending_pharmacist: "With pharmacist",
   pending_fill: "Being filled",
-  ready: "Ready for pickup",
+  ready: "Ready",
   filled: "Filled",
   picked_up: "Picked up",
+  shipped: "Shipped",
+  delivered: "Delivered",
 };
 
 /** Pharmacist safety review gate (column `review_status` on prescriptions). */

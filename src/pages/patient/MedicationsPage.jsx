@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Pill, Pencil, Trash2, AlertCircle, Loader2, Package, History, Info, X, AlertTriangle } from "lucide-react";
+import { Pill, Pencil, Trash2, AlertCircle, Loader2, Package, History, Info, X, AlertTriangle, Truck, MapPin, Clock } from "lucide-react";
 import { COLS, PRESCRIPTION_STATUS_LABELS } from "../../lib/constants";
-import { REFILL_STATUS_LABEL, refillStatusChipStyle } from "../../lib/refillRequestConstants";
+import { REFILL_STATUS_LABEL, refillStatusChipStyle, DELIVERY_METHOD_LABEL, DELIVERY_STATUS_LABEL, deliveryStatusChipStyle } from "../../lib/refillRequestConstants";
 import { expandDoseTimesForToday, groupMedicationsByDayPeriod, timeHMToMins } from "../../lib/medScheduleGroups";
 import { to12h, to12hNoSeconds, formatOverdueDurationMinutes } from "../../lib/utils";
 import { useIsMobile } from "../../hooks/useIsMobile";
@@ -269,6 +269,10 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
   const [refillBusy, setRefillBusy] = useState(null);
   const [refillNotice, setRefillNotice] = useState(null);
   const [refillRequests, setRefillRequests] = useState([]);
+  const [deliveryPrefs, setDeliveryPrefs] = useState({ method: "pickup", address: "" });
+  const [refillModal, setRefillModal] = useState(null);
+  const [refillModalMethod, setRefillModalMethod] = useState("pickup");
+  const [refillModalAddress, setRefillModalAddress] = useState("");
   const [history, setHistory] = useState([]);
   const [histLoading, setHistLoading] = useState(false);
   const [detailMed, setDetailMed] = useState(null);
@@ -294,14 +298,18 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
     setRxLoading(true);
     (async () => {
       try {
-        const [rxRes, profRes] = await Promise.all([
+        const [rxRes, profRes, delPrefRes] = await Promise.all([
           supabase.from("prescriptions").select("id,status,created_at,notes,doctor_id,pharmacist_id,review_status,pharmacist_review_note").eq("patient_id", userId).order("created_at", { ascending: false }).limit(20),
           supabase.from("profiles").select("primary_pharmacist_id,first_name,last_name").eq("id", userId).maybeSingle(),
+          supabase.from("patient_delivery_preferences").select("preferred_method,delivery_address").eq("patient_id", userId).maybeSingle(),
         ]);
         setPrescriptions(rxRes.data || []);
         const p = profRes.data;
         setPrimaryPharmacistId(p?.primary_pharmacist_id ?? null);
         setPatientDisplayName([p?.first_name, p?.last_name].filter(Boolean).join(" ") || "Patient");
+        if (delPrefRes.data) {
+          setDeliveryPrefs({ method: delPrefRes.data.preferred_method || "pickup", address: delPrefRes.data.delivery_address || "" });
+        }
       } finally {
         setRxLoading(false);
       }
@@ -336,7 +344,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
     if (!userId) return;
     supabase
       .from("refill_requests")
-      .select("id,prescription_id,status,request_date,pharmacist_note,medication_name")
+      .select("id,prescription_id,status,request_date,pharmacist_note,medication_name,delivery_method,delivery_status,delivery_address,estimated_delivery,delivery_note")
       .eq("patient_id", userId)
       .order("request_date", { ascending: false })
       .limit(80)
@@ -422,10 +430,19 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
     setDrugInfo({ loading: false, data });
   }
 
-  async function requestRefill(rx) {
-    if (!userId || refillBusy) return;
+  function openRefillModal(rx) {
+    setRefillModal(rx);
+    setRefillModalMethod(deliveryPrefs.method);
+    setRefillModalAddress(deliveryPrefs.address);
+  }
+
+  async function submitRefill() {
+    const rx = refillModal;
+    if (!rx || !userId || refillBusy) return;
+    if (refillModalMethod === "delivery" && !refillModalAddress.trim()) return;
     setRefillBusy(rx.id);
     setRefillNotice(null);
+    setRefillModal(null);
     try {
       const { data: fresh } = await supabase
         .from("prescriptions")
@@ -436,7 +453,8 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
       const row = fresh || rx;
       const statusLabel = PRESCRIPTION_STATUS_LABELS[row.status] || row.status;
       const dateStr = new Date(row.created_at).toLocaleDateString();
-      const summary = `Prescription from ${dateStr} — ${statusLabel}${row.notes ? `. Notes: ${row.notes}` : ""}`;
+      const methodLabel = refillModalMethod === "delivery" ? "home delivery" : "pharmacy pickup";
+      const summary = `Prescription from ${dateStr} — ${statusLabel} (${methodLabel})${row.notes ? `. Notes: ${row.notes}` : ""}`;
       const pharmId = row.pharmacist_id || primaryPharmacistId;
 
       const notifRows = [
@@ -448,6 +466,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
             ? `We notified your care team. ${summary}`
             : `${summary}. Add your pharmacy under Settings → Care team so your pharmacist can see refill requests.`,
           related_id: row.id,
+          delivery_method: refillModalMethod,
         },
       ];
       if (pharmId) {
@@ -455,8 +474,9 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
           user_id: pharmId,
           type: "refill_upcoming",
           title: "Refill requested",
-          body: `${patientDisplayName} requested a refill. ${summary}`,
+          body: `${patientDisplayName} requested a refill (${methodLabel}). ${summary}`,
           related_id: row.id,
+          delivery_method: refillModalMethod,
         });
       }
       if (row.doctor_id) {
@@ -464,8 +484,9 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
           user_id: row.doctor_id,
           type: "refill_upcoming",
           title: "Patient refill request",
-          body: `${patientDisplayName} asked the pharmacy to refill a prescription. ${summary}`,
+          body: `${patientDisplayName} asked the pharmacy to refill a prescription (${methodLabel}). ${summary}`,
           related_id: row.id,
+          delivery_method: refillModalMethod,
         });
       }
 
@@ -497,6 +518,9 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
         last_refill_date: lastRefillDate,
         refill_too_soon: refillTooSoon,
         safety_warning: null,
+        delivery_method: refillModalMethod,
+        delivery_address: refillModalMethod === "delivery" ? refillModalAddress.trim() : null,
+        delivery_status: refillModalMethod === "delivery" ? "preparing" : null,
       });
       if (rrErr) {
         refillTableMissing = refillTableMissing || isRefillRequestsTableMissing(rrErr);
@@ -514,7 +538,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
         refillQueueSaved = true;
         supabase
           .from("refill_requests")
-          .select("id,prescription_id,status,request_date,pharmacist_note,medication_name")
+          .select("id,prescription_id,status,request_date,pharmacist_note,medication_name,delivery_method,delivery_status,delivery_address,estimated_delivery,delivery_note")
           .eq("patient_id", userId)
           .order("request_date", { ascending: false })
           .limit(80)
@@ -528,7 +552,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
         return;
       }
 
-      const threadBody = `Refill requested: ${summary}`;
+      const threadBody = `Refill requested (${methodLabel}): ${summary}`;
       const { error: mErr } = await supabase.from("prescription_messages").insert({
         prescription_id: row.id,
         sender_id: userId,
@@ -702,19 +726,40 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
                         <p style={{ color: t3, fontSize: 11, margin: "4px 0 0" }}>{PRESCRIPTION_STATUS_LABELS[rx.status] || rx.status}</p>
                         {rr && chip && (
                           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
-                            <span
-                              style={{
-                                fontSize: 10,
-                                fontWeight: 700,
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                                background: chip.bg,
-                                border: `1px solid ${chip.border}`,
-                                color: chip.color,
-                              }}
-                            >
-                              Refill: {REFILL_STATUS_LABEL[rr.status] || rr.status}
-                            </span>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: chip.bg, border: `1px solid ${chip.border}`, color: chip.color }}>
+                                Refill: {REFILL_STATUS_LABEL[rr.status] || rr.status}
+                              </span>
+                              {rr.delivery_method && (
+                                <span style={{ fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 999, background: rr.delivery_method === "delivery" ? "rgba(14,116,144,.1)" : "rgba(75,85,99,.08)", border: `1px solid ${rr.delivery_method === "delivery" ? "rgba(14,116,144,.25)" : "rgba(75,85,99,.18)"}`, color: rr.delivery_method === "delivery" ? "#0e7490" : "#4b5563", display: "inline-flex", alignItems: "center", gap: 3 }}>
+                                  {rr.delivery_method === "delivery" ? <><Truck size={9} /> Delivery</> : "Pickup"}
+                                </span>
+                              )}
+                            </div>
+                            {rr.delivery_method === "delivery" && rr.delivery_status && (
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+                                {(() => { const ds = deliveryStatusChipStyle(rr.delivery_status); return (
+                                  <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: ds.bg, border: `1px solid ${ds.border}`, color: ds.color, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                                    <Truck size={9} /> {DELIVERY_STATUS_LABEL[rr.delivery_status] || rr.delivery_status}
+                                  </span>
+                                ); })()}
+                                {rr.estimated_delivery && (
+                                  <span style={{ fontSize: 10, color: t3, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                                    <Clock size={9} /> Est. {new Date(rr.estimated_delivery + "T12:00:00").toLocaleDateString([], { month: "short", day: "numeric" })}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            {rr.delivery_method === "delivery" && rr.delivery_address && (
+                              <p style={{ color: t3, fontSize: 10, margin: 0, lineHeight: 1.4, display: "flex", alignItems: "flex-start", gap: 4 }}>
+                                <MapPin size={9} style={{ flexShrink: 0, marginTop: 2 }} /> {rr.delivery_address}
+                              </p>
+                            )}
+                            {rr.delivery_note && (
+                              <p style={{ color: t3, fontSize: 11, margin: 0, lineHeight: 1.45 }}>
+                                <strong style={{ color: t1 }}>Delivery note:</strong> {rr.delivery_note}
+                              </p>
+                            )}
                             {rr.pharmacist_note && (
                               <p style={{ color: t3, fontSize: 11, margin: 0, lineHeight: 1.45 }}>
                                 <strong style={{ color: t1 }}>Pharmacy:</strong> {rr.pharmacist_note}
@@ -723,7 +768,7 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
                           </div>
                         )}
                       </div>
-                      <button type="button" disabled={!!refillBusy} onClick={() => requestRefill(rx)} style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "var(--p)", color: "#fff", fontSize: 11, fontWeight: 600, cursor: refillBusy ? "wait" : "pointer", flexShrink: 0 }}>
+                      <button type="button" disabled={!!refillBusy} onClick={() => openRefillModal(rx)} style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "var(--p)", color: "#fff", fontSize: 11, fontWeight: 600, cursor: refillBusy ? "wait" : "pointer", flexShrink: 0 }}>
                         {refillBusy === rx.id ? <Loader2 size={12} style={{ animation: "spin360 .7s linear infinite" }} /> : "Request refill"}
                       </button>
                     </div>
@@ -777,6 +822,53 @@ export default function MedicationsPage({ meds, setMeds, onEdit, onDelete, userI
                     {allDoseSlotsLogged(detailMed) ? "Clear today's logs" : detailMed.taken ? "Log next dose" : "Log dose now"}
                   </button>
                   <button type="button" className="bto" onClick={() => { onEdit?.(detailMed); setDetailMed(null); }} style={{ flex: 1, minWidth: 120 }}>Edit medication</button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {refillModal && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setRefillModal(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+            <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 16, opacity: 0 }} onClick={(e) => e.stopPropagation()} style={{ background: "var(--bg)", borderRadius: 20, width: "100%", maxWidth: 420, overflow: "hidden", display: "flex", flexDirection: "column", border: "1px solid var(--b1)" }}>
+              <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--b1)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <h3 style={{ color: t1, fontSize: 16, fontWeight: 700, margin: 0 }}>Request refill</h3>
+                  <p style={{ color: t3, fontSize: 12, margin: "4px 0 0" }}>Choose how you&apos;d like to receive this order.</p>
+                </div>
+                <button type="button" onClick={() => setRefillModal(null)} style={{ width: 32, height: 32, borderRadius: 9, border: "1px solid var(--b1)", background: "var(--s2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}><X size={14} /></button>
+              </div>
+              <div style={{ padding: 18 }}>
+                <p style={{ color: t3, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", margin: "0 0 10px" }}>Fulfillment method</p>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 16 }}>
+                  {[
+                    { id: "pickup", label: "Pickup", desc: "Collect at pharmacy", icon: Package },
+                    { id: "delivery", label: "Delivery", desc: "Ship to your address", icon: Truck },
+                  ].map((opt) => (
+                    <button key={opt.id} type="button" onClick={() => setRefillModalMethod(opt.id)} style={{ padding: 14, borderRadius: 13, cursor: "pointer", fontFamily: "inherit", transition: "all .18s", border: `1.5px solid ${refillModalMethod === opt.id ? "var(--p)" : "var(--b1)"}`, background: refillModalMethod === opt.id ? "var(--pd)" : "var(--s2)", display: "flex", flexDirection: "column", alignItems: "center", gap: 6, textAlign: "center" }}>
+                      <opt.icon size={18} color={refillModalMethod === opt.id ? "var(--p)" : t3} />
+                      <span style={{ color: refillModalMethod === opt.id ? "var(--p)" : t1, fontSize: 13, fontWeight: 600 }}>{opt.label}</span>
+                      <span style={{ color: t3, fontSize: 10 }}>{opt.desc}</span>
+                    </button>
+                  ))}
+                </div>
+                <AnimatePresence>
+                  {refillModalMethod === "delivery" && (
+                    <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} style={{ overflow: "hidden" }}>
+                      <label className="lbl" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
+                        <MapPin size={12} color="var(--p)" /> Delivery address
+                      </label>
+                      <textarea className="inp" value={refillModalAddress} onChange={(e) => setRefillModalAddress(e.target.value)} placeholder="123 Main St, Apt 4B, City, State ZIP" rows={3} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", minHeight: 68, marginBottom: 14, fontSize: 13 }} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className="bto" onClick={() => setRefillModal(null)} style={{ flex: 1 }}>Cancel</button>
+                  <button type="button" className="btn" onClick={submitRefill} disabled={refillModalMethod === "delivery" && !refillModalAddress.trim()} style={{ flex: 1 }}>
+                    Submit request
+                  </button>
                 </div>
               </div>
             </motion.div>

@@ -6,7 +6,7 @@ export function notificationTextBlob(n) {
 export function notificationSuggestsPrescription(n) {
   if (n?.type === "prescription_ready") return true;
   const b = notificationTextBlob(n);
-  return /prescription|pharmacist|pharmacy|claimed|refill|\brx\b|pickup|prior auth|medication|status update|processing|filled|ready for/.test(b);
+  return /prescription|pharmacist|pharmacy|claimed|refill|\brx\b|pickup|prior auth|medication|status update|processing|filled|ready for|deliver|shipped|out for delivery/.test(b);
 }
 
 export function notificationSuggestsChat(n) {
